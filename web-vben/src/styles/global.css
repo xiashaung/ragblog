@@ -1,0 +1,77 @@
+/**
+ * 全局样式 + 明暗主题变量。
+ *
+ * 约定：antd 组件（卡片 / 表格 / 输入框…）的配色由 a-config-provider 的 algorithm 负责；
+ * 这里只维护「自己写的」那些 surface 与文字色，统一走 CSS 变量，切换深色时只改
+ * html[data-theme='dark'] 一组值即可（theme store 负责打这个属性）。
+ * 深色取值对齐 antd darkAlgorithm：layout #141414 / elevated #1f1f1f / 边框 #303030。
+ */
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+
+  --app-bg: #f0f2f5;
+  --app-panel: #fff;
+  --app-panel-2: #f6f7f9;
+  --app-fg: #1f2937;
+  --app-muted: #6b7280;
+  --app-border: #eef0f2;
+  --app-hover: #f0f5ff;
+
+  /* 侧边栏（菜单）：不跟随主题时会变成白底黑菜单或深底白菜单错乱，单独一组变量 */
+  --app-sider-bg: #fff;
+  --app-sider-fg: #4b5563;
+  --app-sider-hover-bg: #f3f4f6;
+  --app-sider-hover-fg: #111827;
+  --app-sider-sub-bg: #f8fafc;
+  --app-sider-active-bg: #2563eb;
+  --app-sider-active-fg: #fff;
+  --app-sider-group-active-fg: #2563eb;
+  --app-sider-brand-bg: #fff;
+  --app-sider-brand-fg: #111827;
+}
+html[data-theme='dark'] {
+  --app-bg: #141414;
+  --app-panel: #1f1f1f;
+  --app-panel-2: #262626;
+  --app-fg: rgba(255, 255, 255, 0.85);
+  --app-muted: rgba(255, 255, 255, 0.55);
+  --app-border: #303030;
+  --app-hover: rgba(22, 119, 255, 0.16);
+
+  --app-sider-bg: #1f1f1f;
+  --app-sider-fg: rgba(255, 255, 255, 0.65);
+  --app-sider-hover-bg: #2a2a2a;
+  --app-sider-hover-fg: #fff;
+  --app-sider-sub-bg: #171717;
+  --app-sider-active-bg: #2563eb;
+  --app-sider-active-fg: #fff;
+  --app-sider-group-active-fg: #fff;
+  --app-sider-brand-bg: #141414;
+  --app-sider-brand-fg: #fff;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+body {
+  background: var(--app-bg);
+  color: var(--app-fg);
+  transition: background-color 0.2s ease;
+}
+.code-block {
+  background: #1e1e1e; color: #d4d4d4; border-radius: 6px;
+  padding: 12px 16px; font-family: 'SF Mono', Monaco, Consolas, monospace;
+  font-size: 13px; white-space: pre-wrap; word-break: break-all;
+  max-height: 400px; overflow: auto;
+}
+.section-title {
+  font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--app-fg);
+}
+.page-card { padding: 20px 24px; }
+
+/* 深色下兜底：命令式 message 浮层若未取到主题 token，也不至于白底刺眼 */
+html[data-theme='dark'] .ant-message-notice-content {
+  background: #2a2a2a;
+  color: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FastAPI 管理控制台</title>
+    <script>
+      // 首屏防闪烁：Vue 挂载前先把 data-theme / color-scheme 打到 <html>，
+      // 判定规则与 src/store/modules/theme.ts 保持一致（未显式选择时跟随系统）。
+      (function () {
+        try {
+          var stored = localStorage.getItem('admin_theme_mode');
+          var dark =
+            stored === 'dark' ||
+            (stored !== 'light' &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches);
+          var root = document.documentElement;
+          root.dataset.theme = dark ? 'dark' : 'light';
+          root.style.colorScheme = dark ? 'dark' : 'light';
+        } catch (e) {
+          /* 无法读 localStorage 时交给 theme store 兜底 */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

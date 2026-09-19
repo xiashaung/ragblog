@@ -1,0 +1,60 @@
+[project]
+name = "app"
+version = "0.1.0"
+description = "A standard FastAPI project"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "email-validator>=2.1",
+    "pydantic-settings>=2.3",
+    "httpx>=0.27",
+    "openai>=1.40",
+    "tenacity>=8.3",
+    "sqlalchemy[asyncio]>=2.0",
+    "aiosqlite>=0.20",
+    "alembic>=1.13",
+    # Postgres 路线：pgvector 列类型 + 驱动（知识库向量检索需要）
+    "pgvector>=0.4",
+    "asyncpg>=0.29",
+    # 智能问数接入外部 MySQL / MariaDB（异步驱动）
+    "aiomysql>=0.2",
+    # 文档上传解析：PDF 文字/图片、Word 正文/内嵌图
+    "pdfminer.six>=20240706",
+    "python-docx>=1.1",
+    "pymupdf>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"

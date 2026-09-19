@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+app.db
+web/node_modules/
+.pnpm-store
+web-vben/node_modules
+# 上传的图片落盘目录（运行时由后端自动创建，不入库）
+/media/
+.idea
