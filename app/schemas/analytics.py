@@ -24,6 +24,8 @@ __all__ = [
 
 
 class AnalyticsColumn(BaseModel):
+    """一列的元信息（自省所得，不是真实数据）。"""
+
     name: str
     type: str
     nullable: bool = True
@@ -31,6 +33,8 @@ class AnalyticsColumn(BaseModel):
 
 
 class AnalyticsTable(BaseModel):
+    """一张表：名字 + 注释 + 列清单，也是喂进 prompt 的最小单位。"""
+
     name: str
     comment: str = ""  # 表注释（如「项目任务表」），选表的关键语义依据
     columns: list[AnalyticsColumn] = Field(default_factory=list)
@@ -55,6 +59,8 @@ class AnalyticsSource(BaseModel):
 
 
 class AnalyticsQueryRequest(BaseModel):
+    """一次问数的入参：问题必填，数据源与后端可选（默认主库）。"""
+
     question: str = Field(
         ...,
         min_length=1,

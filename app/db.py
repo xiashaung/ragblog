@@ -1,8 +1,13 @@
-"""Async database layer.
+"""异步数据库层：主库引擎、会话依赖、以及智能问数的外部数据源引擎。
 
-Defaults to in-project SQLite (``sqlite+aiosqlite:///./app.db``). Postgres
-works via a driver swap: ``postgresql+asyncpg://...``. Call ``init_db`` in
-the app lifespan; FastAPI endpoints inject a session via ``get_db``.
+默认用项目内的 SQLite（``sqlite+aiosqlite:///./app.db``）；换到 Postgres
+只需改驱动串：``postgresql+asyncpg://...``。两条使用路径：
+
+    启动：lifespan 调 ``init_db()`` 建引擎 → ``init_models()`` 建表并补专有 DDL
+    请求：路由用 ``Depends(get_db)`` 注入会话，成功自动 commit、异常回滚
+
+两类引擎别混淆：上面的 ``engine`` 是全应用唯一的主库；下面的
+``_source_engines`` 是「智能问数」可选的外部库，每个数据源一个连接池、懒建带缓存。
 """
 
 from __future__ import annotations
@@ -39,12 +44,12 @@ select format_type(a.atttypid, a.atttypmod)
 
 
 def ensure_pgvector_schema(conn: Connection) -> bool:
-    """Create the pgvector extension + cosine HNSW index (Postgres only).
+    """建 pgvector 扩展 + 余弦 HNSW 索引（仅 Postgres）。
 
-    Called from ``init_models`` (fresh ``create_all`` path) and from the
-    Alembic migration, so neither has to duplicate the DDL. Returns ``False``
-    on non-Postgres dialects. Skips the index while the column is still the
-    legacy ``json`` type - that is what the migration converts.
+    由 ``init_models``（全新 ``create_all`` 路径）和 Alembic 迁移两边同调，
+    DDL 只写这一份。非 Postgres 直接返 ``False``；列还是旧的 ``json`` 类型时
+    跳过建索引（转换由迁移负责）；维度与 ``APP_RAG_VECTOR_DIM`` 不一致时也跳过，
+    只记一条警告——这种情况下旧向量已不可信，需要重建索引而不是盲建。
     """
     if conn.dialect.name != "postgresql":
         return False
@@ -82,12 +87,11 @@ def ensure_pgvector_schema(conn: Connection) -> bool:
 
 
 def ensure_trgm_schema(conn: Connection) -> bool:
-    """Create the pg_trgm extension + a GIN trigram index (Postgres only).
+    """建 pg_trgm 扩展 + 三元组 GIN 索引（仅 Postgres）。
 
-    Backs the lexical leg of hybrid retrieval (``word_similarity`` in
-    ``rag._search_lexical_pg``). Best-effort and idempotent: on a dialect
-    without it, or when the role lacks ``CREATE EXTENSION`` rights, the SAVEPOINT
-    rolls back just this step and hybrid later degrades to vector-only.
+    给混合检索的词法腿加速（``rag._search_lexical_pg`` 里的 word_similarity）。
+    best-effort 且幂等：方言不支持、或当前角色没 ``CREATE EXTENSION`` 权限时，
+    SAVEPOINT 只回滚这一步，其余照常提交，上层会退到纯向量检索。
     """
     if conn.dialect.name != "postgresql":
         return False
@@ -107,13 +111,15 @@ def ensure_trgm_schema(conn: Connection) -> bool:
 
 
 class Base(DeclarativeBase):
-    """Declarative base for all models."""
+    """所有 ORM 模型的声明式基类（``app/models.py`` 继承它）。"""
 
 
 def init_db(database_url: str | None = None, *, echo: bool | None = None) -> AsyncEngine:
-    """Create (or return) the module-level engine and session factory.
+    """建（或复用）模块级的引擎与会话工厂。
 
-    Idempotent — safe to call on every app start.
+    幂等：已有引擎时直接返回，所以每次应用启动、每个测试 fixture 都能安全调用。
+    ``expire_on_commit=False`` 是有意的：commit 后路由还要把 ORM 对象转成
+    pydantic 响应，若对象过期就会在异步会话里触发隐式重查并报错。
     """
     global engine, session_factory
     if engine is not None:
@@ -132,19 +138,21 @@ def init_db(database_url: str | None = None, *, echo: bool | None = None) -> Asy
 
 
 def get_engine() -> AsyncEngine:
+    """取主库引擎；未初始化就报错（提醒调用方先走 ``init_db``）。"""
     if engine is None:
         raise RuntimeError("DB engine not initialised — call init_db() first")
     return engine
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    """取会话工厂：给后台任务等拿不到 ``Depends`` 的地方自己开事务。"""
     if session_factory is None:
         raise RuntimeError("DB engine not initialised — call init_db() first")
     return session_factory
 
 
 def reset_engine() -> None:
-    """Drop the module-level engine (tests / dev reload)."""
+    """丢掉模块级引擎（测试之间隔离 / 开发重载用，不 dispose 连接池）。"""
     global engine, session_factory
     engine = None
     session_factory = None
@@ -176,6 +184,7 @@ def normalize_async_url(url: str, dialect: str) -> str:
 
 
 def _engine_kwargs(normalized: str) -> dict:
+    """按驱动类型给 ``create_async_engine`` 补参数。"""
     # SQLite 的异步驱动需要关闭同线程检查；其他库用默认连接参数。
     if normalized.startswith("sqlite"):
         return {"connect_args": {"check_same_thread": False}}
@@ -226,7 +235,12 @@ async def test_source_connection(url: str, dialect: str, timeout: float = 8.0) -
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
-    """FastAPI dependency yielding an async session (commit on success)."""
+    """FastAPI 依赖：交出一个异步会话，成功收尾 commit、异常 rollback。
+
+    路由里写了 flush 不代表落库，真正的提交在这一层；因此需要「提交后还能
+    读字段」的地方，都依赖 ``init_db`` 里的 ``expire_on_commit=False``。
+    后台任务不在请求作用域里，必须改用 ``get_session_factory()()`` 自己开会话。
+    """
     factory = get_session_factory()
     async with factory() as session:
         try:
@@ -238,9 +252,10 @@ async def get_db() -> AsyncIterator[AsyncSession]:
 
 
 async def init_models() -> None:
-    """Import all models and create any missing tables.
+    """导入全部模型并建缺失的表（仅本地开发与测试；生产跑 ``alembic upgrade head``）。
 
-    For local dev and tests; in production run ``alembic upgrade head``.
+    先 ``run_sync(Base.metadata.create_all)`` 建普通表，再补两个 create_all
+    做不了的专有 DDL（pgvector/HNSW、pg_trgm），两个都是幂等的。
     """
     import app.models  # noqa: F401  (ensures metadata is populated)
 
@@ -253,12 +268,12 @@ async def init_models() -> None:
 
 
 async def dispose_engine() -> None:
-    """Dispose of the engine connection pool (app shutdown)."""
+    """释放主库连接池（应用关闭时调）。"""
     if engine is not None:
         await engine.dispose()
 
 
-# Re-export for router typing convenience (e.g. `session: AsyncSession = Depends(get_db)`).
+# 给路由做类型标注用的再导出（如 `session: AsyncSession = Depends(get_db)`）。
 __all__ = [
     "Base",
     "HNSW_INDEX_NAME",

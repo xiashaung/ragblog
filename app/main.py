@@ -1,11 +1,17 @@
-"""Application entry point.
+"""应用入口：装配 FastAPI 实例、注册路由与中间件、挂前端静态产物。
 
-Run locally with:
+本地跑法：
     uvicorn app.main:app --reload
 
-Static frontend: build ``web/dist`` (``npm --prefix web run build``) and
-it is automatically served at ``/`` (single-process production deploy).
-In dev use the Vite dev server on :5173 (proxies /api to :8000).
+启动与一次请求依次经过的环节（也是本文件从上到下的阅读顺序）：
+    路由 lifespan（建表 + 加载模型配置 + 起 RAG 队列）
+    → CORSMiddleware（来路过滤）
+    → _EnvelopeMiddleware（把 2xx 响应包成 {code,data,message}）
+    → 各 router（app/routers/*，依赖注入见 app/deps.py）
+    → 异常处理器（app/responses.py，错误体也同一格式）
+
+前端：构建 ``web/dist``（``pnpm --dir web-vben run build``）后自动挂在 ``/``，
+单进程即可部署；开发期用 Vite dev server（:5173，把 /api 代理到后端）。
 """
 
 import json
@@ -20,36 +26,39 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import FileResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from . import db
+from . import db, services
 from .config import get_settings
 from .responses import (
     _http_exception_handler,
     _validation_exception_handler,
     _value_error_handler,
 )
-from .routers import admin, ai, analytics, datasources, health, items, upload, users
+from .routers import admin, ai, analytics, datasources, health, items, system_config, upload, users
 from .schemas.envelope import ApiResponse
 from .services import rag_queue
 
 
 class _EnvelopeMiddleware(BaseHTTPMiddleware):
-    """Guarantee every successful 2xx response is a uniform envelope.
+    """把所有成功的 2xx 响应统一包成 ``{code, data, message}`` 信封。
 
-    Wraps the response body: for ``2xx`` JSON responses it re-serialises
-    the payload as ``{"code": 0, "data": <payload>, "message": "success"}``;
-    a payload already shaped like an envelope is left untouched; non-JSON
-    bodies (streaming chat, etc.) pass through unchanged. Error bodies are
-    built by the exception handlers in ``app.responses`` and therefore
-    bypass this middleware.
+    做法是在 ASGI 层把下游 body 接住再重放：2xx 且能解出 JSON **对象**时重写成
+    ``{"code": 0, "data": <原体>, "message": "success"}``；已是信封形状的不动；
+    非 JSON 体（流式对话、SPA 的 HTML）原样透传。错误响应体由 app/responses.py
+    的异常处理器自己拼好，不经过本中间件。
 
-    Kept dependency-free (plain ASGI) so it never breaks streaming routes
-    that already return chunked bodies.
+    注意：只包对象、**不包裸数组**（如 ``GET /admin/roles``）——否则前端会拿到
+    多套一层的 data 嵌套，``providers.filter(...)`` 这类写法全坏。
+
+    形式上继承 ``BaseHTTPMiddleware`` 只为拿到 ``app`` 引用，真正的活全在重写的
+    :meth:`__call__` 里：不走基类的 ``dispatch``，下家的 ``send`` 整个由本类接管。
     """
 
     def __init__(self, app: ASGIApp) -> None:
+        """只存下中间件链的下家（``self.app``），本类自己包办 ``__call__``。"""
         super().__init__(app)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """非 http 事件（websockets 等）直接放行；http 请求走「拦下再重放」。"""
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -59,6 +68,7 @@ class _EnvelopeMiddleware(BaseHTTPMiddleware):
         sent_body = b""
 
         async def send_wrapped(message: dict) -> None:
+            """替下游的 ``send``：只收集状态码/响应头/响应体，先不发。"""
             nonlocal status_code, headers, sent_body
 
             if message["type"] == "http.response.start":
@@ -67,9 +77,8 @@ class _EnvelopeMiddleware(BaseHTTPMiddleware):
             elif message["type"] == "http.response.body":
                 sent_body = sent_body + (message.get("body", b"") or b"")
 
-        # Invoke the downstream app, redirecting its `send` so we can
-        # capture the (single-chunk) body. We replay our own `start`,
-        # then the (envelope-wrapped) body.
+        # 跑下家但把它的 send 换掉：只收集（单块的）响应体，之后重放自己的
+        # start + （包完信封的）body。
         await self.app(scope, receive, send_wrapped)
 
         raw = sent_body
@@ -78,21 +87,19 @@ class _EnvelopeMiddleware(BaseHTTPMiddleware):
                 parsed = json.loads(raw)
             except (ValueError, TypeError):
                 parsed = None
-            # Only wrap actual JSON objects/arrays in the envelope.
-            # Non-JSON bodies (HTML from the SPA fallback, plain text,
-            # already-enveloped strings, etc.) must pass through untouched —
-            # otherwise the SPA's index.html would be turned into
-            # {"code":0,"data":"<!doctype html ...>"}.
+            # 只包真正的 JSON 对象。非 JSON 体（SPA 的 index.html、纯文本、
+            # 已经是字符串的信封）必须原样过：否则 index.html 会被包成
+            # {"code":0,"data":"<!doctype html ..."}。
             if isinstance(parsed, dict):
                 if "code" in parsed and "message" in parsed:
-                    pass  # already an envelope — leave untouched
+                    pass  # 已是信封——不动
                 else:
                     parsed = ApiResponse.ok(parsed)
                 raw = json.dumps(
                     parsed.model_dump(), ensure_ascii=False
                 ).encode("utf-8")
 
-        # Drop stale length/encoding so clients trust the new body.
+        # 丢掉旧的 content-length，否则客户端会拿它去校验新响应体。
         kept = [
             (n, v) for n, v in headers if n.lower() not in (b"content-length",)
         ]
@@ -105,18 +112,30 @@ class _EnvelopeMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: init DB engine + create tables (dev) / run alembic (prod).
+    """进程生命周期：启动时建表并预热配置，退出时停队列并释放连接池。"""
+    # 启动：建数据库引擎 + 建表（开发环境；生产跑 alembic upgrade head）
     db.init_db()
     await db.init_models()
+    # 把「模型管理 / 系统配置」里的 provider 选择读进内存：聊天、嵌入、精排
+    # 实际用哪个端点与模型名以数据库为准，.env 只在没配置时兜底，
+    # 所以后台改完不需要重启。
+    async with db.get_session_factory()() as session:
+        await services.system_config.SystemConfig.init_defaults(session)
+        await services.provider_store.refresh(session)
     # 启动 RAG 任务队列
     await rag_queue.start_queue()
     yield
-    # Shutdown: dispose the engine + stop RAG queue
+    # 关闭：先停后台任务，再释放连接池
     await rag_queue.stop_queue()
     await db.dispose_engine()
 
 
 def create_app() -> FastAPI:
+    """装配应用：异常处理器 → 中间件 → 路由 → 静态资源，顺带 SPA 兜底。
+
+    路由前缀约定：除 ``admin``（自己带 /admin）外都挂在 ``/api/v1`` 下；
+    新加路由时别在 router 里重复写 prefix，否则会拼出双层路径。
+    """
     settings = get_settings()
     application = FastAPI(
         title=settings.app_name,
@@ -137,12 +156,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    # Wrap every successful 2xx **object** body in the uniform
-    # {code, data, message} envelope. JSON arrays and primitives are left as
-    # they are (so ``GET /admin/roles`` etc. return a bare list); non-JSON
-    # bodies (SPA HTML, streaming chat) pass through untouched. Error bodies
-    # are already built by the exception handlers in app.responses, so this
-    # only touches 2xx responses.
+    # 把每个成功的 2xx **对象** 响应体统一包成 {code, data, message} 信封。
+    # JSON 数组与标量保持原样（所以 ``GET /admin/roles`` 等仍返裸列表），非 JSON 体
+    # （SPA 的 HTML、流式对话）不动。错误响应体已由 app.responses 的异常处理器拼好，
+    # 因此本中间件只碰 2xx。
     application.add_middleware(_EnvelopeMiddleware)
 
     application.include_router(health.router, prefix="/api/v1", tags=["health"])
@@ -153,13 +170,14 @@ def create_app() -> FastAPI:
         analytics.router, prefix="/api/v1/analytics", tags=["analytics"]
     )
     application.include_router(admin.router, tags=["admin"])
+    application.include_router(system_config.router, prefix="/api/v1")
     application.include_router(datasources.router)
     application.include_router(upload.router, prefix="/api/v1", tags=["upload"])
 
-    # --- Uploaded media (images) served straight from disk ---
+    # --- 上传的图片（直接从磁盘对外提供）---
     # 上传的图片落盘到 ``settings.media_root``，这里挂为静态目录，浏览器可直接
     # 通过 ``/media/uploads/xxx.png`` 查看，无需把 base64 存进数据库。
-    # 先建目录再挂载（StaticFiles 对不存在目录会报错），并放在 SPA 兵底路由之前。
+    # 先建目录再挂载（StaticFiles 对不存在目录会报错），并放在 SPA 兜底路由之前。
     media_root = settings.media_root
     media_root.mkdir(parents=True, exist_ok=True)
     (media_root / "uploads").mkdir(parents=True, exist_ok=True)
@@ -169,10 +187,9 @@ def create_app() -> FastAPI:
         name="media",
     )
 
-    # --- Static frontend (web/dist) ---
-    # The dist directory is optional: in dev, use the Vite dev server
-    # (port 5173) which proxies /api to this backend. When present, the
-    # FastAPI app serves the built SPA at / for single-process deploys.
+    # --- 静态前端（web/dist）---
+    # dist 目录是可选的：开发时用 Vite dev server（:5173，它会把 /api 代理到本后端）；
+    # 目录存在时，FastAPI 就把构建好的 SPA 挂在 / 上，单进程部署。
     dist = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web", "dist"
     )
@@ -184,18 +201,18 @@ def create_app() -> FastAPI:
             name="assets",
         )
 
-        # SPA fallback: any non-/api path serves index.html so that
-        # client-side routes (if any) work after a refresh.
+        # SPA 兜底：任何非 /api 路径都回 index.html，客户端路由刷新后也能工作。
 
-        # Root path must be matched explicitly: FastAPI's {full_path:path}
-        # wildcard binds segments only, so "/" would otherwise fall through
-        # to some GET route and return a JSON envelope instead of the SPA.
+        # 根路径必须显式匹配：FastAPI 的 {full_path:path} 通配只绑 path 段，
+        # 不单独写 "/" 就会落到别的 GET 路由上、返 JSON 而不是 SPA。
         @application.get("/", include_in_schema=False)
         async def root_index():
+            """根路径单独接：通配路由只绑 path 段，不显式写「/」会落到其他 GET 上。"""
             return FileResponse(os.path.join(dist, "index.html"))
 
         @application.get("/{full_path:path}", include_in_schema=False)
         async def spa_fallback(full_path: str):
+            """SPA 前端路由兜底：刷新页面时也要能回到 index.html。"""
             backend_prefixes = ("api/", "admin/", "health")
             if full_path.startswith(backend_prefixes):
                 raise HTTPException(status_code=404)

@@ -78,6 +78,7 @@ def _gate_terms(terms: list[str]) -> list[str]:
 
 
 def _hay(result: SearchResult) -> str:
+    """一条结果拼成的小写匹配串（标题 + 摘要 + URL），子串判定都走它。"""
     return f"{result.title} {result.snippet} {result.url}".lower()
 
 
@@ -108,6 +109,7 @@ _STOP_TAIL_RE = re.compile(
 
 
 def _trim(term: str) -> str:
+    """削口语尾巴：循环剔到剔不动为止（剔一层会露出新一层的尾巴）。"""
     out = term
     while True:
         stripped = _STOP_TAIL_RE.sub("", out).strip()
@@ -139,15 +141,19 @@ class SearchError(RuntimeError):
 
 @dataclass(slots=True)
 class SearchResult:
+    """一条检索命中：标题 / 链接 / 摘要，已是清洗过并截过上限的。"""
+
     title: str
     url: str
     snippet: str
 
     def as_dict(self) -> dict[str, str]:
+        """转成字典给工具返回值 / JSON 响应用，不把 dataclass 的内部表示递给模型。"""
         return {"title": self.title, "url": self.url, "snippet": self.snippet}
 
 
 def _strip_html(raw: str) -> str:
+    """抹掉结果里的 HTML 标签并解开 ``&amp;``（Bing 回的是带标记的片段）。"""
     return _TAG_RE.sub("", raw or "").replace("&amp;", "&").strip()
 
 
@@ -201,7 +207,7 @@ async def search(query: str, count: int | None = None) -> list[SearchResult]:
     if not kept:
         # Bing 对长/口语化的中文查询会静默降级：实测「赛力斯 华为 渠道」报 10 万条
         # 结果，前几条全是「赛」字字典页（换 cn.bing.com、加 mkt 都一样）。改写重试
-        # 一次：同一份预算能救回一次真实检索，比直接报“搜不到”对模型更有用。
+        # 一次：同一份预算能救回一次真实检索，比直接报「搜不到」对模型更有用。
         for cand in _refine_query(query, terms):
             logger.info("%s 结果与「%s」零匹配，改写重试：%s", source, query, cand)
             retried = await runner(cand, wanted)

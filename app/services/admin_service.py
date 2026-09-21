@@ -1,15 +1,13 @@
-"""Admin authentication repository, backed by the shared session.
+"""控制台账号的认证仓库，跑在共享的数据库会话上。
 
-All methods take a ``db.AsyncSession`` — the session is owned by the
-router via ``get_db``. Authn is via a randomly generated bearer token:
-- ``login`` looks up the admin by username, verifies the password, then
-  blacklists *existing* live sessions for that account and mints a new one.
-- ``refresh`` accepts a valid token, validates it, then blacklists the
-  used one and mints a replacement.
-- ``logout`` (and token *expiry*) simply delete the token's row, turning
-  a token into a no-op. Storing only the SHA-256 digest of the token
-  means an extracted ``Authorization`` header value is hashed on read
-  before the lookup.
+所有方法都接受一个 ``db.AsyncSession``：会话由路由通过 ``get_db`` 拿到并持有，
+本层只 ``flush``、不 ``commit``。认证凭据是一个随机生成的 Bearer token，
+库里只存它的 SHA-256 摘要，因此拿到的 ``Authorization`` 头要先哈希再查：
+
+- ``login``：按用户名找账号、验密码，然后**清掉该账号已有的未过期会话**再签一个新的
+  （所以一次登录会把其他设备上的旧 token 一并作废）。
+- ``refresh_token``：验一个有效 token，验过就把旧的删掉、签一个替换的（旋转）。
+- ``logout``（以及 token 自然过期）只是把这一行删掉，让 token 直接变成无效值。
 """
 
 from __future__ import annotations
@@ -28,24 +26,28 @@ from ..schemas.admin import AdminLoginResponse, AdminToken
 
 
 def _hash_token(token: str) -> str:
+    """token → 库里存放的摘要；校验时也必须走同一个函数。"""
     return hashlib.sha256(token.encode()).hexdigest()
 
 
 def hash_password(password: str) -> str:
+    """口令摘要。与种子脚本、``create_admin`` 共用，保证写入与比对一致。"""
     return hashlib.sha256(password.encode()).hexdigest()
 
 
 def _now() -> float:
+    """统一的「现在」：epoch 秒，与 ``expires_at`` 同一标度。"""
     return time.time()
 
 
 def _ttl() -> float:
-    """Seconds a freshly issued token remains valid."""
+    """新签 token 的有效期（秒）。"""
     settings = get_settings()
     return getattr(settings, "admin_session_ttl_seconds", 86_400)
 
 
 def _generate_token(admin_id: str) -> str:
+    """造一个不可猜的明文 token；``admin_`` 前缀方便日志里一眼认出类型。"""
     return f"admin_{uuid.uuid4().hex[:24]}-{secrets.token_urlsafe(16)}"
 
 
@@ -56,6 +58,7 @@ def _login_response(
     roles: list[str] | None = None,
     permissions: list[str] | None = None,
 ) -> AdminLoginResponse:
+    """把「明文 token + 账号 + 权限」拼成登录响应（登录与刷新共用）。"""
     token = AdminToken(
         token=plain_token,
         token_type="bearer",
@@ -78,6 +81,7 @@ def _login_response(
 
 
 async def login(session: AsyncSession, username: str, password: str) -> AdminLoginResponse:
+    """账号口令登录：失败一律 ``ValueError``（路由翻译成 400），成功返 token + 权限。"""
     from . import rbac_service
 
     row = (
@@ -89,8 +93,7 @@ async def login(session: AsyncSession, username: str, password: str) -> AdminLog
         raise ValueError("This account has been disabled")
 
     window = _now() - _ttl()
-    # Blacklist live sessions for this account so that every login
-    # forces previously-issued tokens (e.g. on other devices) to expire.
+    # 清掉该账号所有还在有效期内的会话：一次登录就把其他设备上签发过的 token 一并作废
     existing = (
         await session.scalars(
             select(AdminSession).where(
@@ -115,7 +118,7 @@ async def login(session: AsyncSession, username: str, password: str) -> AdminLog
 
 
 async def verify_token(session: AsyncSession, token: str) -> AdminSession | None:
-    """Validate a bare token string (no rotation). Returns None if absent/unknown."""
+    """只校验不旋转：token 缺失 / 不认识 / 已过期都返 ``None``（过期顺手删行）。"""
     if not token:
         return None
     row = (
@@ -133,7 +136,7 @@ async def verify_token(session: AsyncSession, token: str) -> AdminSession | None
 
 
 async def refresh_token(session: AsyncSession, token: str) -> AdminLoginResponse:
-    """Swap a valid token for a new one, invalidating the old."""
+    """用旧 token 换新 token，旧的当场失效。"""
     from . import rbac_service
 
     row = await verify_token(session, token)
@@ -154,6 +157,7 @@ async def refresh_token(session: AsyncSession, token: str) -> AdminLoginResponse
 
 
 async def logout(session: AsyncSession, token: str) -> bool:
+    """登出：删掉这一条会话，返是否真删了（已经不存在的 token 不算错）。"""
     row = (await session.execute(
         select(AdminSession).where(AdminSession.token_hash == _hash_token(token))
     )).scalar_one_or_none()
@@ -165,7 +169,7 @@ async def logout(session: AsyncSession, token: str) -> bool:
 
 
 async def list_live_sessions(session: AsyncSession) -> list[dict]:
-    """Return live sessions (id, username, expiry) for the dashboard."""
+    """列出当前未过期的会话（id / 用户名 / 到期时间）给控制台展示。"""
     rows = (await session.scalars(
         select(AdminSession).order_by(AdminSession.created_at)
     )).all()
@@ -186,7 +190,7 @@ async def list_live_sessions(session: AsyncSession) -> list[dict]:
 
 
 async def revoke_session(session: AsyncSession, session_id: str) -> bool:
-    """Force one live session offline (returns False when the id is unknown)."""
+    """强制踢下线指定会话；id 不存在返 ``False``。"""
     row = await session.get(AdminSession, session_id)
     if row is None:
         return False
@@ -210,9 +214,9 @@ __all__ = [
 async def create_admin(
     session: AsyncSession, username: str, password: str, name: str = ""
 ) -> AdminUser:
-    """Create the first super-admin account (guarded: fails if one exists).
+    """建首个超管账号（库内已有账号就拒）。
 
-    Used by the public onboarding route and the ``seed`` CLI. RBAC 后「创建账号」
+    公开的首次引导路由与 ``seed`` CLI 都用它。RBAC 后「创建账号」
     不再是公开能力（走 ``/admin/accounts`` + ``account:manage``），这里只保留
     「首次引导」：库内已有账号就拒绝，并把新账号绑到内置 superadmin 角色。
     """

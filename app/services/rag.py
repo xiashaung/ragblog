@@ -1,15 +1,19 @@
-"""Retrieval-augmented generation.
+"""检索增强生成（RAG）：切块、入库、检索、给答案。
 
-Chunking + a vector store that lives in the app's own database. On Postgres
-the vectors are a real pgvector column (``vector(<APP_RAG_VECTOR_DIM>)``, so
-cosine distance and top-k are computed by the database and served from an HNSW
-index); on SQLite the same column degrades to JSON and scoring falls back to
-Python, which keeps the test suite and lightweight dev setups working without
-an extension.
+向量库就住在应用自己的数据库里：Postgres 上 ``vector`` 是真 pgvector 列
+（``vector(<APP_RAG_VECTOR_DIM>)``），余弦距离与 top-k 由库内算、走 HNSW 索引；
+SQLite 上同一列退化成 JSON、打分回到 Python 算，测试与轻量开发无需装扩展。
 
-Embeddings can come from any configured provider (see ``llm.get_llm``); the
-chosen provider name is recorded per knowledge document so searches can be
-scoped to documents ingested with a specific provider.
+一次录入的流程（所有入口共用）：
+    取文本（文件/裸文本/问答对/URL）→ :func:`upsert_document`
+    → :func:`chunk_text` 切块 → 批量 embedding → 写 ``knowledge_chunks``
+
+检索则是：向量召回（Postgres 上可叠 pg_trgm 词法召回 → RRF 融合）
+→（可选）精排 → 拼上下文交给对话模型。
+
+embedding 可用任意已配置的 provider（见 ``llm.get_llm``）；文档行会记下录入时用的
+provider 名，检索时可据此限定「只用某个 provider 录入的文档」。不同 provider 的向量
+不可比，所以换模型必须重建索引（:func:`reindex_knowledge`）。
 """
 
 from __future__ import annotations
@@ -46,7 +50,7 @@ from . import llm, reranker, web_page
 DEFAULT_CHUNK_SIZE = 500
 PREVIEW_CHARS = 120
 SNIPPET_CHARS = 500
-# FAQ markers: the question leads each block so embeddings match on it.
+# FAQ 标记：把问句放在每块开头，让 embedding 先对齐问题（用户提问的措辞更像问句）。
 FAQ_ASK_PREFIX = "问："
 FAQ_ANSWER_PREFIX = "答："
 
@@ -56,7 +60,7 @@ logger = logging.getLogger(__name__)
 def _chunk_size_of(
     requested: int | None, meta: dict | None = None, fallback: int = DEFAULT_CHUNK_SIZE
 ) -> int:
-    """Resolve the chunk size: request override > stored setting > default."""
+    """定分片长度：请求里显式传的 > 文档存过的 > 默认值。"""
     if requested:
         return requested
     stored = (meta or {}).get("chunk_size")
@@ -64,16 +68,14 @@ def _chunk_size_of(
 
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 80) -> list[str]:
-    """Split text into overlapping chunks at paragraph boundaries.
+    """按段落边界切成带重叠的分片。
 
-    Paragraphs are packed until ``chunk_size``; any single piece longer than
-    that is hard-split first, so a document without newlines (a CSV, a log,
-    CJK prose) still yields bounded chunks instead of one giant one. Every
-    returned chunk is at most ``chunk_size`` chars, overlap tail included.
+    段落 packing 到 ``chunk_size`` 为止；单段超长时先硬切，所以没有换行的文档
+    （CSV、日志、不带空格中文）也能得到定长分片，而不是整块吐出来。
+    每个返回分片都不超过 ``chunk_size`` 字符（含开头的 overlap 尾巴）。
     """
     overlap = max(0, min(overlap, chunk_size // 2))
-    # Hard-split width: an overlap tail prepended at the next flush still
-    # fits inside ``chunk_size``.
+    # 硬切宽度：留出位置给下一次 flush 时拼在前面的 overlap 尾巴，拼完仍不超 chunk_size。
     width = max(1, chunk_size - overlap - 1)
 
     pieces: list[str] = []
@@ -91,7 +93,7 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 80) -> list[str]
     for piece in pieces:
         if buffer and len(buffer) + len(piece) + 1 > chunk_size:
             chunks.append(buffer)
-            # keep the tail for overlap
+            # 保留尾巴作为下一块的重叠部分
             buffer = f"{buffer[-overlap:]} {piece}".strip() if overlap else piece
         else:
             buffer = f"{buffer}\n{piece}".strip() if buffer else piece
@@ -101,6 +103,11 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 80) -> list[str]
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
+    """余弦相似度：只给 SQLite 退化路径用（Postgres 在库内算）。
+
+    维度不一致或空向量一律返 0 分而不是抛错：一整库旧维度的向量里筛一两条
+    不应让整次检索失败，0 分自然会被排到最后。
+    """
     if not a or not b or len(a) != len(b):
         return 0.0
     dot = sum(x * y for x, y in zip(a, b, strict=True))
@@ -112,31 +119,34 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 def _resolved_provider(name: Provider | str | None) -> Provider:
-    """The provider ``get_llm`` will use for this request.
+    """本次请求 ``get_llm`` 会实际用哪个 provider（返枚举）。
 
-    Reads the backend's resolved ``provider`` attribute so the response can
-    echo it back (matching what the backend actually used).
+    读的是后端实例上的 ``provider`` 而不是入参，这样响应里回写的名字
+    与真正调用的一致（没传时会看到默认 provider，而不是 None）。
     """
-    return llm.get_llm(name).provider
+    return llm.get_llm(name, feature="embedding").provider
 
 
 def _default_provider() -> str:
-    """Provider name the frontend now gets when it omits ``provider``."""
-    return llm.get_llm(None).provider.value
+    """前端不传 ``provider`` 时现在用的是哪个（列表页用来标「待重建」）。
+
+    向量嵌入用哪个 provider 由「系统配置」的 embedding_provider 决定（没配回落 .env）。
+    """
+    return llm.default_provider_for("embedding")
 
 
 def _vector_dim() -> int:
-    """Column dimension every stored vector must match."""
+    """列维度：存进去的每个向量必须正好这么长。"""
     return get_settings().rag_vector_dim
 
 
 def _uses_pgvector(session: AsyncSession) -> bool:
-    """True when ``vector`` is a real pgvector column (i.e. on Postgres)."""
+    """是否跑在真 pgvector 列上（等价于「方言是 Postgres」）。"""
     return session.get_bind().dialect.name == "postgresql"
 
 
 def _dim_error(who: str, got: int, wanted: int) -> ValueError:
-    """The one place that explains a dimension mismatch to the user."""
+    """维度不符的唯一解释出处（全文中只写这一处，避免各入口说得不一致）。"""
     return ValueError(
         f"{who}的向量是 {got} 维，与知识库列维度 {wanted} 不一致。"
         "若是换了 embedding 模型：改 APP_RAG_VECTOR_DIM 并重跑 alembic upgrade head，"
@@ -145,7 +155,7 @@ def _dim_error(who: str, got: int, wanted: int) -> ValueError:
 
 
 def _doc_kind(doc: KnowledgeDoc) -> str:
-    """Where the document came from: file / text / faq / url."""
+    """文档来源：file / text / faq / url（存在 meta 里，没记则推算）。"""
     kind = (doc.meta or {}).get("kind")
     if isinstance(kind, str) and kind:
         return kind
@@ -153,12 +163,11 @@ def _doc_kind(doc: KnowledgeDoc) -> str:
 
 
 def _doc_item(doc: KnowledgeDoc, chunks: int, chars: int, first_text: str = "") -> dict:
-    """Management-list shape for a document (no chunk bodies)."""
+    """管理列表用的文档形状（不带分片正文，避免列表接口拽出全文）。"""
     default = _default_provider()
     content = doc.content or ""
     meta = doc.meta or {}
-    # Legacy rows predate the ``content`` column; fall back to the first chunk
-    # so the list still has something to preview.
+    # 早期行没有 ``content`` 列（后来才补），回退到首个分片，列表至少有东西可预览。
     source = content or first_text
     return {
         "knowledge_id": doc.id,
@@ -179,7 +188,7 @@ def _doc_item(doc: KnowledgeDoc, chunks: int, chars: int, first_text: str = "") 
 
 
 async def _first_snippets(session: AsyncSession, doc_ids: list[str]) -> dict[str, str]:
-    """First chunk text per document (bounded by one row per doc)."""
+    """每篇文档的首个分片正文（只取每篇一行，不用把全文读出来）。"""
     if not doc_ids:
         return {}
     heads = (
@@ -200,7 +209,7 @@ async def _first_snippets(session: AsyncSession, doc_ids: list[str]) -> dict[str
 
 
 async def _chunk_stats(session: AsyncSession, doc_ids: list[str]) -> dict[str, tuple[int, int]]:
-    """Chunk count + total chunk length per document, without loading texts."""
+    """每篇文档的分片数与总字数，不拉正文（统计类列表页的便宜算法）。"""
     if not doc_ids:
         return {}
     rows = await session.execute(
@@ -218,10 +227,10 @@ async def _chunk_stats(session: AsyncSession, doc_ids: list[str]) -> dict[str, t
 async def replace_vectors(
     session: AsyncSession, doc: KnowledgeDoc, content: str, *, backend: llm.LLMBackend
 ) -> int:
-    """Drop the document's chunks and rebuild them (and their vectors).
+    """删掉文档现有分片并重建（含重新算向量），返新分片数。
 
-    Also used for re-indexing: embeddings of different providers / models are
-    not comparable, so changing the embedding model means rewriting vectors.
+    重建索引也走这里：不同 provider/模型的 embedding 不可比，换了嵌入模型
+    就只能重写向量，没有「兼容共存」这条路。返值即分片数，给录入接口回体用。
     """
     chunk_size = _chunk_size_of(None, doc.meta)
     chunks = chunk_text(content, chunk_size=chunk_size)
@@ -254,7 +263,7 @@ async def replace_vectors(
 
 
 def _doc_id_for(title: str) -> str:
-    """Same title == same id, so re-ingesting replaces the document."""
+    """标题派生出固定 ID：同标题 = 同 ID，所以重复录入是「替换」而不是堆一份新的。"""
     return f"kb-{hashlib.md5(title.encode()).hexdigest()[:12]}"
 
 
@@ -267,12 +276,13 @@ async def upsert_document(
     chunk_size: int | None = None,
     metadata: dict | None = None,
 ) -> KnowledgeIngestResponse:
-    """Store (or replace) a document and (re)build its chunk vectors.
+    """入库（或整篇替换）一份文档并重建它的分片向量。
 
-    Every ingest entry point - file upload, raw text, Q&A pairs, URL - funnels
-    through here, so they cannot drift apart.
+    所有录入入口——文件上传、裸文本、问答对、URL——最后都汇到这里，
+    否则四路的 ID 规则、元数据写法、向量重建时机很容易各自漂移。
+    注：同标题先整体 ``delete_knowledge`` 再重建，所以旧 provider 不会残留。
     """
-    backend = llm.get_llm(provider)
+    backend = llm.get_llm(provider, feature="embedding")
     doc_id = _doc_id_for(title)
 
     existing = await session.get(KnowledgeDoc, doc_id)
@@ -304,6 +314,7 @@ async def upsert_document(
 async def ingest(
     session: AsyncSession, payload: KnowledgeIngestRequest
 ) -> KnowledgeIngestResponse:
+    """裸文本录入：只负责拆请求字段，真活在 :func:`upsert_document`。"""
     return await upsert_document(
         session,
         title=payload.title,
@@ -315,10 +326,10 @@ async def ingest(
 
 
 def pairs_to_text(pairs: list[tuple[str, str]]) -> str:
-    """Render Q&A pairs as blank-line-separated blocks.
+    """把问答对排成「问：某句 / 答：某句」的块，块之间空一行。
 
-    The question leads each block, so a chunk's embedding is dominated by the
-    phrasing users actually type when searching.
+    问句领每块的开头，这样一个分片的 embedding 主要由用户真正会输入的
+    措辞决定（答案往往很长，会把手头的关键词稀释掉）。
     """
     return "\n\n".join(
         f"{FAQ_ASK_PREFIX}{question}\n{FAQ_ANSWER_PREFIX}{answer}"
@@ -329,7 +340,7 @@ def pairs_to_text(pairs: list[tuple[str, str]]) -> str:
 async def ingest_pairs(
     session: AsyncSession, payload: KnowledgePairsIngestRequest
 ) -> KnowledgeIngestResponse:
-    """Ingest a FAQ batch as one document."""
+    """一批 FAQ 存成一份文档（而不是每条一篇，否则列表页会被刷到花）。"""
     pairs = [
         (pair.question.strip(), pair.answer.strip())
         for pair in payload.pairs
@@ -353,7 +364,7 @@ async def ingest_pairs(
 async def ingest_from_url(
     session: AsyncSession, payload: KnowledgeFetchRequest
 ) -> KnowledgeFetchResponse:
-    """Fetch a page, then ingest its text as a document titled after the page."""
+    """抓网页，然后按页面标题入库成一份文档。"""
     page = await web_page.fetch_page(url=payload.url, max_chars=payload.max_chars)
     title = (payload.title or page.title or page.final_url).strip()[:200]
 
@@ -390,7 +401,7 @@ async def list_knowledge(
     offset: int = 0,
     limit: int = 20,
 ) -> dict:
-    """Paginated document list for the management UI."""
+    """管理页用的分页文档列表（带总数与每页元信息）。"""
     default = _default_provider()
     stmt = select(KnowledgeDoc)
     if keyword and keyword.strip():
@@ -429,7 +440,7 @@ async def list_knowledge(
 async def get_knowledge(
     session: AsyncSession, knowledge_id: str, *, chunk_limit: int = 200
 ) -> dict | None:
-    """Single document: metadata, original text and its chunks."""
+    """单篇文档详情：元信息 + 原文 + 分片（最多 ``chunk_limit`` 条）。"""
     doc = await session.get(KnowledgeDoc, knowledge_id)
     if doc is None:
         return None
@@ -471,7 +482,7 @@ async def get_knowledge(
 
 
 def _chunk_index(chunk_id: str, fallback: int) -> int:
-    """Chunk order as encoded in ``{doc_id}-c007``; positional otherwise."""
+    """从 ``{doc_id}-c007`` 这种 ID 里解出分片序号；解不出就用位置下标。"""
     _, _, tail = chunk_id.rpartition("-c")
     return int(tail) if tail.isdigit() else fallback
 
@@ -479,9 +490,9 @@ def _chunk_index(chunk_id: str, fallback: int) -> int:
 async def update_knowledge(
     session: AsyncSession, knowledge_id: str, payload: KnowledgeDocUpdateRequest
 ) -> dict | None:
-    """Rename, and/or replace the text (which re-embeds it).
+    """改名，和/或替换正文（替换会重新 embedding）。
 
-    Returns ``None`` when the document does not exist.
+    文档不存在时返 ``None``，由路由翻译成 404（服务层不抛 HTTP 状态）。
     """
     doc = await session.get(KnowledgeDoc, knowledge_id)
     if doc is None:
@@ -489,7 +500,7 @@ async def update_knowledge(
 
     if payload.title and payload.title != doc.title:
         doc.title = payload.title
-        # Keep citations pointing at the new name.
+        # 引用里的来源名跟着改，否则旧引用还写着老标题。
         await session.execute(
             update(KnowledgeChunk)
             .where(KnowledgeChunk.knowledge_id == doc.id)
@@ -499,10 +510,10 @@ async def update_knowledge(
     doc.updated_at = time.time()
 
     if payload.content is not None:
-        # Replacing the text invalidates the vectors, so rebuild them too.
+        # 换了正文，旧向量全失效，必须同批重建。
         doc.content = payload.content
         await replace_vectors(
-            session, doc, payload.content, backend=llm.get_llm(None)
+            session, doc, payload.content, backend=llm.get_llm(feature="embedding")
         )
 
     chunks, size = (await _chunk_stats(session, [doc.id])).get(doc.id, (0, 0))
@@ -511,10 +522,11 @@ async def update_knowledge(
 
 
 async def reindex_knowledge(session: AsyncSession, knowledge_id: str) -> dict | None:
-    """Rebuild a document's vectors with the currently configured provider.
+    """用当前配的 provider 重建一份文档的向量。
 
-    Needed after ``APP_LLM_DEFAULT_PROVIDER`` changes: stored vectors stay
-    scoped to the old provider and are invisible to search otherwise.
+    在「系统配置」改了 embedding_provider 之后需要它：已存的向量属于旧
+    provider，不重建的话检索永远碰不到它们（列表页靠 ``stale`` 提醒）。
+    没存原文的老文档无法重建，直报 ``ValueError``（转 400）请用户重新上传。
     """
     doc = await session.get(KnowledgeDoc, knowledge_id)
     if doc is None:
@@ -522,7 +534,7 @@ async def reindex_knowledge(session: AsyncSession, knowledge_id: str) -> dict | 
     if not doc.content:
         raise ValueError("该文档没有保存原文，无法重建索引，请重新上传文件")
     previous = doc.provider
-    backend = llm.get_llm(None)
+    backend = llm.get_llm(feature="embedding")
     chunks = await replace_vectors(session, doc, doc.content, backend=backend)
     return {
         "knowledge_id": doc.id,
@@ -534,6 +546,10 @@ async def reindex_knowledge(session: AsyncSession, knowledge_id: str) -> dict | 
 
 
 async def delete_knowledge(session: AsyncSession, knowledge_id: str) -> bool:
+    """删一份文档及其全部分片，返是否真的删了（不存在不算错）。
+
+    先删子表再删主表：两边都没外键级联，反序会留下无法回收的孤儿分片。
+    """
     doc = await session.get(KnowledgeDoc, knowledge_id)
     if doc is None:
         return False
@@ -548,7 +564,7 @@ async def delete_knowledge(session: AsyncSession, knowledge_id: str) -> bool:
 async def delete_knowledge_many(
     session: AsyncSession, ids: list[str]
 ) -> tuple[int, list[str]]:
-    """Batch delete; returns (deleted_count, ids that were not found)."""
+    """批量删除，返 ``(删掉数, 找不到的 id)``——不整批回滚，得逐个给结果。"""
     deleted, failed = 0, []
     for kid in ids:
         if await delete_knowledge(session, kid):
@@ -559,7 +575,7 @@ async def delete_knowledge_many(
 
 
 async def _vectorless_chunks(session: AsyncSession) -> int:
-    """Chunks with no usable vector (NULL): invisible to search until re-indexed."""
+    """没可用向量（NULL）的分片数：重建索引前对检索完全隐形。"""
     return (
         await session.execute(
             select(func.count())
@@ -570,7 +586,11 @@ async def _vectorless_chunks(session: AsyncSession) -> int:
 
 
 async def knowledge_stats(session: AsyncSession) -> dict:
-    """Totals for the management header + per-provider breakdown."""
+    """管理页页头的总量统计 + 按 provider 的分布。
+
+    刻意把全表捞到内存里累加：文档量级在百级，而多表聚合在 SQLite
+    上反而写不出一句兼容两边的 SQL。量大了再改成单条 GROUP BY。
+    """
     settings = get_settings()
     default = _default_provider()
     docs = (await session.scalars(select(KnowledgeDoc))).all()
@@ -598,8 +618,9 @@ async def knowledge_stats(session: AsyncSession) -> dict:
         "chunks": total_chunks,
         "chars": total_chars,
         "default_provider": default,
-        "embedding_model": settings.provider_config(default).embedding_model,
-        # 向量存在哪、多少维：让前端能说明白“为什么两份文档搜不到”
+        # 模型名与实际调用同源：「模型管理」里的数据库配置优先，.env 兜底
+        "embedding_model": llm.embedding_model(default),
+        # 向量存在哪、多少维：让前端能说明白「为什么两份文档搜不到」
         "vector_backend": "pgvector" if _uses_pgvector(session) else "json",
         "vector_dim": settings.rag_vector_dim,
         "vectorless_chunks": await _vectorless_chunks(session),
@@ -626,11 +647,11 @@ async def _search_pgvector(
     query_emb: list[float],
     top_k: int,
 ) -> list[tuple[str, str, str, float]]:
-    """Top-k by cosine distance, computed by pgvector inside the database.
+    """用 pgvector 在库内算余弦距离取 top-k。
 
-    ``<=>`` is the cosine distance, so ``1 - distance`` is the similarity the
-    old in-Python scorer returned. Null vectors (a vector the column could not
-    hold, or a half-finished re-index) are skipped rather than scored 0.
+    ``<=>`` 是余弦距离，所以 ``1 - distance`` 就是以前 Python 打分器返的那个相似度，
+    两条路径的分数口径保持一致。向量为 NULL 的分片（列装不下 / 重建到一半）
+    直接跳过而不是记 0 分。查询向量维度不对时报错，不做近似匹配。
     """
     dim = _vector_dim()
     if len(query_emb) != dim:
@@ -661,7 +682,7 @@ async def _search_in_python(
     query_emb: list[float],
     top_k: int,
 ) -> list[tuple[str, str, str, float]]:
-    """SQLite fallback: no vector index, so score every chunk in memory."""
+    """SQLite 回退路径：没有向量索引，把候选分片全拉进内存逐个打分。"""
     rows = (
         await session.execute(
             select(
@@ -686,17 +707,14 @@ async def _search_lexical_pg(
     query: str,
     top_k: int,
 ) -> list[tuple[str, str, str, float]]:
-    """Lexical (keyword) recall via pg_trgm trigram similarity.
+    """用 pg_trgm 三元组相似度做词法（关键词）召回。
 
-    The second retrieval leg next to the vector search: it catches exact terms,
-    identifiers and rare words that embeddings can smooth over. Uses
-    ``word_similarity``, which scores the best-matching contiguous window of a
-    document against the (usually shorter) query - the right shape for keyword
-    lookup, and it works on CJK without a tokenizer (unlike ``to_tsvector``,
-    which treats space-less Chinese as a single token).
+    向量检索旁边的第二条腿：它抓的是精确术语、标识符、低频词——这些 embedding
+    容易抹平的东西。用 ``word_similarity``：拿文档里匹配最好的连续窗口去比（通常
+    较短的）查询，正好是关键词查法的形状，而且不需分词器就能命中中文
+    （``to_tsvector`` 会把不带空格的中文当成单 token，不适合本项目）。
 
-    Requires the ``pg_trgm`` extension; callers run it inside a try/except so a
-    database without it simply degrades to vector-only retrieval.
+    依赖 ``pg_trgm`` 扩展；调用方包在 try/except 里，没装的库自然退成纯向量。
     """
     if top_k <= 0 or not query.strip():
         return []
@@ -728,19 +746,16 @@ def _rrf_fuse(
     vector_weight: float,
     pool: int,
 ) -> list[tuple[str, str, str, float]]:
-    """Reciprocal Rank Fusion of the vector and lexical rankings into one pool.
+    """用 RRF（倒数排序融合）把向量腿与词法腿并成一个候选池。
 
-    Each input list is ``(doc_id, source, text, leg_score)`` already ordered
-    best-first by its own metric. RRF uses only *rank*, sidestepping the fact
-    that cosine similarity and trigram similarity live on different scales::
+    两个入参都是 ``(doc_id, source, text, 本腿得分)``、已按各自指标从好到坏排好。
+    RRF 只看*名次*，从而避开余弦相似度与三元组相似度标度不同的问题：
 
-        score(chunk) = sum_legs weight_leg / (k + rank_leg)      # rank is 1-based
+        score(chunk) = Σ_腿 weight_腿 / (k + rank_腿)      # rank 从 1 开始
 
-    A chunk recalled by both legs accumulates and floats up. The fused tuple
-    keeps the vector cosine as its display ``score`` when present (a comparable
-    0..1 number), else the lexical similarity, so the UI's progress bar stays
-    meaningful. Keyed by ``doc_id`` + full chunk text - identical across both
-    legs for the same chunk, so overlapping recall merges correctly.
+    两腿都命中的分片会累加从而上浮。融合后的元组里展示用的 ``score`` 优先留
+    向量余弦（是个可比的 0..1 数），没有才用词法相似度，否则前端的进度条没法读。
+    去重键是 ``doc_id`` + 完整分片文本——同一个分片在两腿里完全一致，所以能正确合并。
     """
     text_of: dict[str, tuple[str, str, str]] = {}  # key -> (doc_id, source, text)
     fused: dict[str, float] = {}
@@ -758,9 +773,9 @@ def _rrf_fuse(
             if key not in text_of:
                 text_of[key] = (doc_id, source, text)
             if is_vector:
-                display[key] = leg_score  # cosine preferred for display
+                display[key] = leg_score  # 展示分优先用余弦
             else:
-                display.setdefault(key, leg_score)  # trigram only if no cosine
+                display.setdefault(key, leg_score)  # 没有余弦时才退到三元组分
     ordered = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[: max(pool, 0)]
     return [
         (*text_of[key], display.get(key, fused_score))
@@ -771,14 +786,12 @@ def _rrf_fuse(
 async def _rerank_hits(
     query: str, hits: list[tuple[str, str, str, float]], keep: int
 ) -> list[tuple[str, str, str, float]]:
-    """Re-order candidate hits with a cross-encoder, keeping the best ``keep``.
+    """用 cross-encoder 给候选重排，只留最好的 ``keep`` 条。
 
-    ``hits`` are ``(doc_id, source, full_text, recall_score)`` (vector-only, or
-    RRF-fused when hybrid retrieval is on). Ranking runs on the *full* chunk text
-    (not the truncated snippet) for accuracy. On any
-    failure or when disabled, falls back to the top ``keep`` in vector order so
-    retrieval never breaks. The stored ``score`` stays the cosine similarity
-    (display semantics unchanged); only the ordering reflects the rerank.
+    ``hits`` 是 ``(doc_id, source, 全量正文, 召回分)``（纯向量，或开了混合检索时的
+    RRF 融合结果）。排序跑在*完整*分片文本上（而不是截断后的预览），否则精度会掉。
+    任何失败、或精排没开启时，直取向量序的前 ``keep`` 条，保证检索不会因它而坏。
+    存下的 ``score`` 仍是余弦相似度（展示语义不变），只有顺序反映精排结果。
     """
     if keep <= 0 or len(hits) <= keep:
         return hits[: max(keep, 0)] if keep > 0 else hits
@@ -793,22 +806,27 @@ async def _rerank_hits(
         out.append(hits[idx])
         if len(out) >= keep:
             break
-    # A high threshold can drop everything; that is legitimate (no good match),
-    # but never let an all-filtered result hide a decent recall hit entirely.
+    # 阈值抬得过高可能全部过滤掉，这本身是合法结果（确实没有好匹配）；
+    # 但宁可留一条也不让「召回里其实有可用内容」被全滤光而不为人知。
     return out[:keep]
 
 
 async def search(
     session: AsyncSession, payload: KnowledgeSearchRequest
 ) -> KnowledgeSearchResponse:
-    backend = llm.get_llm(payload.provider)
+    """检索主流程：问句转向量 → 召回 →（融合）→（精排）→ 拼引用。
+
+    开关决定三件事：用哪条召回腿（pgvector / 内存 cosine）、要不要叠词法腿、
+    要不要精排。只要下游会重排就先宽召回（recall_k），最后再裁到 top_k；
+    两个开关都没开时行为与单段式完全一致。
+    """
+    backend = llm.get_llm(payload.provider, feature="embedding")
     provider = backend.provider
     query_emb = (
         await backend.embeddings(EmbeddingRequest(provider=provider, input=[payload.query]))
     ).items[0].embedding
 
-    # Only search documents ingested with this provider (vectors are not
-    # comparable across providers / models — different dimensions & vocab).
+    # 只检同一个 provider 录入的文档：跨 provider/模型的向量不可比（维度与词表都不同）。
     doc_ids = (
         await session.scalars(
             select(KnowledgeDoc.id).where(KnowledgeDoc.provider == provider.value)
@@ -820,10 +838,9 @@ async def search(
     settings = get_settings()
     on_pg = _uses_pgvector(session)
     rerank_on = settings.rag_rerank_enabled and bool(settings.rag_rerank_base_url)
-    # Hybrid needs Postgres (pg_trgm); SQLite silently stays vector-only.
+    # 混合检索需要 Postgres（pg_trgm）；SQLite 静默退成纯向量。
     hybrid_on = settings.rag_hybrid_enabled and on_pg
-    # Wide recall whenever a downstream stage (fusion / rerank) will re-rank it;
-    # when neither is on this is exactly the old single-stage top_k.
+    # 只要下游（融合/精排）会重排就先宽召回；两者都没开时，这就是原来的单段 top_k。
     recall_k = (
         max(payload.top_k * settings.rag_rerank_recall_multiplier, payload.top_k)
         if (rerank_on or hybrid_on)
@@ -837,8 +854,7 @@ async def search(
 
     hits = vector_hits
     if hybrid_on:
-        # Lexical leg pulls its own top-k; a database without the pg_trgm
-        # extension yields nothing here and retrieval stays vector-only.
+        # 词法腿自己取一份 top-k；库里没 pg_trgm 扩展时这里查不到东西，检索停在纯向量。
         try:
             lexical_hits = await _search_lexical_pg(
                 session,
@@ -863,10 +879,9 @@ async def search(
     else:
         hits = hits[: payload.top_k]
 
-    # Attach stored images (uploaded image docs / document-embedded figures) so the
-    # caller can *display* them next to the retrieved text. Their textual
-    # descriptions already live in the searchable body; the images are referenced
-    # from KnowledgeDoc.meta["images"] (a /media/uploads URL, or a legacy data URL).
+    # 把存储的图片（图片类文档 / 文档内插图）附在结果上，让调用方能*展示*它们。
+    # 可供检索的文字描述已经在正文分片里，图片只是旁挂，取自
+    # KnowledgeDoc.meta["images"]（/media/uploads 的 URL，或历史遗留的 data URL）。
     doc_images: dict[str, list[str]] = {}
     matched_ids = {doc_id for doc_id, *_ in hits}
     if matched_ids:
@@ -911,19 +926,22 @@ RAG_SYSTEM_PROMPT = (
 async def answer(
     session: AsyncSession, payload: KnowledgeAnswerRequest
 ) -> KnowledgeAnswerResponse:
-    backend = llm.get_llm(payload.provider)
+    """知识库问答：先 :func:`search` 取片段，拼 Context 后交给对话模型。"""
+    backend = llm.get_llm(payload.provider, feature="rag")
     provider = backend.provider
     search_resp = await search(
         session,
+        # 检索用的是向量 provider，不能跟着回答模型走：把请求里显式指定的那个传下去，
+        # 没指定时由 search() 自己按 embedding_provider 解析（否则改了 rag_provider
+        # 就会查不到任何文档——向量不在同一个 provider 命名空间里）。
         KnowledgeSearchRequest(
-            query=payload.query, top_k=payload.top_k, provider=provider
+            query=payload.query, top_k=payload.top_k, provider=payload.provider
         ),
     )
     context = "\n".join(f"[{c.index}] {c.snippet}" for c in search_resp.items)
     question = f"Context:\n{context}\n\nQuestion: {payload.query}"
-    # Multimodal: when the caller attaches images (base64 data URL or http URL),
-    # send them as content parts alongside the text so a vision model can reason
-    # over them. Plain-text-only models ignore / reject these parts upstream.
+    # 多模态：调用方带了图（base64 data URL 或 http URL）就把它与文本一起发出去，
+    # 让视觉模型能看图作答；纯文本模型会在上游忽略或拒收这些 parts。
     if payload.images:
         user_content = [
             {"type": "text", "text": question},

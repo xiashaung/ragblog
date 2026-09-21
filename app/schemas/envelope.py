@@ -1,21 +1,17 @@
-"""Uniform API response envelope for every route.
+"""所有接口统一的响应信封。
 
-All endpoints — across every router — return the same three-field
-structure so front-end code can treat every response uniformly:
+不管哪个路由，体里都是同一套三字段，前端可以一律对待：
 
-    success -> { "code": 0,  "data": { ... }, "message": "success" }
-    failure -> { "code": 401, "data": null,  "message": "<中文文案>" }
+    成功 -> { "code": 0,   "data": { ... }, "message": "success" }
+    失败 -> { "code": 401, "data": null,   "message": "<中文文案>" }
 
-* ``code`` is ``0`` on success, otherwise the HTTP status code (401,
-  404, 409, 422, ...). It is intentionally *decoupled* from the actual
-  HTTP status code so business logic can branch on ``code === 0`` in
-  JavaScript and on ``code == 0`` in Python, independent of transport.
-* ``data`` carries the payload on success and is ``null`` on failure.
-* ``message`` is a short, human-readable string; by default "success".
+* ``code``：成功时为 ``0``，否则就是那个 HTTP 状态码（401 / 404 / 409 / 422 …）。
+  它**只用于展示与判错**，不改传输层状态码（两者始终一致）。
+* ``data``：成功时装业务数据，失败时为 ``null``。
+* ``message``：给人看的一句话，默认 ``success``。
 
-``FastAPI`` is configured with ``response_model_cls=ApiResponse`` so a
-plain ``return some_object`` from any route is automatically wrapped —
-routers never build the envelope by hand.
+路由从不手工拼信封：成功体由 ``app.main._EnvelopeMiddleware`` 在 ASGI 层包上
+（只包 2xx 的 JSON 对象），失败体由 ``app.responses`` 的异常处理器拼好。
 """
 
 from __future__ import annotations
@@ -28,7 +24,7 @@ T = TypeVar("T")
 
 
 class ApiResponse(BaseModel, Generic[T]):
-    """Standard envelope wrapping every route payload."""
+    """每个路由响应外头套的那一层。"""
 
     code: int = 0
     data: T | None = None
@@ -36,12 +32,12 @@ class ApiResponse(BaseModel, Generic[T]):
 
     @staticmethod
     def ok(data: T = None, message: str = "success") -> ApiResponse[T]:
-        """Build a success envelope (``code == 0``)."""
+        """拼成功信封（``code == 0``）。"""
         return ApiResponse(code=0, data=data, message=message)
 
     @staticmethod
     def error(code: int, message: str) -> ApiResponse[None]:
-        """Build a failure envelope; ``data`` defaults to ``None``."""
+        """拼失败信封；``data`` 恒为 ``None``。"""
         return ApiResponse(code=code, data=None, message=message)
 
 

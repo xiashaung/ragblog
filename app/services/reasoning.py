@@ -61,6 +61,8 @@ class ThinkSplitter:
     """
 
     def __init__(self) -> None:
+        """初始为「正文状态 + 空缓冲」，几个暂存位一并清零。"""
+        #: 是否认定过思考内容，供调用方判断这段回答有没有思考
         self.saw_think = False
         self._buf = ""
         self._state = _OUT
@@ -71,6 +73,7 @@ class ThinkSplitter:
         self._ever_had_think_content = False
 
     def feed(self, text: str) -> list[tuple[str, str]]:
+        """喂一块流式内容，返此刻可安全外发的 ``(类型, 文本)`` 片段。"""
         self._buf += text
         return self._drain(final=False)
 
@@ -98,6 +101,11 @@ class ThinkSplitter:
     # ---- 内部 ----
 
     def _drain(self, *, final: bool) -> list[tuple[str, str]]:
+        """状态机主循环：从缓冲里一段段取正文/思考，直到没有确定性进展。
+
+        ``final=True``（流已结束）时不再预留尾巴：没下一块了，半截标签只能当正文发。
+        未确认闭合前先攒在 ``_pending_*`` 里，所以孤立开标签最后能还原成正文。
+        """
         out: list[tuple[str, str]] = []
         while True:
             if self._state == _OUT:

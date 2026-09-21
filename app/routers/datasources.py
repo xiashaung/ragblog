@@ -29,6 +29,7 @@ async def list_data_sources(
     session: AsyncSession = Depends(get_db),
     _principal: Principal = Depends(deps.require_permission(Permission.DATASOURCE_READ)),
 ) -> list[DataSourceOut]:
+    """列出全部数据源（含已禁用的），连接串只给掩码。"""
     return await services.datasource.list_sources(session)
 
 
@@ -40,6 +41,7 @@ async def create_data_source(
         deps.require_permission(Permission.DATASOURCE_MANAGE)
     ),
 ) -> DataSourceOut:
+    """新建数据源：名称唯一性与方言白名单由服务层把关，业务失败一律转 400。"""
     row = await services.datasource.create(
         session,
         name=payload.name,
@@ -61,6 +63,7 @@ async def update_data_source(
         deps.require_permission(Permission.DATASOURCE_MANAGE)
     ),
 ) -> DataSourceOut:
+    """部分更新：改过连接串 / 方言后会释放旧连接池，下次用时重建。"""
     row = await services.datasource.update(
         session,
         source_id,
@@ -82,6 +85,7 @@ async def delete_data_source(
         deps.require_permission(Permission.DATASOURCE_MANAGE)
     ),
 ) -> dict:
+    """删数据源（连带释放它的连接池）；id 不存在由服务层抛 400。"""
     await services.datasource.delete(session, source_id)
     return {"deleted": True}
 
@@ -94,6 +98,7 @@ async def test_data_source(
         deps.require_permission(Permission.DATASOURCE_MANAGE)
     ),
 ) -> DataSourceTestResult:
+    """连通性测试：拿没保存的表单也能试；编辑态下 url 留空则沿用库里已存的。"""
     return await services.datasource.test_connection(
         session,
         dialect=payload.dialect,

@@ -60,6 +60,7 @@ def _derive_title(text: str) -> str:
 
 
 def _session_out(row: ChatSessionRow, message_count: int = 0) -> ChatSessionOut:
+    """会话行 → 对外模型（条数由调用方一次查好传进来，不在此隐式查库）。"""
     return ChatSessionOut(
         id=row.id,
         title=row.title,
@@ -80,6 +81,7 @@ def _loads(raw: str | None, fallback):
 
 
 def _message_out(row: ChatMessageRow) -> ChatMessageOut:
+    """消息行 → 对外模型：把 ``meta_json`` 里的用量/网页来源/思考拆回字段。"""
     meta = _loads(row.meta_json, {})
     usage = meta.get("usage") if isinstance(meta, dict) else None
     raw_sources = meta.get("web_sources") if isinstance(meta, dict) else None

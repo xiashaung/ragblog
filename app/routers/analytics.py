@@ -26,6 +26,7 @@ router = APIRouter()
 
 
 def _ensure_enabled() -> None:
+    """本模块所有接口的共用闸门：功能开关没开就 403（而不是 404，方便定位）。"""
     if not get_settings().analytics_enabled:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "智能问数功能未启用（APP_ANALYTICS_ENABLED=false）"

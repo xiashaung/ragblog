@@ -34,14 +34,17 @@ class Principal:
     permissions: list[str]
 
     def can(self, code: str) -> bool:
+        """单个权限码判定，含通配（具体规则集中在 :func:`rbac.grants`）。"""
         return grants(self.permissions, code)
 
     @property
     def is_superadmin(self) -> bool:
+        """是否持有内置超管角色——提权类守卫只看这个。"""
         return SUPERADMIN_ROLE in self.roles
 
 
 def _role_id() -> str:
+    """角色主键：``role_`` + 短随机位。"""
     return f"role_{uuid.uuid4().hex[:12]}"
 
 
@@ -135,7 +138,7 @@ async def role_payload(session: AsyncSession, role: RoleRow) -> dict:
 async def ensure_superadmin_membership(
     session: AsyncSession, admin_id: str
 ) -> RoleRow | None:
-    """Bind an account to the built-in superadmin role (used by first-run onboarding)."""
+    """把账号绑到内置超管角色（首次引导专用）；角色还没建时返 ``None``。"""
     role = await session.scalar(select(RoleRow).where(RoleRow.code == SUPERADMIN_ROLE))
     if role is None:
         return None
@@ -151,17 +154,23 @@ async def ensure_superadmin_membership(
 
 
 async def _role_by_id(session: AsyncSession, role_id: str) -> RoleRow | None:
+    """按主键取角色，不存在返 ``None``（调用方负责翻译成业务错）。"""
     return await session.get(RoleRow, role_id)
 
 
 async def _roles_by_code(session: AsyncSession, codes: list[str]) -> list[RoleRow]:
+    """按 code 批量取角色；只做一次 IN 查询，不逐个回库。"""
     if not codes:
         return []
     return list((await session.scalars(select(RoleRow).where(RoleRow.code.in_(codes)))).all())
 
 
 async def ensure_builtin_roles(session: AsyncSession) -> int:
-    """Insert / repair the built-in roles. Idempotent (migration + bootstrap share it)."""
+    """插入 / 修复内置角色，幂等（Alembic 迁移与启动种子共用同一份定义）。
+
+    已存在的内置角色会被重写 permissions：代码里的权限表是唯一事实源，
+    升级后不用手工迁数据；只过滤非法码（``filter_valid_permissions``），不碰自定义角色。
+    """
     existing = {
         role.code: role
         for role in (await session.scalars(select(RoleRow))).all()
@@ -230,6 +239,11 @@ async def update_role(
     permissions: list[str] | None = None,
     actor: Principal | None = None,
 ) -> RoleRow:
+    """改角色名 / 描述 / 权限集。
+
+    超管角色的权限一律拒改（收掉它会把管理员自己锁在门外）；
+    其他角色改权限时同样要过通配码与提权两道闸门。
+    """
     role = await _role_by_id(session, role_id)
     if role is None:
         raise ValueError("角色不存在")
@@ -252,6 +266,7 @@ async def update_role(
 
 
 async def delete_role(session: AsyncSession, role_id: str) -> None:
+    """删角色：内置角色不可删，还有成员时也不让删（避免默默收权）。"""
     role = await _role_by_id(session, role_id)
     if role is None:
         raise ValueError("角色不存在")
@@ -274,7 +289,7 @@ def _guard_wildcard(wanted: list[str]) -> None:
     """通配 ``*`` 只能属于内置 superadmin。
 
     否则可以再造一个全权角色（可删、非超管同义词）来绕过
-    “最后一个超管不能删 / 不能降权”这类保护。
+    「最后一个超管不能删 / 不能降权」这类保护。
     """
     if WILDCARD in wanted:
         raise ValueError("只有内置超级管理员可以持有全部权限（*），请逐条勾选权限码")
@@ -423,6 +438,7 @@ async def set_account_roles(
 async def delete_account(
     session: AsyncSession, admin_id: str, *, actor: Principal | None = None
 ) -> None:
+    """删账号：不能自删，也不能删最后一个可用超管；连带清掉角色关系与会话。"""
     if actor is not None and actor.admin_id == admin_id:
         raise ValueError("不能删除自己的账号")
     admin = await session.get(AdminUser, admin_id)
@@ -437,7 +453,7 @@ async def delete_account(
 
 
 async def revoke_sessions(session: AsyncSession, admin_id: str) -> int:
-    """Drop every live token of an account (disabled / deleted / password reset)."""
+    """清掉一个账号名下的全部 token（停用 / 删除 / 重置密码时都要调）。返删除条数。"""
     result = await session.execute(
         delete(AdminSession).where(AdminSession.admin_id == admin_id)
     )
@@ -470,6 +486,7 @@ def _guard_role_assignment(roles: list[RoleRow], actor: Principal | None) -> Non
 
 
 def _role_can_manage_roles(role: RoleRow) -> bool:
+    """该角色是否带「能再改角色/授权」的权限（通配或 ``role:manage``）。"""
     perms = role.permissions or []
     return WILDCARD in perms or "role:manage" in perms
 
@@ -498,6 +515,7 @@ async def _is_last_active_superadmin(session: AsyncSession, admin_id: str) -> bo
 async def _write_memberships(
     session: AsyncSession, admin_id: str, roles: list[RoleRow]
 ) -> None:
+    """追加写入账号—角色关系；覆盖式设置要靠调用方先清掉旧关系。"""
     for role in roles:
         session.add(AdminRoleRow(admin_id=admin_id, role_id=role.id))
     await session.flush()

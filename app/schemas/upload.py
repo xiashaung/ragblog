@@ -1,9 +1,13 @@
-"""Upload-related schemas for RAG file ingestion."""
+"""文件上传相关模型（RAG 录入）。
+
+注意：这里只放上传结果类型；录入请求/响应本体在 ``schemas.ai``，
+仍从这里 re-export 一份，避免「文件上传」与「文本录入」两个入口的形状飘开。
+"""
 
 from pydantic import BaseModel, Field
 
-# The ingest request/response shapes live in ``schemas.ai`` and are re-exported
-# here so the file-upload and text-ingest entry points cannot drift apart.
+# 录入请求 / 响应只在 ``schemas.ai`` 里定义一份，这里转发出去，
+# 两个入口不可能各自改坏
 from .ai import KnowledgeIngestRequest, KnowledgeIngestResponse
 
 __all__ = [
@@ -16,11 +20,11 @@ __all__ = [
 
 
 class UploadStatusResponse(BaseModel):
-    """Response from file upload endpoint."""
+    """单文件上传接口的响应（成功与失败都是 200，看 ``status``）。"""
 
     status: str = Field(
         ...,
-        description="'success' or 'error'",
+        description="success 或 error",
         pattern="^(success|error)$",
     )
     knowledge_id: str | None = None
@@ -30,13 +34,13 @@ class UploadStatusResponse(BaseModel):
 
 
 class UploadBatchItem(UploadStatusResponse):
-    """Outcome of one file in a batch upload (title comes from the filename)."""
+    """批量上传里单个文件的结果（标题取自文件名）。"""
 
     filename: str = ""
 
 
 class UploadBatchResponse(BaseModel):
-    """Per-file results; partial success is expected, not an error."""
+    """逐文件结果 + 计数；部分成功是预期行为，不算错。"""
 
     results: list[UploadBatchItem] = []
     total: int = 0

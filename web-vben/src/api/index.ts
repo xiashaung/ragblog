@@ -66,6 +66,49 @@ export const adminApi = {
         adminRequest<{ revoked: boolean }>({url: `/admin/sessions/${id}`, method: 'delete'}),
     // 登出
     logout: () => httpAdmin.post(`/admin/logout`),
+    
+    // --- 系统配置 ---
+    // 获取所有系统配置
+    getSystemConfigs: () => httpAdmin.request<Record<string, string>>({
+        url: '/v1/system/config/',
+        method: 'get'
+    }).then(res => res.data),
+    // 设置聊天模型 provider
+    setChatProvider: (value: string) => httpAdmin.request<string>({
+        url: '/v1/system/config/chat-provider',
+        method: 'patch',
+        data: { value }
+    }).then(res => res.data),
+    // 设置知识库问答模型 provider
+    setRagProvider: (value: string) => httpAdmin.request<string>({
+        url: '/v1/system/config/rag-provider',
+        method: 'patch',
+        data: { value }
+    }).then(res => res.data),
+    // 启用/禁用重排序服务
+    toggleRerank: (value: string) => httpAdmin.request<boolean>({
+        url: '/v1/system/config/rerank-enabled',
+        method: 'patch',
+        data: { value }
+    }).then(res => res.data),
+    // 设置向量嵌入 provider
+    setEmbeddingProvider: (value: string) => httpAdmin.request<string>({
+        url: '/v1/system/config/embedding_provider',
+        method: 'patch',
+        data: { value }
+    }).then(res => res.data),
+    // 设置重排序服务地址
+    setRerankBaseUrl: (value: string) => httpAdmin.request<string>({
+        url: '/v1/system/config/rerank_base_url',
+        method: 'patch',
+        data: { value }
+    }).then(res => res.data),
+    // 设置重排序模型
+    setRerankModel: (value: string) => httpAdmin.request<string>({
+        url: '/v1/system/config/rerank_model',
+        method: 'patch',
+        data: { value }
+    }).then(res => res.data),
 };
 
 /* ---------------- RBAC：权限目录 / 角色 / 账号 ---------------- */
@@ -95,6 +138,13 @@ export const rbacApi = {
         adminRequest<AccountItem>({url: `/admin/accounts/${id}/roles`, method: 'put', data: {roles}}),
     removeAccount: (id: string) =>
         adminRequest<{ deleted: boolean }>({url: `/admin/accounts/${id}`, method: 'delete'}),
+};
+
+/* ---------------- 系统配置 · 模型选择（只读，登录态即可）---------------- */
+// 概览页用它显示「各功能当前用的是哪个 provider」：值来自数据库，.env 兜底。
+export const systemConfigApi = {
+    models: () =>
+        request<Record<string, string>>({url: '/system/config/models', method: 'get'}),
 };
 
 /* ---------------- OpenAI 兼容 / AI 接口 ---------------- */

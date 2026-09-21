@@ -1,13 +1,12 @@
-"""Admin dashboard routes (RBAC protected).
+"""控制台后台路由（RBAC 保护）。
 
-Authentication is a valid bearer token minted by ``services.admin_service`` and
-stored (hashed) in ``admin_sessions``. Authorization is role based: every
-management endpoint declares the permission code it needs via
-``deps.require_permission(...)``, codes being defined in ``app/rbac.py``.
+鉴权：一个由 ``services.admin_service`` 签发、以摘要形式存在 ``admin_sessions``
+里的 Bearer token；授权：每个管理接口都用
+``deps.require_permission(...)`` 声明自己需要的权限码（码表在 ``app/rbac.py``）。
 
-Public: ``/admin/onboard`` (first account only), ``/admin/login``.
-The SPA carries the token in ``Authorization: Bearer ...`` and also as the
-``admin_token`` cookie so refresh logic can fall back to it.
+公开的只有两个：``/admin/onboard``（只能建首个账号）与 ``/admin/login``。
+SPA 把 token 放在 ``Authorization: Bearer ...`` 里，同时也写一份 ``admin_token``
+cookie，好让刷新逻辑在请求没带头时能退回读 cookie。
 """
 
 from __future__ import annotations
@@ -44,7 +43,7 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 def _extract_token(request) -> str:
-    """Best-effort token extraction: Authorization header or admin_token cookie."""
+    """尽量拿到 token：先看 Authorization 头，再退到 ``admin_token`` cookie。"""
     bearer = request.headers.get("Authorization", "")
     if bearer.startswith("Bearer "):
         return bearer[7:].strip()
@@ -76,11 +75,13 @@ async def onboard(
     request: Request,
     session: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Create the very first super-admin account (idempotent-ish guard).
+    """建第一个超管账号（公网上唯一的首次入口）。
 
-    Fails if any admin already exists, so repeated onboarding calls are safe;
-    intended only for first-time setup / ``seed`` CLI. 之后新建账号请走
-    ``POST /admin/accounts``（需 ``account:manage``）。
+    库里已有账号就失败，所以反复调也不会提权；只给首次引导 / ``seed`` CLI 用。
+    之后新建账号请走 ``POST /admin/accounts``（需 ``account:manage``）。
+
+    先用引导密钥证明「是运维本人」，再才去建账号；服务层的
+    ``ValueError``（已存在账号）翻译成 409。
     """
     _ensure_bootstrap_key(request)
     try:
@@ -101,6 +102,10 @@ async def login(
     request: Request,
     session: AsyncSession = Depends(get_db),
 ) -> AdminLoginResponse:
+    """账号口令登录：返 token + 角色/权限，同时下发 httpOnly cookie。
+
+    口令错 / 账号停用都归 401（服务层的 ``ValueError`` 在这里接）。
+    """
     try:
         result = await services.admin_service.login(session, payload.username, payload.password)
     except ValueError as exc:
@@ -114,7 +119,7 @@ async def login(
         httponly=True,
         samesite="lax",
         max_age=expires_in,
-        secure=False,  # set True behind HTTPS
+        secure=False,  # 上 HTTPS 后要改成 True
     )
     return result
 
@@ -126,6 +131,7 @@ async def logout(
     session: AsyncSession = Depends(get_db),
     admin_id: str = Depends(deps.require_admin_session),
 ) -> dict:
+    """登出：删掉本次 token 对应的会话行，并抹掉 cookie。"""
     token = _extract_token(request)
     await services.admin_service.logout(session, token)
     response.delete_cookie("admin_token")
@@ -138,7 +144,7 @@ async def refresh(
     session: AsyncSession = Depends(get_db),
     _admin_id: str = Depends(deps.require_admin_session),
 ) -> AdminToken:
-    """Rotates the caller's token; expires the previously-valid one."""
+    """旋转调用方自己的 token：旧的当场作废，新的返回去。"""
     token = _extract_token(request)
     try:
         result = await services.admin_service.refresh_token(session, token)
@@ -177,6 +183,7 @@ async def list_live_sessions(
     session: AsyncSession = Depends(get_db),
     _principal: Principal = Depends(deps.require_permission(Permission.SESSION_READ)),
 ) -> list[dict]:
+    """列出当前未过期的会话（看哪个账号在几台设备上登录着）。"""
     return await services.admin_service.list_live_sessions(session)
 
 
@@ -209,6 +216,7 @@ async def list_roles(
     session: AsyncSession = Depends(get_db),
     _principal: Principal = Depends(deps.require_permission(Permission.ROLE_READ)),
 ) -> list[dict]:
+    """角色列表（带成员数）。"""
     return await services.rbac_service.list_roles(session)
 
 
@@ -218,6 +226,7 @@ async def create_role(
     session: AsyncSession = Depends(get_db),
     principal: Principal = Depends(deps.require_permission(Permission.ROLE_MANAGE)),
 ) -> dict:
+    """新建角色：把当前身份作为 ``actor`` 传下去，过提权与通配码两道闸门。"""
     role = await services.rbac_service.create_role(
         session,
         code=payload.code,
@@ -236,6 +245,7 @@ async def update_role(
     session: AsyncSession = Depends(get_db),
     principal: Principal = Depends(deps.require_permission(Permission.ROLE_MANAGE)),
 ) -> dict:
+    """改角色名 / 描述 / 权限集；服务层的 ``ValueError`` 由全局处理器转 400。"""
     role = await services.rbac_service.update_role(
         session,
         role_id,
@@ -253,6 +263,7 @@ async def delete_role(
     session: AsyncSession = Depends(get_db),
     _principal: Principal = Depends(deps.require_permission(Permission.ROLE_MANAGE)),
 ) -> dict:
+    """删角色（内置角色 / 还有成员时拒删）。"""
     await services.rbac_service.delete_role(session, role_id)
     return {"deleted": True}
 
@@ -261,6 +272,7 @@ async def delete_role(
 
 
 async def _account_payload(session: AsyncSession, admin: AdminUser) -> AccountOut:
+    """拼账号响应：额外查一次它当前生效的角色 code。"""
     roles, _permissions = await services.rbac_service.permissions_for(session, admin.id)
     return AccountOut(
         id=admin.id,
@@ -277,6 +289,7 @@ async def list_accounts(
     session: AsyncSession = Depends(get_db),
     _principal: Principal = Depends(deps.require_permission(Permission.ACCOUNT_READ)),
 ) -> list[dict]:
+    """账号列表 + 各自角色。"""
     return await services.rbac_service.list_accounts(session)
 
 
@@ -286,6 +299,7 @@ async def create_account(
     session: AsyncSession = Depends(get_db),
     principal: Principal = Depends(deps.require_permission(Permission.ACCOUNT_MANAGE)),
 ) -> AccountOut:
+    """新建后台账号并分配角色（分配超管类角色只有超管能做）。"""
     admin = await services.rbac_service.create_account(
         session,
         username=payload.username,
@@ -304,6 +318,7 @@ async def update_account(
     session: AsyncSession = Depends(get_db),
     principal: Principal = Depends(deps.require_permission(Permission.ACCOUNT_MANAGE)),
 ) -> AccountOut:
+    """改名 / 启停 / 重置密码；停用与改密都会踢掉该账号的在线会话。"""
     admin = await services.rbac_service.update_account(
         session,
         account_id,
@@ -322,6 +337,7 @@ async def set_account_roles(
     session: AsyncSession = Depends(get_db),
     principal: Principal = Depends(deps.require_permission(Permission.ACCOUNT_MANAGE)),
 ) -> AccountOut:
+    """覆盖式设置账号角色（收回最后一个超管会被服务层拒）。"""
     admin = await services.rbac_service.set_account_roles(
         session, account_id, payload.roles, actor=principal
     )
@@ -334,5 +350,6 @@ async def delete_account(
     session: AsyncSession = Depends(get_db),
     principal: Principal = Depends(deps.require_permission(Permission.ACCOUNT_MANAGE)),
 ) -> dict:
+    """删账号（不能自删、不能删最后一个可用超管）；``actor`` 用于这两项判定。"""
     await services.rbac_service.delete_account(session, account_id, actor=principal)
     return {"deleted": True}

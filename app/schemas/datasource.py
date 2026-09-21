@@ -21,6 +21,8 @@ DATA_SOURCE_DIALECTS = ("sqlite", "mysql", "postgresql")
 
 
 class DataSourceCreate(BaseModel):
+    """新建数据源的入参：名称 + 方言 + 连接串（服务层会归一成异步驱动）。"""
+
     name: str = Field(..., min_length=1, max_length=100)
     dialect: str = Field(..., description="sqlite | mysql | postgresql")
     url: str = Field(
@@ -48,6 +50,8 @@ class DataSourceUpdate(BaseModel):
 
 
 class DataSourceOut(BaseModel):
+    """对外的数据源：拿 ``url_masked`` 取代 ``url``，明文连接串不会外泄。"""
+
     id: str
     name: str
     dialect: str
@@ -68,6 +72,8 @@ class DataSourceTestRequest(BaseModel):
 
 
 class DataSourceTestResult(BaseModel):
+    """连通测试结果：不管成败都 200，结果看 ``ok`` 与中文 ``detail``。"""
+
     ok: bool
     detail: str = ""
-    table_count: int = -1
+    table_count: int = -1  # -1 表示没数出来（不影响连通结论）

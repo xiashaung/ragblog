@@ -104,7 +104,7 @@ WEB_SYSTEM_HINT = (
 )
 
 # 历史里出现过这类自我否定时，得明确纠一次：小模型会模仿自己上几轮的说法，
-# 一句“我无法联网”进了上下文，后面问什么它都懒得调工具（实测会被复读好几轮）。
+# 一句「我无法联网」进了上下文，后面问什么它都懒得调工具（实测会被复读好几轮）。
 REFUSAL_CORRECTION = (
     "更正：上面历史消息里“无法联网 / 不能实时查询 / 运行在封闭环境”的说法已经失效。"
     "你现在可以调用 web_search 与 fetch_page，工具也已启用。"
@@ -127,6 +127,7 @@ class ToolResult:
     error: str | None = None
 
     def as_chunk_payload(self) -> dict:
+        """给前端的工具事件体（只给状态与链接，不含喂模型的 ``content``）。"""
         return {
             "name": self.name,
             "ok": self.ok,
@@ -182,6 +183,11 @@ async def execute(name: str, arguments: str | dict | None) -> ToolResult:
 
 
 def _parse_args(arguments: str | dict | None) -> dict:
+    """把模型给的调用参数弄成 dict（可以是 JSON 串、已解开的 dict、或空）。
+
+    解不开时不直接报错：小模型偶尔吐出半截 JSON，能从中抠出 query/url 就
+    当参数用，比拒收更可能救回这一轮；真提不出来就把原文当 query 使。
+    """
     if isinstance(arguments, dict):
         return arguments
     raw = (arguments or "").strip()
@@ -199,6 +205,11 @@ def _parse_args(arguments: str | dict | None) -> dict:
 
 
 async def _run_search(query: str, count: object) -> ToolResult:
+    """执行 web_search：把结果排成给模型读的编号列表。
+
+    ``count`` 是模型自己传的（可能是字符串/负数），只接正整数，其余一律用配置默认值。
+    回喂文本里额外追一句「引用编号与链接」，否则模型会把摘要改了口就当自己的结论。
+    """
     wanted = None
     if isinstance(count, (int, float)) and int(count) > 0:
         wanted = int(count)
@@ -217,6 +228,11 @@ async def _run_search(query: str, count: object) -> ToolResult:
 
 
 async def _run_fetch(url: str) -> ToolResult:
+    """执行 fetch_page：先挡内网，再抓页，把正文当工具结果回喂。
+
+    两道 SSRF 防线：入口过 :func:`assert_public_url`，重定向落点再查一次（httpx
+    已在内部跟随，不复查就可能被拐到内网）。拦下时给出中文原因，模型据此改口。
+    """
     if not url:
         return ToolResult(name="fetch_page", ok=False, content="缺少 url 参数", error="bad_args")
     try:
@@ -252,7 +268,7 @@ async def _run_fetch(url: str) -> ToolResult:
     )
 
 
-# ---------------- 工具循环：“生成 → 执行工具 → 再生成” ----------------
+# ---------------- 工具循环：「生成 → 执行工具 → 再生成」 ----------------
 
 ROUND_LIMIT_HINT = (
     "已达到工具调用次数上限，工具已停用。不要再输出任何工具调用格式，"
@@ -270,9 +286,9 @@ ROUND_LIMIT_CALLED = (
     "把问题拆小一点（只问一个对象、限定时间）再问一次通常就能拿到答案。"
 )
 
-# 实测过的事实：模型会“苏州实时天气”→“苏州今天天气 实时”→“苏州今日天气 温度”
+# 实测过的事实：模型会「苏州实时天气」→「苏州今天天气 实时」→「苏州今日天气 温度」
 # 这样连搜三轮，每次拿回同一批结果，把轮数烧光也没新信息，最后什么都答不上。
-# 结果集合重复本身就是“再搜也不会有新东西”的确定信号，比靠提示词求它收手更可靠。
+# 结果集合重复本身就是「再搜也不会有新东西」的确定信号，比靠提示词求它收手更可靠。
 REPEAT_STOP_HINT = (
     "已停止继续搜索：刚才换了词但结果与前面完全相同，不会又有新信息。"
     "请基于上面已有的搜索结果直接给出结论，确实查不到的部分就说明查不到。"
@@ -349,11 +365,11 @@ def _hold_back(buf: str) -> int:
 
 
 def _is_marker_tail(buf: str) -> bool:
-    """缓冲末尾这段是不是“没写完的标记”（流被 max_tokens 切在标记中间时会出现）。
+    """缓冲末尾这段是不是「没写完的标记」（流被 max_tokens 切在标记中间时会出现）。
 
     不能只判 ``buf`` 是某个候选的前缀：截断后 buffer 是 ``\n<tool_call>`` 这种
     带前导换行的形态，得从最后一个 ``<`` 起判。长度卡到 2 以上是为了避免
-    把“a<”这种比大小的正文尾巴吞掉。
+    把「a<」这种比大小的正文尾巴吞掉。
     """
     low = buf.lower()
     head = max(low.rfind("<"), low.rfind("|"))
@@ -377,6 +393,7 @@ class CallMarkupScrubber:
     """
 
     def __init__(self) -> None:
+        """空开头：缓冲、状态机位置、当前函数名、工具调用序号全部复位。"""
         self.calls: list[ToolCall] = []
         self._buf = ""
         self._state = _OUT
@@ -384,6 +401,7 @@ class CallMarkupScrubber:
         self._seq = 0
 
     def feed(self, text: str) -> str:
+        """喂一块流式内容，返可以安全外发的部分（标记内的内容一律不下发）。"""
         self._buf += text
         return self._drain()
 
@@ -406,6 +424,11 @@ class CallMarkupScrubber:
     # ---- 内部 ----
 
     def _drain(self) -> str:
+        """状态机主循环：从缓冲里一段段取正文/吃标记，直到没有确定性进展。
+
+        三个状态（_OUT / _IN_BLOCK / _IN_BARE）下的「边界」不是同一个正则，所以
+        分支处理；拿不准是否半个标记时直接 break 等下一块，宁可攒着也不能误删正文。
+        """
         out: list[str] = []
         while True:
             if self._state == _OUT:
@@ -452,7 +475,7 @@ class CallMarkupScrubber:
     def _begin(self, tail: str) -> bool:
         """从 ``tail``（以开标记开头）进入块状态并记下函数名。
 
-        返回 False 表示“看得到个开头但还不完整”，调用方得攒着等下一块——
+        返回 False 表示「看得到个开头但还不完整」，调用方得攒着等下一块——
         不返回这个信号的话，扫描会原地反复匹配同一个开头，循环出不来。
         """
         for pattern in (_WRAP_OPEN_RE, _FUNC_RE):
@@ -478,6 +501,11 @@ class CallMarkupScrubber:
         return False
 
     def _finish(self, name: str, body: str) -> None:
+        """块收完：从体内解出参数，能认成已注册工具就追进 :attr:`calls`。
+
+        认不出工具名时静吞掉（不报错也不外发）：伪标记本来就是垃圾文本，
+        把它漏给用户只会得到一屏 XML。
+        """
         # 包裹块里的函数名是块内 ``<function=name>`` 给的，进块时拆不出来就在这儿取
         if not name:
             match = _FUNC_RE.search(body)
@@ -540,24 +568,25 @@ def tools_enabled(web_mode: str) -> bool:
 
 
 # 该查却不查时，auto 完全把判断交给一个 4-bit 模型（实测：同样的问题单独问会搜，
-# 前面聊过几句“我不能联网”后就改口拒绝）。这段字面识别把“明显需要实时数据”的
+# 前面聊过几句「我不能联网」后就改口拒绝）。这段字面识别把「明显需要实时数据」的
 # 那类问题在第一轮就硬性先搜一次，让结果可预测。
 _TIME_SENSITIVE_RE = re.compile(
     r"天气|气温|温度|下雨|下雪|台风|空气指数|空气质量"
     r"|股价|行情|大盘|指数|汇率|油价|金价|票价"
     r"|比分|赛果|赛程|成绩|排名|榜单|得分"
     r"|新闻|公告|动态|进展|发布|上线|发售"
-    # 时事类提法（“…会怎么样”“有什么影响”“近况”）：光靠天气/价格这类名词盖不全公司、人物类问题。
-    # 这里宁可误搜不可漏搜：漏了就是拿训练记忆编“现状”，误搜只是多花一次额度。
-    # “怎么/什么”都得收：实跑里用户写的是“会有怎么样的影响”，模型复述时写成“什么样”。
-    # “影响”不能单独立词（“这个索引对查询性能的影响”是开发问题），只收完整的时事提法
+    # 时事类提法（「…会怎么样」「有什么影响」「近况」）：光靠天气/价格这类名词
+    # 盖不全公司、人物类问题。
+    # 这里宁可误搜不可漏搜：漏了就是拿训练记忆编「现状」，误搜只是多花一次额度。
+    # 「怎么/什么」都得收：实跑里用户写的是「会有怎么样的影响」，模型复述时写成「什么样」。
+    # 「影响」不能单独立词（「这个索引对查询性能的影响」是开发问题），只收完整的时事提法
     r"|会[有]?[怎什][么]?[样]?|什么影响|哪些影响|有何影响|怎样的影响|近况|动向|现状|前景如何"
     r"|最新|最近|现在|此刻|今天|今晚|明天|后天|本周|本月|今年"
     r"|多少度|几点|版本号?|最新一?版"
     r"|目前|当前|实时|今日|昨天|前一天"
 )
 
-# 反向掩码：纯寒暄/翻译/解释类不要因为带了“今天/现在”就白烧一次搜索额度。
+# 反向掩码：纯寒暄/翻译/解释类不要因为带了「今天/现在」就白烧一次搜索额度。
 _SMALL_TALK_RE = re.compile(
     r"^(你好|您好|嗨|哈喽|hello|hi|hey|早上好|晚上好|谢谢|多谢|感谢|再见|拜拜|好的|ok)"
     r"|(翻译|改写|润色|校对|错别字|解释一下|什么意思|总结一下|起名|写一段|写一条)"
@@ -593,7 +622,7 @@ def needs_web(query: str) -> bool:
 
 
 def first_round_choice(web_mode: str, query: str) -> str:
-    """首轮该不该先搜（``required`` 会被当成“由服务端先检索一次”的意图）。
+    """首轮该不该先搜（``required`` 会被当成「由服务端先检索一次」的意图）。
 
     注意：这个值只是**意图**。实测 omlx 一类端点会直接忽略 ``tool_choice=required``
     （required / auto / 不传三种写法触发率一样），所以真需要搜的时候不能指望端点，
@@ -604,15 +633,15 @@ def first_round_choice(web_mode: str, query: str) -> str:
     return "required" if needs_web(query) else "auto"
 
 
-# 历史里助手自己说过“不能联网”就算污染。刻意拆成两个词表判同现，而不是一条贴着写的正则：
-# 实跑数据里的措词带markdown 星号、也有插入语（“无法**自动**通过百度…查询”、“不能直接实时联网”），
-# 贴着匹配会全部漏掉。
+# 历史里助手自己说过「不能联网」就算污染。刻意拆成两个词表判同现，而不是一条贴着写的正则：
+# 实跑数据里的措词带 markdown 星号、也有插入语（「无法**自动**通过百度…查询」、
+# 「不能直接实时联网」），贴着匹配会全部漏掉。
 _REFUSAL_DENY_RE = re.compile(r"无法|不能|不可以|没法|没有|不具备|不支持|未能")
 _REFUSAL_WEB_RE = re.compile(r"联网|上网|访问网络|互联网|搜索引擎|在线查询")
 
 
 def _history_denies_web(messages: list[ChatMessage]) -> bool:
-    """历史里有没有“我不能联网”式的自我否定（只看助手消息，用户怎么问不算）。"""
+    """历史里有没有「我不能联网」式的自我否定（只看助手消息，用户怎么问不算）。"""
     for msg in reversed(messages):
         if msg.role != "assistant" or not isinstance(msg.content, str):
             continue  # 工具回合的助手消息 content 是 None，直接跳过
@@ -638,21 +667,21 @@ async def stream_with_tools(
 
     几个不直觉但重要的细节：
 
-    - **每轮的收尾 chunk 先攒住不发**：它带 ``done=True``，中途发出去前端会当成“整段结束”。
+    - **每轮的收尾 chunk 先攒住不发**：它带 ``done=True``，中途发出去前端会当成「整段结束」。
       只有确认本轮不再要工具时才连同累计 usage 一起发出。
     - **``tool_calls`` 是给上层的信号，不透给浏览器**；给浏览器的是 ``tool`` 事件（两 phase）。
     - **思考过程与答案分字段走**：``chunk.reasoning`` 逐块直发（字段路与标签路
       在此汇流），不回喂模型也不进工具回合：那是模型给自己看的过程，
-      塞回上下文只会把 prompt 顶胀。上限轮例外：那里的“思考”就是正文本身。
+      塞回上下文只会把 prompt 顶胀。上限轮例外：那里的「思考」就是正文本身。
     - **json 模式与工具不共存**：既要 ``response_format=json_object`` 又要函数调用，
       多数兼容端点会直接拒绝，而且结构化输出中间插工具回合会把答案弄碎。
-      所以“要 JSON”优先，此时不挂工具（``forced`` 也一样），而不是默默丢掉 JSON 模式。
+      所以「要 JSON」优先，此时不挂工具（``forced`` 也一样），而不是默默丢掉 JSON 模式。
     - **token 用量是跨轮累加的**：开了联网后一轮提问可能打了三次模型，只报最后一段
       会让前端显示的用量严偏小。
-    - **超轮数就剥掉工具强制作答**：不这么做，模型会卡在“再搜一下试试”的循环里烧额度。
+    - **超轮数就剥掉工具强制作答**：不这么做，模型会卡在「再搜一下试试」的循环里烧额度。
     - **``auto`` 不等于完全交给模型**：时效性问题（天气/股价/新闻…）首轮强制先搜，
-      历史里出现过“我不能联网”式的自我否定时再补一条更正提示——两者都是为了让
-      “该查的问题”必定去查，而不是依赖 4-bit 模型自己想起来它有工具。
+      历史里出现过「我不能联网」式的自我否定时再补一条更正提示——两者都是为了让
+      「该查的问题」必定去查，而不是依赖 4-bit 模型自己想起来它有工具。
     """
     settings = get_settings()
     # 结构化输出优先：它一旦成立，中途开工具会把答案切碎、也会被严格 json 模式拒绝
@@ -680,17 +709,17 @@ async def stream_with_tools(
     # 累计已经拿到手的真实来源：上限轮模型只吐伪标记时，这些链接就是能给用户的最后答案
     collected: list[WebSource] = []
     seen_urls: set[str] = set()
-    # 已经出现过的搜索结果集合（按 URL 集签名）：用来识别“换个词再搜拿到同一批结果”
+    # 已经出现过的搜索结果集合（按 URL 集签名）：用来识别「换个词再搜拿到同一批结果」
     search_sigs: set[tuple[str, ...]] = set()
 
     if enabled and first_choice == "required" and last_q:
-        # 预检索：把“必查”寄托在端点遵守 tool_choice 上是假的（实测会被忽略，而且
+        # 预检索：把「必查」寄托在端点遵守 tool_choice 上是假的（实测会被忽略，而且
         # 模型也可能干脆凭记忆开说）。所以判定该搜时我们自己搜一次，再合成一个工具
         # 回合喂进去，模型只负责基于结果作答。
         round_no = 1
         # 预检索不能占模型的调用额度：实跑「预检索 + 一次失败搜索 + 一次成功搜索」
         # 正好把 max_rounds=3 用光，上限轮只吐伪标记，手里握着 5 条好来源却给用户
-        # 一句“没额度了”。多给一轮只多一次搜索，但能正常拿到答案。
+        # 一句「没额度了」。多给一轮只多一次搜索，但能正常拿到答案。
         max_rounds += 1
         arguments = json.dumps({"query": last_q}, ensure_ascii=False)
         detail = f"预检索：{last_q}"
@@ -746,7 +775,7 @@ async def stream_with_tools(
         # 攒住的正文：上限轮整段可能都是伪标记，逐块发会先闪一屏 XML；
         # 收尾块里带的正文也放这里，免得和已经逐块发出的内容重复
         held: list[str] = []
-        repeated = False  # 本轮里有没有“搜到了重复结果”：有则下一轮就停止搜索
+        repeated = False  # 本轮里有没有「搜到了重复结果」：有则下一轮就停止搜索
         async for chunk in backend.chat_stream(  # type: ignore[attr-defined]
             msgs,
             model=model,
@@ -754,7 +783,7 @@ async def stream_with_tools(
             max_tokens=max_tokens,
             response_format=response_format,
             tools=tools,
-            # 首轮带上“该搜”的意图（守规矩的端点会真的强制调工具）；走了预检索时
+            # 首轮带上「该搜」的意图（守规矩的端点会真的强制调工具）；走了预检索时
             # 它依然是第一次模型调用，不能因为 round_no 被预检索占位就失效
             tool_choice=first_choice if model_calls == 1 else "auto",
         ):
@@ -778,9 +807,10 @@ async def stream_with_tools(
                             yield ChatChunk(reasoning=piece)
                         continue
                     out = scrubber.feed(piece)
-                    if exhausted or chunk.done:
+                    if exhausted:
                         held.append(out)
                     elif out:
+                        # 正常流式：逐块发送，不要攒到 chunk.done
                         yield ChatChunk(content=out)
             if chunk.tool_calls:
                 calls = chunk.tool_calls
@@ -874,7 +904,7 @@ async def stream_with_tools(
             )
 
         if repeated:
-            # 下一轮就是“上限轮”：剥掉工具并要求基于已有资料作答。
+            # 下一轮就是「上限轮」：剥掉工具并要求基于已有资料作答。
             # 不等它自己收手：实测它会一直换词搜到额度用尽，反而拿不到答案。
             # 这里只把 REPEAT_STOP_HINT 贴在搜索结果后面（离结果越近越管用），
             # 不再额外补一条 system：连续两条 system 会把下一轮的 ROUND_LIMIT_HINT 挤成噪音
@@ -884,7 +914,7 @@ async def stream_with_tools(
 
 
 def _sig_of(sources: list[dict]) -> tuple[str, ...]:
-    """一批搜索结果的签名（只看 URL 集）：换词重搜时它最能说明“没有新东西”。"""
+    """一批搜索结果的签名（只看 URL 集）：换词重搜时它最能说明「没有新东西」。"""
     return tuple(sorted(str(s.get("url") or "") for s in sources))
 
 
@@ -901,6 +931,7 @@ def _describe(name: str, arguments: str | None) -> str:
 
 
 def _to_sources(items: list[dict]) -> list[WebSource]:
+    """把工具回的结构化链接转成响应模型；单条脏数据直接跳过。"""
     out: list[WebSource] = []
     for item in items:
         try:
@@ -911,6 +942,7 @@ def _to_sources(items: list[dict]) -> list[WebSource]:
 
 
 def _add_usage(base: Usage, extra: Usage) -> Usage:
+    """累加两轮用量：工具循环里每轮都单独计费，对外只报总量。"""
     return Usage(
         prompt_tokens=base.prompt_tokens + extra.prompt_tokens,
         completion_tokens=base.completion_tokens + extra.completion_tokens,
@@ -928,7 +960,7 @@ def _finalize_exhausted(
 ) -> ChatChunk:
     """上限轮的收尾：标记已被 scrubber 剥过，全剥光时给一句人话而不是空气泡。
 
-    ``suppress_thinking`` 只在真的出现过思考时传真：上限轮里被攒住的“思考”
+    ``suppress_thinking`` 只在真的出现过思考时传真：上限轮里被攒住的「思考」
     其实就是模型想说的话（它已经不再调工具，没什么可规划的），再挂个思考区块
     用户会看到同一句说两遍。工具回合里逐块流出过的思考不在本块里，删不掉也不删。
     """
@@ -951,7 +983,7 @@ def _merge_usage(
     收尾块自己带 ``reasoning`` 时（非流式网关把整段思考塞在这）保留它；
     正文里夹着成对思考标签时也拆出来，否则标签会连着答案一起当正文吐给用户。
     上限轮已由 :func:`_finalize_exhausted` 把正文换成兜底句、思考清成空串，
-    这里看到 ``reasoning == ""`` 就不再从正文里拆（那份“思考”其实就是正文本身）。
+    这里看到 ``reasoning == ""`` 就不再从正文里拆（那份「思考」其实就是正文本身）。
     """
     if closing is None:
         return ChatChunk(done=True, usage=total)
@@ -970,9 +1002,9 @@ def _merge_usage(
 def _fallback_answer(calls: list[ToolCall], sources: list[WebSource]) -> str:
     """上限轮什么正文都没留下时的兜底。
 
-    刻意不把“轮数用完”当成唯一答复：手里往往已经有几条真实来源，用户要的是能点
+    刻意不把「轮数用完」当成唯一答复：手里往往已经有几条真实来源，用户要的是能点
     开的资料，而不是一句看不懂的额度说明（实跑就是这么把答句丢掉了）。
-    只列链接不下结论：没模型参与的文字不能替它编一个“现状”。
+    只列链接不下结论：没模型参与的文字不能替它编一个「现状」。
     """
     if not sources:
         return ROUND_LIMIT_CALLED if calls else ROUND_LIMIT_EMPTY

@@ -1,18 +1,14 @@
-"""Document parser for RAG knowledge ingestion.
+"""RAG 知识录入的文件解析：把各种格式统一成「文本 + 内嵌图片」。
 
-Supports:
-- Plain text (.txt, .md, .csv, .log)
-- Markdown (.md)
-- PDF (.pdf)    text via pdfminer.six, embedded images via PyMuPDF
-- Word (.docx)  text (paragraphs + tables) and inline images via python-docx
+支持：
+- 纯文本（.txt / .md / .csv / .log）
+- PDF（.pdf）：文字用 pdfminer.six，内嵌位图用 PyMuPDF
+- Word（.docx）：段落 + 表格文字与行内图片都用 python-docx
 
-``parse_document`` keeps the old contract (return the extracted text only) so
-existing callers and tests are unaffected.  ``parse_document_full`` additionally
-returns the raster images embedded *inside* the document (figures in a PDF,
-inline pictures in a Word file); the upload layer feeds those to a vision model
-to obtain a textual description — making them searchable — and keeps the bytes
-for display.  A scanned PDF has no text layer, so it is recovered entirely from
-its page images via that same path.
+两个入口的分工：``parse_document`` 保持老约定（只返文字），旧调用方与测试不受影响；
+``parse_document_full`` 额外返文档**内部**的位图（PDF 里的插图、Word 里的行内图）。
+上传层会把这些图交给视觉模型转成文字描述（让它们变得可检），同时留着原字节供展示。
+扫描版 PDF 没有文字层，只能靠同一条路径从页面图片里把内容拉回来。
 """
 
 from __future__ import annotations
@@ -26,14 +22,14 @@ from typing import IO
 
 logger = logging.getLogger(__name__)
 
-# Raster formats the ingest pipeline can hand to a vision model. Vector /
-# exotic formats (wmf, emf, jpx) are skipped rather than aborting the parse.
+# 录入流程能交给视觉模型处理的位图格式；矢量 / 冷门格式（wmf、emf、jpx）直接跳过，
+# 而不是让整次解析失败
 _DOC_IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "bmp", "webp"}
 
 
 @dataclass
 class ExtractedImage:
-    """One raster image found *inside* a document (not a standalone upload)."""
+    """文档**内部**找到的一张位图（不是单独上传的文件）。"""
 
     data: bytes
     ext: str = "png"
@@ -42,27 +38,28 @@ class ExtractedImage:
 
     @property
     def pixels(self) -> int:
+        """像素总数，用于跳过那些小到没有内容的图标。"""
         return self.width * self.height
 
 
 @dataclass
 class ParsedDocument:
-    """Text body plus any embedded images pulled out of the same file."""
+    """一次解析的结果：正文文字 + 同一个文件里拉出来的内嵌图片。"""
 
     text: str = ""
     images: list[ExtractedImage] = field(default_factory=list)
 
 
 async def parse_document(file: IO[bytes], filename: str) -> str:
-    """Back-compatible helper: return only the extracted text."""
+    """向后兼容的入口：只返提取到的文字。"""
     return (await parse_document_full(file, filename)).text
 
 
 async def parse_document_full(file: IO[bytes], filename: str) -> ParsedDocument:
-    """Parse *file* into text + embedded images, dispatching on the extension."""
+    """按扩展名分发，把文件解析成「文字 + 内嵌图片」。"""
     ext = pathlib.Path(filename).suffix.lstrip(".").lower()
 
-    # --- Plain-text families -------------------------------------------
+    # --- 纯文本家族 -----------------------------------------------
     if ext in {"txt", "md", "csv", "log"}:
         text = file.read().decode("utf-8", errors="replace")
         if ext == "csv":
@@ -73,7 +70,7 @@ async def parse_document_full(file: IO[bytes], filename: str) -> ParsedDocument:
     if ext == "pdf":
         return await _parse_pdf_full(file)
 
-    # --- Word (.docx) --------------------------------------------------
+    # --- Word（.docx）----------------------------------------------
     if ext == "docx":
         return await _parse_docx_full(file)
 
@@ -83,37 +80,38 @@ async def parse_document_full(file: IO[bytes], filename: str) -> ParsedDocument:
 
 
 # ------------------------------------------------------------------
-# Plain-text helpers
+# 纯文本辅助
 # ------------------------------------------------------------------
 
 def _read_csv(csv_file: io.StringIO) -> str:
-    """Read a CSV and return the content as a single text string."""
+    """读 CSV，拼成一整串文本给分块器吃。"""
     reader = csv.reader(csv_file)
     rows: list[list[str]] = []
     for row in reader:
         rows.append([cell.strip() for cell in row])
-    # simple CSV rendering: rows separated by blank line, columns by ' | '
+    # 朴素的 CSV 渲染：行之间空一行，列之间用 ' | '（让一行表格读起来像一句话）
     return "\n\n".join(" | ".join(row) for row in rows)
 
 
 # ------------------------------------------------------------------
-# PDF (text: pdfminer.six, images: PyMuPDF)
+# PDF（文字：pdfminer.six，图片：PyMuPDF）
 # ------------------------------------------------------------------
 
 async def _parse_pdf_full(file: IO[bytes]) -> ParsedDocument:
+    """PDF 走两条独立的路：文字给 pdfminer，图片给 PyMuPDF，各读一次流。"""
     text = await _extract_pdf_text(file)
     images = await _extract_pdf_images(file)
     return ParsedDocument(text=text, images=images)
 
 
 async def _extract_pdf_text(file: IO[bytes]) -> str:
-    """Extract the text layer from a PDF using pdfminer.six."""
+    """用 pdfminer.six 抽出 PDF 的文字层。"""
     from pdfminer.high_level import extract_text as _do_extract
 
     try:
         file.seek(0)
-        # positional: the first param was renamed ``fp`` -> ``pdf_file`` across
-        # pdfminer.six versions, so passing it by position keeps this portable.
+        # 按位置传参：pdfminer.six 的不同版本把首个参数从 ``fp`` 改名成了 ``pdf_file``，
+        # 按位置传才不会绑到具体参数名上。
         text = _do_extract(file)
         return text.strip() if text else ""
     except Exception as exc:  # pragma: no cover
@@ -122,14 +120,14 @@ async def _extract_pdf_text(file: IO[bytes]) -> str:
 
 
 async def _extract_pdf_images(file: IO[bytes]) -> list[ExtractedImage]:
-    """Pull embedded raster images out of a PDF with PyMuPDF (dedup by xref).
+    """用 PyMuPDF 拉出 PDF 里的内嵌位图（按 xref 去重）。
 
-    Every failure here degrades to "no images" — image extraction must never
-    break text ingestion, and PyMuPDF is an optional dependency.
+    这一步的任何失败都降级成「没图」：图片抽取绝不能打断文字录入，
+    而且 PyMuPDF 本身是个可选依赖。
     """
     try:
-        import pymupdf as fitz  # PyMuPDF (``fitz`` is the deprecated old name)
-    except ImportError:  # pragma: no cover - fall back to the legacy alias
+        import pymupdf as fitz  # PyMuPDF（``fitz`` 是已废弃的旧名）
+    except ImportError:  # pragma: no cover - 退回旧别名
         try:
             import fitz  # PyMuPDF
         except ImportError:
@@ -139,7 +137,7 @@ async def _extract_pdf_images(file: IO[bytes]) -> list[ExtractedImage]:
     try:
         file.seek(0)
         doc = fitz.open(stream=file.read(), filetype="pdf")
-    except Exception as exc:  # noqa: BLE001 - corrupt/encrypted pdf
+    except Exception as exc:  # noqa: BLE001 - 文件损坏 / 加密都归为解析失败
         logger.warning("PDF image open failed: %s", exc)
         return []
 
@@ -160,7 +158,7 @@ async def _extract_pdf_images(file: IO[bytes]) -> list[ExtractedImage]:
                     ):
                         pix = fitz.Pixmap(fitz.csRGB, pix)
                     if pix.alpha:
-                        pix = fitz.Pixmap(pix, 0)  # drop alpha to keep PNG small
+                        pix = fitz.Pixmap(pix, 0)  # 去掉 alpha 通道，避免 PNG 体积膨胀
                     images.append(
                         ExtractedImage(
                             data=pix.tobytes("png"),
@@ -169,7 +167,7 @@ async def _extract_pdf_images(file: IO[bytes]) -> list[ExtractedImage]:
                             height=pix.height,
                         )
                     )
-                except Exception as exc:  # noqa: BLE001 - one bad image must not abort
+                except Exception as exc:  # noqa: BLE001 - 单张图坏了不能拖垮整批
                     logger.debug("PDF image xref=%s failed: %s", xref, exc)
     finally:
         doc.close()
@@ -181,7 +179,7 @@ async def _extract_pdf_images(file: IO[bytes]) -> list[ExtractedImage]:
 # ------------------------------------------------------------------
 
 async def _parse_docx_full(file: IO[bytes]) -> ParsedDocument:
-    """Extract paragraphs + table text, plus inline images, from a DOCX."""
+    """从 DOCX 里抽段落 + 表格文字，再加行内图片。"""
     from docx import Document as _DocxDoc
 
     try:
@@ -203,7 +201,7 @@ async def _parse_docx_full(file: IO[bytes]) -> ParsedDocument:
 
 
 def _extract_docx_images(doc: object) -> list[ExtractedImage]:
-    """Collect inline images from the .docx package (deduped by bytes)."""
+    """从 .docx 包里收集行内图片（按字节去重，同一张图多处引用只取一次）。"""
     images: list[ExtractedImage] = []
     seen: set[bytes] = set()
     for rel in doc.part.rels.values():  # type: ignore[attr-defined]
@@ -212,7 +210,7 @@ def _extract_docx_images(doc: object) -> list[ExtractedImage]:
         try:
             part = rel.target_part
             blob = part.blob
-        except Exception:  # noqa: BLE001 - unreadable relationship part
+        except Exception:  # noqa: BLE001 - 读不出的关系条目直接跳过
             continue
         if not blob or blob in seen:
             continue

@@ -11,7 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app import db
 from app.config import Settings
 from app.routers import admin as admin_router
-from app.services import admin_service, llm, rag_queue
+from app.services import (
+    admin_service,
+    llm,
+    provider_store,
+    rag_queue,
+    system_config as system_config_service,
+)
 
 
 def _mock_settings() -> Settings:
@@ -49,9 +55,11 @@ def _patch_mock_backend() -> None:
 
     llm.make_backend = factory
     llm.reset_registry()
+    provider_store.reset()
     yield
     llm.make_backend = original
     llm.reset_registry()
+    provider_store.reset()
 
 
 @pytest.fixture()
@@ -71,6 +79,10 @@ async def client(
     monkeypatch.setattr(llm, "get_settings", lambda: test_settings)
     monkeypatch.setattr(admin_service, "get_settings", lambda: test_settings)
     monkeypatch.setattr(admin_router, "get_settings", lambda: test_settings)
+    # 配置相关的两个模块也读 settings：不一起打补丁的话，启动时 init_defaults()
+    # 会把本机 .env 里的默认 provider（如 mlx）写进测试库，改变实际选用的模型。
+    monkeypatch.setattr(system_config_service, "get_settings", lambda: test_settings)
+    monkeypatch.setattr(provider_store, "get_settings", lambda: test_settings)
     llm.reset_registry()
     
     # 测试模式：同步执行 RAG 任务，保持向后兼容；同时禁用队列 worker

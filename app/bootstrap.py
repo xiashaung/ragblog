@@ -1,12 +1,14 @@
-"""One-time bootstrap helpers for the admin dashboard.
+"""管理后台的一次性初始化脚本（不随应用启动跑）。
 
-Usage:
+用法：
     python -m app.bootstrap seed --username admin --password secret
 
-Boots the DB engine, ensures tables exist, then creates the first admin
-account (idempotent: it is a no-op if any admin already exists). The account
-is bound to the builtin ``superadmin`` role -- creating a row in
-``admin_users`` by hand would leave it without any permission.
+流程：建引擎 → 建表 → 创建第一个管理员（幂等：库里已有账号就跳过）。
+创建的账号会绑到内置的 ``superadmin`` 角色 —— 手写一行 ``admin_users``
+会得到一个没有任何权限码、登进后台也看不到菜单的空账号。
+
+根目录的 ``create_admin.py`` 只是本模块的一层兼容入口（默认弱密码 + 不带参数），
+新环境建议直接用上面的 ``python -m app.bootstrap seed`` 写法。
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from .db import get_session_factory, init_db, init_models
 
 
 async def seed_admin(username: str, password: str) -> None:
+    """播种首个管理员；已有账号时只打一行提示、不报错退出。"""
     settings = get_settings()
     init_db(database_url=settings.database_url)
     await init_models()
@@ -37,6 +40,7 @@ async def seed_admin(username: str, password: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """命令行入口：目前只有 ``seed`` 子命令，返 shell 退出码。"""
     parser = argparse.ArgumentParser(description="Admin dashboard bootstrap")
     sub = parser.add_subparsers(dest="command", required=True)
 

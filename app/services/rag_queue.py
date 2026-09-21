@@ -47,10 +47,11 @@ class RAGQueue:
     """RAG 任务队列（单 Worker）。
 
     所有耗时的 RAG 操作（分块、向量化、入库）都在后台队列中顺序执行，
-    HTTP 接口只负责入队并立即返回“接受”状态。
+    HTTP 接口只负责入队并立即返回「接受」状态。
     """
 
     def __init__(self):
+        """只建空队列与占位字段，起 Worker 要显式调 :meth:`start`。"""
         self._queue: asyncio.Queue[RAGTask | None] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
         self._running = False
@@ -184,7 +185,8 @@ class RAGQueue:
         if not doc.content:
             raise ValueError("该文档没有保存原文，无法重建索引，请重新上传文件")
 
-        backend = llm.get_llm(new_provider)
+        # 没指定则以系统配置里的 embedding_provider 为准（而不是 .env 全局默认）
+        backend = llm.get_llm(new_provider, feature="embedding")
         chunks = await rag.replace_vectors(
             session, doc, doc.content, backend=backend
         )

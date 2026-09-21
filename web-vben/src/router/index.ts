@@ -3,7 +3,7 @@
  *
  * 两个刻意的约定：
  * 1. 分组父路由用组自己的 slug（/ai、/rag、/data、/system），且**不与任何页面 URL 重名**，
- *    各自 redirect 到组内第一个页面，所以直接访问 /rag 也会落到「统计概览」。
+ *    各自 redirect 到组内第一个页面，所以直接访问 /rag 也会落到「文档列表」。
  * 2. 子路由写**绝对路径**（vue-router 4 支持：层级来自嵌套而不是路径前缀），因此引入
  *    嵌套不改动任何既有 URL；层级只体现在 route.matched 上，供侧栏菜单与面包屑直接推导
  *    ——不再需要 meta.group 这种「假分组」标记，也不必在布局里维护第二份分组对照表。
@@ -41,7 +41,7 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/layouts/MainLayout.vue'),
     redirect: '/dashboard',
     children: [
-      // 顶级单项：不归属任何分组，直接作为侧栏第一项
+      // 顶级单项：不归属任何分组，直接作为侧栏第一项（全平台首页看板）
       {
         path: '/dashboard',
         name: 'dashboard',
@@ -71,15 +71,9 @@ const routes: RouteRecordRaw[] = [
       {
         path: '/rag',
         component: RouteGroup,
-        redirect: '/knowledge/overview',
+        redirect: '/knowledge',
         meta: { title: '知识库', icon: 'DatabaseOutlined' },
         children: [
-          {
-            path: '/knowledge/overview',
-            name: 'knowledge-overview',
-            component: () => import('@/views/rag/KnowledgeOverviewPage.vue'),
-            meta: { title: '统计概览', needAuth: true, icon: 'FundOutlined' },
-          },
           {
             path: '/knowledge',
             name: 'knowledge-docs',
@@ -169,6 +163,28 @@ const routes: RouteRecordRaw[] = [
               icon: 'SafetyCertificateOutlined',
             },
           },
+          {
+            path: '/system-config',
+            name: 'system-config',
+            component: () => import('@/views/admin/SystemConfigPage.vue'),
+            meta: {
+              title: '模型配置',
+              needAuth: true,
+              permissions: ['system:read'],
+              icon: 'SettingOutlined',
+            },
+          },
+          {
+            path: '/model-management',
+            name: 'model-management',
+            component: () => import('@/views/admin/ModelManagementPage.vue'),
+            meta: {
+              title: '模型管理',
+              needAuth: true,
+              permissions: ['system:read'],
+              icon: 'ThunderboltOutlined',
+            },
+          },
         ],
       },
     ],
@@ -179,6 +195,9 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/_core/Forbidden.vue'),
     meta: { title: '无访问权限', public: true },
   },
+  // 知识库的「统计概览」已并入首页「概览」（两处取数重叠、文案互相漏改），
+  // 旧书签与外链靠这条重定向继续可用；放在布局之外，所以不会又冒出一个菜单项。
+  { path: '/knowledge/overview', redirect: '/dashboard' },
   { path: '/:pathMatch(.*)*', component: () => import('@/views/_core/NotFound.vue') },
 ];
 

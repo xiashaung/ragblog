@@ -29,10 +29,12 @@ logger = logging.getLogger(__name__)
 
 
 def _new_id() -> str:
+    """数据源主键：``ds_`` + 短随机位。"""
     return f"ds_{uuid.uuid4().hex[:12]}"
 
 
 def _validate_dialect(dialect: str) -> str:
+    """白名单校验数据库类型，顺带归一（去空白 + 转小写）。"""
     dialect = (dialect or "").strip().lower()
     if dialect not in DATA_SOURCE_DIALECTS:
         raise ValueError(
@@ -61,6 +63,7 @@ def mask_url(url: str) -> str:
 
 
 def to_out(row: DataSourceRow) -> DataSourceOut:
+    """ORM 行 → 对外模型；只给 ``url_masked``，明文连接串永不外泄。"""
     return DataSourceOut(
         id=row.id,
         name=row.name,
@@ -77,12 +80,14 @@ def to_out(row: DataSourceRow) -> DataSourceOut:
 async def _unique_name(
     session: AsyncSession, name: str, *, exclude_id: str | None = None
 ) -> None:
+    """名称唯一性校验；``exclude_id`` 用于「改自己不算重名」。"""
     existing = await session.scalar(select(DataSourceRow).where(DataSourceRow.name == name))
     if existing is not None and existing.id != exclude_id:
         raise ValueError(f"数据源名称已存在：{name}")
 
 
 async def list_sources(session: AsyncSession) -> list[DataSourceOut]:
+    """管理页列表：全部数据源（含已禁用的），按创建时间。"""
     rows = (
         await session.scalars(select(DataSourceRow).order_by(DataSourceRow.created_at))
     ).all()
@@ -109,6 +114,7 @@ async def selectable_sources(session: AsyncSession) -> list[AnalyticsSource]:
 
 
 def get_main_dialect() -> str:
+    """主库方言，供问数页下拉把「内置主库」也标上类型。"""
     return db.get_engine().dialect.name
 
 
@@ -122,6 +128,7 @@ async def create(
     enabled: bool = True,
     description: str = "",
 ) -> DataSourceRow:
+    """新建数据源：校验名称 → 校验方言 → 归一连接串 → 落库（连接池首次用时才建）。"""
     name = name.strip()
     if not name:
         raise ValueError("数据源名称不能为空")
@@ -156,6 +163,7 @@ async def update(
     enabled: bool | None = None,
     description: str | None = None,
 ) -> DataSourceRow:
+    """部分更新：``None`` 表示「没动」；URL 传空串也不覆盖（避免掩码回显后被清空）。"""
     row = await session.get(DataSourceRow, source_id)
     if row is None:
         raise ValueError("数据源不存在")
@@ -184,6 +192,7 @@ async def update(
 
 
 async def delete(session: AsyncSession, source_id: str) -> None:
+    """删数据源：删行后再释放连接池，避免残留的池继续持有口令。"""
     row = await session.get(DataSourceRow, source_id)
     if row is None:
         raise ValueError("数据源不存在")
@@ -227,6 +236,11 @@ async def test_connection(
 
 
 async def _count_tables(url: str, dialect: str) -> int:
+    """数一下可见表，给连通测试当「确实连对了库」的旁证。
+
+    用一次性的探查引擎（不进连接池缓存），所以 finally 里必须 dispose；
+    各方言只查自己的元数据表，不碰业务数据。
+    """
     probe = db.new_probe_engine(url, dialect)
     try:
         async with probe.connect() as conn:

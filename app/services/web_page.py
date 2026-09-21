@@ -1,9 +1,8 @@
-"""Fetch a web page and reduce it to plain text for knowledge ingestion.
+"""抓一个网页并把它压成纯文本，供知识库录入。
 
-Deliberately stdlib-only (``html.parser``) plus ``httpx`` (already a project
-dependency) so "录入一个 URL" does not drag in an HTML-parsing package. The
-extractor keeps the reading order of the document and drops chrome (nav,
-footer, scripts, forms), which is what the RAG chunker wants.
+刻意只用标准库（``html.parser``）+ 项目已有的 ``httpx``，不为了「录入一个 URL」
+再拖一个 HTML 解析包进来。抽取器保留文档的阅读顺序，只丢掉导航/页脚/脚本/表单
+这些外围（正是 RAG 分块器想要的东西）。
 """
 
 from __future__ import annotations
@@ -15,13 +14,13 @@ from urllib.parse import urlparse
 
 import httpx
 
-MAX_DOWNLOAD_BYTES = 3_000_000
-DEFAULT_TIMEOUT = 15.0
+MAX_DOWNLOAD_BYTES = 3_000_000  # 单次下载上限，超过直接拒入库
+DEFAULT_TIMEOUT = 15.0  # 宁可放弃一次抓取，也不让用户干等
 USER_AGENT = "Mozilla/5.0 (compatible; FastAPI-KnowledgeBot/0.1)"
 
 _ALLOWED_SCHEMES = {"http", "https"}
 
-# Subtree contents of these tags are never part of the readable text.
+# 这些标签的子树永远不算「可读正文」
 _SKIP_TAGS = {
     "script",
     "style",
@@ -44,8 +43,7 @@ _SKIP_TAGS = {
     "audio",
 }
 
-# These emit a line break so paragraphs survive as separate lines (the RAG
-# chunker splits on newlines first).
+# 这些标签会吐一个换行，让段落各自成行（RAG 分块器优先按换行切）
 _BLOCK_TAGS = {
     "address",
     "article",
@@ -78,16 +76,17 @@ _BLOCK_TAGS = {
     "ul",
 }
 
-# A line must contain at least one letter/digit (CJK included) to be kept,
-# which drops decorative separators and empty table borders.
+# 一行至少得含一个字母/数字（含中日韩文字）才保留，
+# 以此丢掉装饰性分隔线和空表格边框
 _HAS_WORD = re.compile(r"[0-9A-Za-z\u4e00-\u9fff]")
 _SPACES = re.compile(r"[ \t\r\f\v\u3000]+")
 
 
 class _Extractor(HTMLParser):
-    """Collect ``<title>`` and the visible text, in document order."""
+    """按文档顺序收集 ``<title>`` 与可见正文。"""
 
     def __init__(self) -> None:
+        """标题与正文分开存；``_skip_depth`` 是跳过的嵌套深度。"""
         super().__init__(convert_charrefs=True)
         self.title_parts: list[str] = []
         self.text_parts: list[str] = []
@@ -95,6 +94,7 @@ class _Extractor(HTMLParser):
         self._in_title = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """进标签：title 起标记，屏蔽类加深计数，块类补一个换行。"""
         if tag == "title":
             self._in_title = True
             return
@@ -104,6 +104,7 @@ class _Extractor(HTMLParser):
             self.text_parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
+        """出标签：与 :meth:`handle_starttag` 一一对称，计数不会跑到负数。"""
         if tag == "title":
             self._in_title = False
             return
@@ -113,6 +114,7 @@ class _Extractor(HTMLParser):
             self.text_parts.append("\n")
 
     def handle_data(self, data: str) -> None:
+        """文本节点：在 title 里归标题，在屏蔽子树里直接丢。"""
         if self._in_title:
             self.title_parts.append(data)
             return
@@ -122,14 +124,14 @@ class _Extractor(HTMLParser):
 
 
 def _clean_line(line: str) -> str:
+    """把一行里的连续空白（含全角空格）压成单空格并去两端。"""
     return _SPACES.sub(" ", line).strip()
 
 
 def html_to_text(html: str) -> tuple[str, str]:
-    """Return ``(title, text)`` for an HTML document.
+    """返一份 HTML 文档的 ``(标题, 正文)``。
 
-    ``text`` has one paragraph per line, so :func:`app.services.rag.chunk_text`
-    can pack it at paragraph boundaries.
+    ``正文`` 一行一段，所以 :func:`app.services.rag.chunk_text` 能按段落边界打包。
     """
     parser = _Extractor()
     parser.feed(html)
@@ -143,6 +145,8 @@ def html_to_text(html: str) -> tuple[str, str]:
 
 @dataclass
 class PageText:
+    """一次抓页的结果：请求地址与重定向后的终态地址都保留，方便回溯来源。"""
+
     url: str
     final_url: str
     status: int
@@ -152,7 +156,7 @@ class PageText:
 
 
 def validate_url(url: str) -> str:
-    """Reject anything that is not a plain http(s) address."""
+    """只放过普通的 http(s) 地址（挡掉 ``file://`` 等奇怪 scheme）。"""
     target = url.strip()
     parsed = urlparse(target)
     if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
@@ -165,11 +169,10 @@ def validate_url(url: str) -> str:
 async def fetch_page(
     url: str, *, max_chars: int | None = None, timeout: float = DEFAULT_TIMEOUT
 ) -> PageText:
-    """Download *url* and extract its readable text.
+    """下载 ``url`` 并抽取它的可读正文。
 
-    Raises ``ValueError`` (surfaced as HTTP 400 by the app's handler) with a
-    Chinese message for every expected failure: bad scheme, network error,
-    non-2xx response, non-textual content type, oversized body, empty text.
+    预期内的失败（scheme 不对、网络错、非 2xx、内容不是文本、体积超限、正文为空）
+    一律抛 ``ValueError`` + 中文描述，由全局处理器翻译成 HTTP 400。
     """
     target = validate_url(url)
     try:
@@ -196,7 +199,7 @@ async def fetch_page(
     body = resp.text
     if "html" in ctype or "xml" in ctype or "<html" in body[:2000].lower():
         title, text = html_to_text(body)
-    else:  # plain text / markdown served as-is
+    else:  # 纯文本 / markdown 直接拿来用
         title, text = "", _clean_line(body.replace("\r\n", "\n").replace("\r", "\n"))
         text = "\n".join(
             line for line in text.split("\n") if line and _HAS_WORD.search(line)

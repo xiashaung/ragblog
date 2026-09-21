@@ -1,7 +1,15 @@
-"""SQLAlchemy ORM models.
+"""SQLAlchemy ORM 模型：需要重启后仍在的状态全在这里。
 
-All state that should survive restarts lives here:
-users, items, RAG knowledge, API keys, and per-key usage logs.
+分组自上而下：示例业务表（users/items）→ 知识库（docs/chunks）→
+后台账号与 RBAC（admin_users/sessions/roles）→ 外部数据源与智能问数历史 →
+AI 对话会话与消息 → 系统配置与模型管理（system_configs/provider_configs）。
+
+两个统一约定：
+
+* 时间字段全用 ``Float`` 存 unix 时间戳（默认 ``_now``），跨方言不用处理时区；
+* 主键用带前缀的短 uuid（``kb-xxxx`` / ``role-xxxx``），可读且不需自增协调。
+
+API Key 体系已删（见迁移 ``a6b7c8d9e0f1``），后台统一走 AdminSession token。
 """
 
 from __future__ import annotations
@@ -19,17 +27,21 @@ from .db import Base
 
 
 def _now() -> float:
+    """行的创建/更新时间（unix 时间戳，做列默认值用）。"""
     return time.time()
 
 
 def _uid(prefix: str) -> str:
+    """带业务前缀的短 uuid 主键，便于从 ID 直接看出表归属。"""
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
 
 
-# --- Business ---
+# --- 示例业务（最早的项目样板，与新功能无关）---
 
 
 class UserRow(Base):
+    """``/users`` 示例接口的演示数据（不是登录账号，登录用的是 AdminUser）。"""
+
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -40,6 +52,8 @@ class UserRow(Base):
 
 
 class ItemRow(Base):
+    """``/items`` 示例接口的演示数据；``owner_id`` 只存值、未建外键。"""
+
     __tablename__ = "items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -52,7 +66,7 @@ class ItemRow(Base):
     created_at: Mapped[float] = mapped_column(Float, default=_now)
 
 
-# --- RAG / knowledge base ---
+# --- RAG / 知识库 ---
 
 
 # Postgres 用真 pgvector 列（距离在库内算、可建 HNSW 索引），SQLite 退化成
@@ -61,22 +75,31 @@ _VECTOR_TYPE = Vector(get_settings().rag_vector_dim).with_variant(JSON(), "sqlit
 
 
 class KnowledgeDoc(Base):
+    """一份知识库文档的元信息（分片在 ``KnowledgeChunk``，两边靠 ``id``/``knowledge_id`` 关联）。"""
+
     __tablename__ = "knowledge_docs"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: _uid("kb"))
     title: Mapped[str] = mapped_column(String(200), nullable=False)
+    # 录入时实际用的 embedding provider（重建索引时会改）
     provider: Mapped[str] = mapped_column(String(20), default="mock")
-    # Full original text. Chunks overlap, so they cannot be re-joined into the
-    # source; keeping the raw text is what makes preview / edit / re-index
-    # (with another embedding provider) possible without drift.
+    # 原文全文。分片之间重叠，拼不回源文本；留着原文才能做预览/编辑/
+    # 换 provider 重建索引，而且不会跟已入库的分片对不上。
     content: Mapped[str | None] = mapped_column(Text, default=None)
+    # 列名是 metadata（SQLAlchemy 保留名，故属性叫 meta）：来源、字符数、录入方式等
     meta: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSON, default=dict)
     ingested_at: Mapped[float] = mapped_column(Float, default=_now)
-    # Bumped on rename / content change / re-index (``ingested_at`` stays put).
+    # 改名 / 改内容 / 重建索引时刷新（``ingested_at`` 保持不变，用于看「何时录入」）
     updated_at: Mapped[float] = mapped_column(Float, default=_now)
 
 
 class KnowledgeChunk(Base):
+    """文档的一个分片及其向量，检索命中的就是这一行。
+
+    没存 ``knowledge_id`` 外键约束（跨方言重建表代价大），关系由服务层维护；
+    删文档时先删分片。词法检索直接跑在 ``text`` 列的 pg_trgm 索引上。
+    """
+
     __tablename__ = "knowledge_chunks"
 
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
@@ -85,14 +108,14 @@ class KnowledgeChunk(Base):
     )
     source: Mapped[str] = mapped_column(String(200), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
-    # 维度由 ``APP_RAG_VECTOR_DIM`` 决定。NULL 表示“有分片但没有可用向量”：
+    # 维度由 ``APP_RAG_VECTOR_DIM`` 决定。NULL 表示「有分片但没有可用向量」：
     # 迁移时维度不符的旧向量会被备份后置空，等文档重建索引。
     vector: Mapped[list[float] | None] = mapped_column(
         _VECTOR_TYPE, default=list, nullable=True
     )
 
 
-# --- Backend / admin account + sessions (admin dashboard) ---
+# --- 后台账号 / 会话 / RBAC 角色 ---
 
 
 class RoleRow(Base):
@@ -133,11 +156,12 @@ class AdminRoleRow(Base):
 
 
 class AdminUser(Base):
-    """An account that can sign into the admin dashboard.
+    """能登录管理后台的账号。
 
-    ``username`` is unique; ``password_hash`` is a SHA-256 digest
-    (mirrors ``AdminSession.token_hash`` — adequate alongside token blacklists,
-    which is the real control here; upgrade to bcrypt/argon2 in prod).
+    ``username`` 唯一；``password_hash`` 是 SHA-256 摘要（与
+    ``AdminSession.token_hash`` 同一做法）——真正的控制靠 token 黑名单，
+    这套哈希仅算凑齐可用，生产建议升级到 bcrypt/argon2。
+    权限不在这张表上，一律通过 ``AdminRoleRow`` 关联的角色推导。
     """
 
     __tablename__ = "admin_users"
@@ -151,10 +175,11 @@ class AdminUser(Base):
 
 
 class AdminSession(Base):
-    """A bearer session token minted at login and revoked at logout.
+    """登录时铸出、退出时撤销的 Bearer 会话 token。
 
-    Only ``token_hash`` is stored, so an extracted ``Authorization``
-    header value is hashed on read before lookup.
+    只存 ``token_hash``：因此即使库被拖也推不出可用 token；校验时把请求带来的
+    token 先哈希再查（见 ``admin_service.verify_token``），永不存明文。
+    过期靠 ``expires_at`` 比较，不是定时清理。
     """
 
     __tablename__ = "admin_sessions"
@@ -236,7 +261,7 @@ class ChatMessageRow(Base):
 
     ``images_json`` 存随消息附带的图片 data URL 数组——多轮上下文要原样重建才能
     继续让视觉模型看到图；超过存储上限时服务层只丢图保留正文并在 ``meta_json``
-    打标，回放时提示“图片未持久化”。``seq`` 用于同一时间戳下多条消息的稳定排序。
+    打标，回放时提示「图片未持久化」。``seq`` 用于同一时间戳下多条消息的稳定排序。
     """
 
     __tablename__ = "chat_messages"
@@ -254,7 +279,50 @@ class ChatMessageRow(Base):
     created_at: Mapped[float] = mapped_column(Float, default=_now)
 
 
-# --- Convenience re-exports for Alembic autogenerate ---
+# --- 系统配置（功能级别的模型/服务选择）----------------
+
+class SystemConfigRow(Base):
+    """系统级配置表（key-value，按功能模块区分）。
+
+    取代硬编码的 .env：每个功能模块用哪个 provider（对话/嵌入/精排）
+    存在这里，启动时由 ``services.provider_store`` 读进内存，改完无需重启。
+    预置键（常量见 ``services/system_config.py``）：
+
+    - chat_provider / rag_provider / embedding_provider：各功能的默认 provider
+    - rerank_enabled / rerank_provider：精排开关与它用哪个 provider
+    """
+
+    __tablename__ = "system_configs"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True, unique=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(String(500), default=None)
+    updated_at: Mapped[float] = mapped_column(Float, default=_now, onupdate=_now)
+
+
+class ProviderConfigRow(Base):
+    """模型管理：一个 provider 一行（端点 + Key + 三个模型名）。
+
+    把原先散在 .env 里的 ``APP_LLM_*`` 搬进数据库，支持后台增删改而不用改代码
+    或重启；``rerank_model`` 只在被选为精排 provider 时参与拼请求。
+    注意这里存的是 **明文 Key**，对外响应一律走 ``api_key_configured`` 布尔。
+    缓存入口在 ``services.provider_store``（数据库优先、.env 兜底、写后 refresh）。
+    """
+
+    __tablename__ = "provider_configs"
+
+    provider: Mapped[str] = mapped_column(String(50), primary_key=True, unique=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(500), default="")
+    api_key: Mapped[str] = mapped_column(String(500), default="")
+    chat_model: Mapped[str] = mapped_column(String(200), default="")
+    embedding_model: Mapped[str] = mapped_column(String(200), default="")
+    rerank_model: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[float] = mapped_column(Float, default=_now)
+    updated_at: Mapped[float] = mapped_column(Float, default=_now, onupdate=_now)
+
+
+# --- 给 Alembic autogenerate 用的便捷再导出 ---
 __all__ = [
     "UserRow",
     "ItemRow",
@@ -268,4 +336,6 @@ __all__ = [
     "AnalyticsChatRow",
     "ChatSessionRow",
     "ChatMessageRow",
+    "SystemConfigRow",
+    "ProviderConfigRow",
 ]

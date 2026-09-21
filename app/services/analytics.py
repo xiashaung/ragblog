@@ -167,6 +167,7 @@ def guard_read_only_sql(
 
 
 def _secret_columns() -> set[str]:
+    """凭证列名（小写集）：这些列连表结构都不给模型看。"""
     return {c.lower() for c in get_settings().analytics_secret_columns if c}
 
 
@@ -180,6 +181,7 @@ def _jsonify(value: object) -> object:
 
 
 def _schema_sql_for(dialect: str) -> str:
+    """按方言选「查元数据」的 SQL；认不了的方言一律退回 SQLite 版。"""
     if dialect == "postgresql":
         return _PG_SCHEMA_SQL
     if dialect == "mysql":
@@ -289,6 +291,11 @@ def _parse_sql_json(content: str) -> tuple[str, str]:
 async def _generate_sql(
     backend: llm.LLMBackend, question: str, schema_text: str, dialect: str
 ) -> tuple[str, str, Usage | None]:
+    """让模型把自然语言问题译成一条只读 SQL。
+
+    temperature=0 求稳定，``json_object`` 求可控格式；提示词里把「只能读 / 只能用
+    出现过的表列名 / 结果可能很大时自行 LIMIT」写成硬要求，安全校验是另一道闸门。
+    """
     system = (
         "你是资深数据分析师。依据下面给出的数据库表结构，把用户问题翻译成"
         "**一条只读 SQL**。\n"
@@ -317,7 +324,7 @@ async def _generate_sql(
 
 
 def _tables_mentioned(sql: str, tables: Sequence[AnalyticsTable]) -> list[AnalyticsTable]:
-    """挑出 SQL 文本里提到的表（用于修正时只嗂相关表，减少噪声）。"""
+    """挑出 SQL 文本里提到的表（用于修正时只喂相关表，减少噪声）。"""
     low = sql.lower()
     return [t for t in tables if re.search(rf"\b{re.escape(t.name.lower())}\b", low)]
 
@@ -358,7 +365,7 @@ async def _select_relevant_tables(
         by_name = {t.name.lower(): t for t in tables}
 
         def _match(x: str) -> AnalyticsTable | None:
-            # 模型可能连括号说明一起返回，只取表名部分再比对
+            """容错比对：模型可能连括号说明一起返回，只取表名部分。"""
             base = re.split(r"[（(]", x.strip(), maxsplit=1)[0].strip().lower()
             return by_name.get(base)
 
@@ -481,6 +488,7 @@ async def _run_readonly(
 def _rows_to_text(
     columns: Sequence[str], rows: Sequence[Sequence[object]], limit: int = 40
 ) -> str:
+    """把结果集压成给模型看的管道分隔表格（只取前 ``limit`` 行、每格截 60 字）。"""
     lines = [" | ".join(str(c) for c in columns)]
     for row in rows[:limit]:
         lines.append(" | ".join("" if v is None else str(v)[:60] for v in row))
@@ -494,6 +502,11 @@ async def _summarize(
     columns: Sequence[str],
     rows: Sequence[Sequence[object]],
 ) -> str:
+    """把「问题 + SQL + 结果前若干行」交给模型，要一段中文结论。
+
+    空结果不花一次调用，直接回固定文案；提示词只要求「根据给出的结果说」，
+    结果里没有的信息不让编。
+    """
     if not rows:
         return "查询执行成功，但没有匹配到任何数据。"
     user = (
@@ -599,7 +612,7 @@ async def query(
             usage=usage,
         )
 
-    # 执行；若果字段/表写错而失败，就把报错回喂给模型修正后重试（每轮都重新只读校验）
+    # 执行；如果字段/表写错而失败，就把报错回喂给模型修正后重试（每轮都重新只读校验）
     fix_round = 0
     while True:
         try:

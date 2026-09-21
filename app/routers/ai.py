@@ -1,8 +1,13 @@
-"""AI endpoints: chat, embeddings, RAG knowledge base.
+"""AI 相关路由：对话、嵌入、RAG 知识库。
 
-All AI endpoints accept an optional ``provider`` field; when omitted they
-fall back to ``APP_LLM_DEFAULT_PROVIDER``. Supported:
-``openai`` / ``deepseek`` / ``qwen`` / ``ollama`` / ``mlx`` / ``mock``.
+所有 AI 接口都接受一个可选的 ``provider`` 字段；没传时用「系统配置」里为该功能
+选的 provider（``chat_provider`` / ``rag_provider`` / ``embedding_provider``），
+只有库里什么都没配时才回退到 ``APP_LLM_DEFAULT_PROVIDER``。
+支持的取值：``openai`` / ``deepseek`` / ``qwen`` / ``ollama`` / ``mlx`` / ``mock``，
+加上在「模型管理」里新建的任意自定义 provider。
+
+本层只做「选后端 + 拼响应」：工具循环与流式清洗在 ``services.chat_tools``，
+知识库的一整链路在 ``services.rag``，录入类重活则交给 ``services.rag_queue``。
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from ..schemas.ai import (
     ChatAppendRequest,
     ChatAppendResponse,
     ChatChunk,
+    ChatMessage,
     ChatMessageListResponse,
     ChatRequest,
     ChatResponse,
@@ -55,7 +61,8 @@ from ..schemas.ai import (
     Usage,
     WebSource,
 )
-from ..services.llm import get_llm
+from ..services.llm import chat_model, default_chat_provider, get_llm, resolve_name
+from ..services.provider_store import get_provider_config, known_providers
 from ..services.rag_queue import TaskType, get_queue
 
 router = APIRouter()
@@ -63,35 +70,57 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_provider(name: Provider | str | None) -> Provider:
+    """把入参里的 provider 字符串归一成枚举（已是枚举或空值则原样返）。"""
     if name is None:
         return None
     return name if isinstance(name, Provider) else Provider(name)
 
 
+def _sync_mode() -> bool:
+    """录入类接口是否在测试里同步执行。
+
+    生产走后台队列（立即返回 task_id，实际处理异步做），但测试要拿到
+    chunks / title 这些真实结果，所以 ``APP_TEST_MODE=true`` 时直接调用服务层，
+    用请求自己的会话把数据落库。抛出的 ``ValueError`` 由全局处理器转成 400，
+    中文原因原样透出。
+    """
+    return os.environ.get("APP_TEST_MODE", "false").lower() == "true"
+
+
 @router.get("/providers", response_model=list[dict])
 async def list_providers() -> list[dict]:
-    """Expose provider defaults so the frontend can pre-fill its selectors
-    and warn when a real provider has no API key configured.
+    """把各 provider 的默认值透出去，让前端预选下拉框、并在真 provider 没配
+    API Key 时能提醒用户。
 
-    Returns a bare JSON array on purpose: the envelope middleware only wraps
-    object bodies, so a ``{"data": [...]}`` dict would reach the client as a
-    doubly-nested payload and break every ``providers.filter(...)`` call.
+    内置项以 ``.env`` 为准，再合并「模型管理」里新建的自定义 provider（数据库优先）。
+
+    这里故意返一个裸 JSON 数组：信封中间件只包对象，包成 ``{"data": [...]}``
+    会让客户端拿到双层嵌套，所有 ``providers.filter(...)`` 写法全坏。
     """
     settings = get_settings()
+    default = default_chat_provider()
     out = []
-    for name in Provider:
-        cfg = settings.provider_config(name.value)
+    seen: set[str] = set()
+    for name in [p.value for p in Provider] + known_providers():
+        if name in seen:
+            continue
+        seen.add(name)
+        env_cfg = settings.provider_config(name) if name in {p.value for p in Provider} else None
+        db_cfg = get_provider_config(name)
+        cfg = db_cfg or env_cfg
+        if cfg is None:
+            continue
         out.append(
             {
-                "name": name.value,
+                "name": name,
                 "base_url": cfg.base_url,
                 "chat_model": cfg.chat_model,
                 "embedding_model": cfg.embedding_model,
                 "api_key_configured": bool(cfg.api_key)
-                or name.value in ("ollama", "mlx", "mock"),
+                or name in ("ollama", "mlx", "mock"),
             }
         )
-    out.sort(key=lambda p: (p["name"] != settings.llm_default_provider, str(p["name"])))
+    out.sort(key=lambda p: (p["name"] != default, str(p["name"])))
     return out
 
 
@@ -100,13 +129,17 @@ async def chat(
     req: ChatRequest,
     _session: AsyncSession = Depends(get_db),
 ) -> ChatResponse:
-    # ``provider=None`` falls back to ``APP_LLM_DEFAULT_PROVIDER`` inside
-    # ``get_llm``; the resolved value is read back from the backend.
+    """对话入口：``stream=true`` 走 NDJSON 流，否则一次返完整响应。
+
+    ``provider=None`` 时由 ``services.llm.get_llm`` 回退到库里配的 chat_provider，
+    实际用了哪个从后端对象读回来。两条路径共用 :func:`_turn_stream`，
+    所以联网工具等非流式下也一样可用。
+    """
     llm = get_llm(req.provider)
     if req.stream:
         return await _stream_chat(req)
-    # 非流式走同一个工具循环，只是把块攒起来一次返回。刻意的：另写一条
-    # ``llm.chat`` 直达路径会让“联网”只在流式可用，同一个接口两种行为比难查。
+    # 非流式也走同一个工具循环，只是把块攒起来一次返回。刻意的：另写一条
+    # ``llm.chat`` 直达路径会让「联网」只在流式可用，同一个接口两种行为比难查。
     parts: list[str] = []
     # 思考增量：流式下是一块块发的，非流式要自己拼回去（与 ``content`` 互不混入）
     think: list[str] = []
@@ -135,7 +168,7 @@ async def chat(
     return ChatResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
         provider=llm.provider,
-        model=req.model or get_settings().provider_config(llm.provider.value).chat_model,
+        model=req.model or chat_model(llm.provider),
         content="".join(parts),
         reasoning="".join(think),
         finish_reason=finish,
@@ -145,7 +178,7 @@ async def chat(
 
 
 def _turn_stream(llm: object, req: ChatRequest):
-    """统一的“一轮问答”生成器（含工具循环），流式与非流式共用。"""
+    """统一的「一轮问答」生成器（含工具循环），流式与非流式共用。"""
     return services.chat_tools.stream_with_tools(
         llm,
         messages=list(req.messages),
@@ -158,10 +191,11 @@ def _turn_stream(llm: object, req: ChatRequest):
 
 
 async def _stream_chat(req: ChatRequest) -> StreamingResponse:
+    """流式对话：每块一个 JSON 行（NDJSON），并带上 ``X-Accel-Buffering: no`` 防 nginx 攒块。"""
     llm = get_llm(req.provider)
 
     async def gen():
-        # 逐行边生边发（旧的 await 成 list 写法会把流式退化成“等全部生成完”）
+        """逐行边生边发（旧的 await 成 list 写法会把流式退化成「等全部生成完」）。"""
         try:
             async for c in _turn_stream(llm, req):
                 yield json.dumps(c.model_dump(), ensure_ascii=False) + "\n"
@@ -180,7 +214,7 @@ async def _stream_chat(req: ChatRequest) -> StreamingResponse:
 # ---------------- 对话会话持久化 ----------------
 # 会话是登录者自己的对话记录，不属于 RBAC 管辖的功能权限：只要登录态
 # （require_admin_session）即可，不必为对话历史再增加一个所有人都要授予的权限码。
-# 跨身份的会话 id 一律 404（服务层已把“不存在”与“不是你的”合并）。
+# 跨身份的会话 id 一律 404（服务层已把「不存在」与「不是你的」合并）。
 
 
 @router.get("/chat/sessions", response_model=ChatSessionListResponse)
@@ -271,14 +305,15 @@ async def embeddings(
     req: EmbeddingRequest,
     _session: AsyncSession = Depends(get_db),
 ) -> EmbeddingResponse:
-    return await get_llm(req.provider).embeddings(req)
+    """文本转向量：直接透给嵌入后端（feature=embedding 决定用哪个 provider）。"""
+    return await get_llm(req.provider, feature="embedding").embeddings(req)
 
 
-# --- RAG / knowledge base ---
+# --- RAG / 知识库 ---
 #
-# Static paths (``/knowledge/stats``, ``/knowledge/ingest*``, ``/knowledge/fetch-url``)
-# must stay declared before ``/knowledge/{knowledge_id}``, otherwise the path
-# parameter swallows them.
+# 声明顺序有要求：静态路径（``/knowledge/stats``、``/knowledge/ingest*``、
+# ``/knowledge/fetch-url``）必须排在 ``/knowledge/{knowledge_id}`` 之前，
+# 否则路径参数会把它们吞掉。
 
 
 @router.post("/knowledge/ingest", response_model=KnowledgeIngestResponse)
@@ -286,11 +321,8 @@ async def ingest(
     req: KnowledgeIngestRequest,
     session: AsyncSession = Depends(get_db),
 ) -> KnowledgeIngestResponse:
-    """文档入库（异步）：立即返回任务 ID，实际处理在后台队列执行。"""
-    # 测试环境使用同步模式
-    sync_mode = os.environ.get("APP_TEST_MODE", "false").lower() == "true"
-    
-    if sync_mode:
+    """文档入库：生产异步入队，测试同步执行（见 ``_sync_mode``）。"""
+    if _sync_mode():
         # 测试中直接执行并返回结果
         result = await services.rag.ingest(session, req)
         return KnowledgeIngestResponse(
@@ -313,7 +345,7 @@ async def ingest(
         )
         return KnowledgeIngestResponse(
             knowledge_id=f"pending-{task_id}",
-            provider=req.provider or get_settings().llm_default_provider,
+            provider=resolve_name(req.provider, feature="embedding"),
             chunks=0,
             chars=0,
             task_id=task_id,
@@ -325,7 +357,11 @@ async def ingest_pairs(
     req: KnowledgePairsIngestRequest,
     session: AsyncSession = Depends(get_db),
 ) -> KnowledgeIngestResponse:
-    """录入一批问答对（FAQ），合为一篇文档重建索引（异步）。"""
+    """录入一批问答对（FAQ），合为一篇文档重建索引。"""
+    if _sync_mode():
+        # 问答对全为空时服务层抛 ValueError → 400，必须在入队前发生
+        return await services.rag.ingest_pairs(session, req)
+
     queue = get_queue()
     task_id = await queue.enqueue(
         services.rag_queue.RAGTask(
@@ -336,7 +372,7 @@ async def ingest_pairs(
     )
     return KnowledgeIngestResponse(
         knowledge_id=f"pending-{task_id}",
-        provider=req.provider or get_settings().llm_default_provider,
+        provider=resolve_name(req.provider, feature="embedding"),
         chunks=0,
         chars=0,
         task_id=task_id,
@@ -348,7 +384,11 @@ async def ingest_from_url(
     req: KnowledgeFetchRequest,
     session: AsyncSession = Depends(get_db),
 ) -> KnowledgeFetchResponse:
-    """抓取一个网页地址，抽正文后入库（异步）。"""
+    """抓取一个网页地址，抽正文后入库。"""
+    if _sync_mode():
+        # 抓取失败（含 HTTP 404）时服务层抛 ValueError → 400，带中文原因
+        return await services.rag.ingest_from_url(session, req)
+
     queue = get_queue()
     task_id = await queue.enqueue(
         services.rag_queue.RAGTask(
@@ -360,7 +400,7 @@ async def ingest_from_url(
     # 立即返回接受状态
     return KnowledgeFetchResponse(
         knowledge_id=f"pending-{task_id}",
-        provider=req.provider or get_settings().llm_default_provider,
+        provider=resolve_name(req.provider, feature="embedding"),
         chunks=0,
         chars=0,
         title=req.title or "",
@@ -376,7 +416,7 @@ async def ingest_from_url(
 async def knowledge_stats(
     session: AsyncSession = Depends(get_db),
 ) -> KnowledgeStatsResponse:
-    """Document / chunk totals plus per-provider breakdown."""
+    """文档数 / 分块数总量，另带按 provider 的拆解（看多少文档需要重索引）。"""
     return await services.rag.knowledge_stats(session)
 
 
@@ -389,6 +429,7 @@ async def list_knowledge(
     limit: int = Query(default=20, ge=1, le=200),
     session: AsyncSession = Depends(get_db),
 ) -> KnowledgeListResponse:
+    """分页列出知识文档，支持标题/正文关键字、provider 过滤与「只看陈旧的」。"""
     return await services.rag.list_knowledge(
         session,
         keyword=keyword,
@@ -404,6 +445,7 @@ async def batch_delete_knowledge(
     req: KnowledgeBatchDeleteRequest,
     session: AsyncSession = Depends(get_db),
 ) -> KnowledgeBatchDeleteResponse:
+    """批量删文档：逐条删，失败的单独回到 ``failed`` 里，不全盘回滚。"""
     deleted, failed = await services.rag.delete_knowledge_many(session, req.ids)
     return KnowledgeBatchDeleteResponse(deleted=deleted, failed=failed)
 
@@ -414,6 +456,7 @@ async def knowledge_detail(
     chunk_limit: int = Query(default=200, ge=1, le=2000),
     session: AsyncSession = Depends(get_db),
 ) -> KnowledgeDetailResponse:
+    """单篇文档详情 + 它的全部分块（最多 ``chunk_limit`` 块）。"""
     detail = await services.rag.get_knowledge(
         session, knowledge_id, chunk_limit=chunk_limit
     )
@@ -428,14 +471,15 @@ async def update_knowledge(
     req: KnowledgeDocUpdateRequest,
     session: AsyncSession = Depends(get_db),
 ) -> KnowledgeDocItem:
-    """Rename a document, and/or replace its text and rebuild the vectors (异步)."""
+    """改标题，或换正文（连带重建向量），或两者都改。
+
+    改了正文就得重算嵌入，所以同样走「测试同步 / 生产异步入队」两分支；
+    入队时只能回一个占位对象 + ``task_id``。
+    """
     if req.title is None and req.content is None:
         raise HTTPException(status_code=400, detail="请至少提供 title 或 content")
-    
-    # 测试环境使用同步模式
-    sync_mode = os.environ.get("APP_TEST_MODE", "false").lower() == "true"
-    
-    if sync_mode:
+
+    if _sync_mode():
         # 测试中直接执行并返回结果
         result = await services.rag.update_knowledge(session, knowledge_id, req)
         if result is None:
@@ -455,7 +499,7 @@ async def update_knowledge(
         return KnowledgeDocItem(
             knowledge_id=knowledge_id,
             title=req.title or "",
-            provider=get_settings().llm_default_provider,
+            provider=resolve_name(feature="embedding"),
             chunks=0,
             chars=0,
             preview="",
@@ -471,11 +515,8 @@ async def reindex_knowledge(
     knowledge_id: str,
     session: AsyncSession = Depends(get_db),
 ) -> KnowledgeReindexResponse:
-    """Rebuild vectors with the currently configured provider (异步)."""
-    # 测试环境使用同步模式
-    sync_mode = os.environ.get("APP_TEST_MODE", "false").lower() == "true"
-    
-    if sync_mode:
+    """用当前配置的 provider 重建向量（换嵌入模型后把旧文档拉回一致）。"""
+    if _sync_mode():
         # 测试中直接执行并返回结果
         result = await services.rag.reindex_knowledge(session, knowledge_id)
         if result is None:
@@ -494,7 +535,7 @@ async def reindex_knowledge(
         # 立即返回接受状态
         return KnowledgeReindexResponse(
             knowledge_id=knowledge_id,
-            provider=get_settings().llm_default_provider,
+            provider=resolve_name(feature="embedding"),
             previous_provider=None,
             chunks=0,
             chars=0,
@@ -509,7 +550,7 @@ async def replace_vectors(
     session: AsyncSession = Depends(get_db),
 ) -> KnowledgeReindexResponse:
     """更换向量模型后重建索引（异步）。"""
-    new_provider = req.provider or get_settings().llm_default_provider
+    new_provider = resolve_name(req.provider, feature="embedding")
     
     queue = get_queue()
     task_id = await queue.enqueue(
@@ -535,6 +576,7 @@ async def delete_knowledge(
     knowledge_id: str,
     session: AsyncSession = Depends(get_db),
 ) -> dict[str, int]:
+    """删一篇文档（连带它的分块）；id 不存在返 404。"""
     if not await services.rag.delete_knowledge(session, knowledge_id):
         raise HTTPException(status_code=404, detail="知识文档不存在")
     return {"deleted": 1}
@@ -545,6 +587,7 @@ async def search(
     req: KnowledgeSearchRequest,
     session: AsyncSession = Depends(get_db),
 ) -> KnowledgeSearchResponse:
+    """向量/混合检索：参数开关（融合、精排）都在请求体里，流程见 ``rag.search``。"""
     return await services.rag.search(session, req)
 
 
@@ -558,7 +601,7 @@ async def answer(
     如需流式响应，设置 req.stream=true，将返回 StreamingResponse。
     """
     # 测试环境使用同步模式
-    sync_mode = os.environ.get("APP_TEST_MODE", "false").lower() == "true"
+    sync_mode = _sync_mode()
     
     if getattr(req, "stream", False):
         return await _stream_answer(req, sync=sync_mode)
@@ -569,10 +612,15 @@ async def answer(
 
 
 async def _stream_answer(req: KnowledgeAnswerRequest, sync: bool = False) -> StreamingResponse:
-    """知识库问答的流式生成器。"""
+    """知识库问答的流式生成器。
+
+    自己另开一个会话而不是用 ``Depends(get_db)``：生成器活得比请求级会话长，
+    请求级会话在响应交出去时就该被释放，再用它就晚了，所以在 ``finally`` 里自己关。
+    """
     session = await get_db().__anext__()
-    
+
     async def gen():
+        """先检索拼上下文，再让模型作答；末尾补一块带引用与 usage 的收尾。"""
         try:
             # 搜索相关片段
             search_resp = await services.rag.search(
@@ -584,9 +632,9 @@ async def _stream_answer(req: KnowledgeAnswerRequest, sync: bool = False) -> Str
             context = "\n".join(f"[{c.index}] {c.snippet}" for c in search_resp.items)
             question = f"Context:\n{context}\n\nQuestion: {req.query}"
             
-            # Multimodal: when the caller attaches images (base64 data URL or http URL),
-            # send them as content parts alongside the text so a vision model can reason
-            # over them. Plain-text-only models ignore / reject these parts upstream.
+            # 多模态：调用方附了图（base64 data URL 或 http URL）时，把图与文字
+            # 一起作为 content parts 发出，让支持视觉的模型能看着图回答。
+            # 纯文本模型会由上游忽略 / 拒收这些 part。
             if req.images:
                 user_content = [
                     {"type": "text", "text": question},
@@ -599,7 +647,7 @@ async def _stream_answer(req: KnowledgeAnswerRequest, sync: bool = False) -> Str
             else:
                 user_content = question
             
-            backend = llm.get_llm(req.provider)
+            backend = get_llm(req.provider, feature="rag")
             system_prompt = (
                 "你是一个知识库问答助手。请基于下方提供的检索片段（Context）作答，"
                 "并遵守以下要求：\n"
@@ -628,23 +676,32 @@ async def _stream_answer(req: KnowledgeAnswerRequest, sync: bool = False) -> Str
                 ).model_dump(), ensure_ascii=False) + "\n"
             else:
                 # 异步流式模式：逐块发送
+                final_usage = None
                 async for chunk in backend.chat_stream(
                     [
                         ChatMessage(role="system", content=system_prompt),
                         ChatMessage(role="user", content=user_content),
                     ]
                 ):
-                    yield json.dumps(KnowledgeAnswerChunk(
+                    # 收集内容块和引用信息
+                    answer_chunk = KnowledgeAnswerChunk(
                         answer=getattr(chunk, 'content', ''),
-                    ).model_dump(), ensure_ascii=False) + "\n"
-                    usage = getattr(chunk, 'usage', None)
+                        citations=search_resp.items if hasattr(chunk, 'done') and chunk.done else [],
+                        usage=None,
+                    )
+                    yield json.dumps(answer_chunk.model_dump(), ensure_ascii=False) + "\n"
+                    
+                    # 保存最后一块的 usage
+                    if hasattr(chunk, 'usage') and chunk.usage:
+                        final_usage = chunk.usage
                 
                 # 最后一块发送引用和用量
-                yield json.dumps(KnowledgeAnswerChunk(
-                    answer="",
-                    citations=search_resp.items,
-                    usage=usage,
-                ).model_dump(), ensure_ascii=False) + "\n"
+                if final_usage or search_resp.items:
+                    yield json.dumps(KnowledgeAnswerChunk(
+                        answer="",
+                        citations=search_resp.items,
+                        usage=final_usage,
+                    ).model_dump(), ensure_ascii=False) + "\n"
         except Exception as exc:
             logger.exception("流式知识库问答中断")
             tail = KnowledgeAnswerChunk(error=f"生成中断：{exc}")

@@ -1,11 +1,17 @@
-"""Application settings, loaded from environment variables / .env file.
+"""应用配置：从环境变量 / ``.env`` 读取，全进程只有这一份。
 
-Each LLM provider has its own config block (``llm_openai_*``,
-``llm_deepseek_*``, etc). The router can target any provider via the
-request ``provider`` field; the per-request provider falls back to
-``llm_default_provider``.
+每个 LLM provider 各占一块配置（``llm_openai_*`` / ``llm_deepseek_*`` …），
+请求里的 ``provider`` 字段决定用哪一块；没指定时用 ``llm_default_provider``。
+
+要注意与本模块的分工：**这里只是兜底来源**，运行时真正生效的配置以数据库为准
+（「系统配置」选各功能的 provider、「模型管理」配端点与模型名），由
+``services/provider_store`` 读库并缓存在内存里；``.env`` 只在库里没配时兜底。
+唯一的例外是 ``rag_vector_dim``、混合检索与智能问数这类结构性参数，仍然只能改 ``.env``。
+
+``get_settings()`` 带 ``lru_cache``：改 ``.env`` 必须重启进程才生效。
 """
 
+from collections.abc import Iterable
 from enum import StrEnum  # noqa: F401  (re-exported by app.schemas.ai)
 from functools import lru_cache
 from pathlib import Path
@@ -14,14 +20,58 @@ from typing import ClassVar
 from pydantic import BaseModel, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Repo root (the directory that holds ``app/``); used to resolve the media dir
-# so uploaded images land in a stable place regardless of the process CWD.
+# 仓库根目录（装着 ``app/`` 的那层）；用它解析媒体目录，
+# 使上传的图片无论进程从哪个 CWD 启动都落在同一个地方。
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# 「模型管理」里新建的自定义 provider。由 services.provider_store 在刷新
+# 缓存时登记，两个 Provider 枚举共用这一份白名单：请求里的 provider 只接受
+# 「内置成员 + 数据库里配过的」，打错的名字仍然会被校验拦下（而不是静默接受）。
+_custom_providers: set[str] = set()
+# (枚举名, provider) -> 动态成员。不能写进 ``_value2member_map_``：那里删不掉，
+# 被删除的 provider 会永远通过校验。
+_dynamic_members: dict[tuple[str, str], StrEnum] = {}
+
+
+def register_custom_providers(names: Iterable[str]) -> None:
+    """登记数据库里配置过的 provider id（刷新缓存时全量覆盖，删掉的随即失效）。"""
+    _custom_providers.clear()
+    _custom_providers.update(str(n).strip().lower() for n in names if str(n).strip())
+
+
+def custom_providers() -> set[str]:
+    """已登记的自定义 provider 名（只读快照）。"""
+    return set(_custom_providers)
+
+
+def custom_provider_member(cls: type[StrEnum], value: object) -> StrEnum | None:
+    """把已登记的自定义 provider 变成枚举成员；未登记（如拼错）返回 None。
+
+    同一名字必须复用同一个成员，否则 ``Provider("x") is not Provider("x")``，
+    枚举比较与 ``_registry`` 缓存都会错乱。
+    """
+    name = str(value).strip().lower()
+    if not name or name not in _custom_providers:
+        return None
+    key = (cls.__name__, name)
+    member = _dynamic_members.get(key)
+    if member is None:
+        member = str.__new__(cls, name)
+        member._name_ = name.upper()
+        member._value_ = name
+        _dynamic_members[key] = member
+    return member
 
 
 class Provider(StrEnum):
-    """Supported LLM providers. Mirrors ``app/schemas/ai.Provider``; defined
-    here to avoid a circular import (schemas import config for the default)."""
+    """内置支持的 LLM provider。
+
+    与 ``app/schemas/ai.Provider`` 是同一套值，在这里独立定义是为了避开循环导入
+    （schemas 要 import 本模块取默认值）。
+
+    内置六个由枚举成员写死；「模型管理」里新建的自定义 provider 由下面的
+    ``_missing_`` 动态认（需在白名单里），无需改代码重启。
+    """
 
     OPENAI = "openai"
     DEEPSEEK = "deepseek"
@@ -30,12 +80,17 @@ class Provider(StrEnum):
     MLX = "mlx"
     MOCK = "mock"
 
+    @classmethod
+    def _missing_(cls, value):
+        """枚举查不到内置成员时的兜底：只认「模型管理」里配过的自定义 provider。"""
+        return custom_provider_member(cls, value)
+
 
 class ProviderConfig(BaseModel):
-    """Per-provider endpoint + model config.
+    """单个 provider 的端点 + 模型名（调用 LLM 所需的全部参数）。
 
-    ``api_key`` and ``base_url`` are optional for local providers (ollama, mlx)
-    and for providers that don't need an OpenAI-style API key.
+    ``api_key`` / ``base_url`` 对本地服务（ollama、mlx）和不需要 OpenAI 式
+    Key 的 provider 可以留空；留空时 ``OpenAIBackend._auth_key`` 会补一个占位串。
     """
 
     api_key: str = ""
@@ -45,6 +100,13 @@ class ProviderConfig(BaseModel):
 
 
 class Settings(BaseSettings):
+    """全部配置项的容器（字段名 = ``APP_`` 前缀 + 小写字段）。
+
+    分组自上而下就是功能模块：AI/LLM → RAG（向量维度/精排/混合检索）→
+    智能问数 → 联网检索 → 管理后台凭据 → 数据库与上传目录。
+    每组里都先写「这个开关影响哪条链路」，再加具体参数。
+    """
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -62,11 +124,11 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["*"]
 
     # --- AI / LLM ---
-    # Default provider used when the request does not specify one.
+    # 请求没带 provider 时的默认值（数据库配了各功能的选择则以数据库为准）。
     llm_default_provider: str = "openai"  # openai|deepseek|qwen|ollama|mlx|mock
 
-    # Per-provider configs. Env vars map to the sub-field via nesting,
-    # e.g. APP_LLM_OPENAI_API_KEY, APP_LLM_OPENAI_BASE_URL, ...
+    # 各 provider 的默认端点与模型名。环境变量按嵌套映射到子字段，
+    # 如 APP_LLM_OPENAI_API_KEY、APP_LLM_OPENAI_BASE_URL…
     llm_openai: ProviderConfig = ProviderConfig(
         base_url="https://api.openai.com/v1",
         chat_model="gpt-4o-mini",
@@ -88,7 +150,7 @@ class Settings(BaseSettings):
         embedding_model="nomic-embed-text",
     )
     llm_mlx: ProviderConfig = ProviderConfig(
-        # Local mlx-lm / omlx server. 模型名与端口因机器而异，一律由 .env 提供
+        # 本地 mlx-lm / omlx 服务。模型名与端口因机器而异，一律由 .env 提供
         # （APP_LLM_MLX_BASE_URL / _CHAT_MODEL / _EMBEDDING_MODEL / _API_KEY），
         # 代码只留通用默认兜底，不写死任何具体环境的值。
         base_url="http://localhost:8080/v1",
@@ -235,14 +297,14 @@ class Settings(BaseSettings):
     # 放开后才允许抓内网地址（调试用）。默认严格拒绝私网/回环，防模型被诱导打 SSRF。
     web_fetch_allow_private: bool = False
 
-    # --- API keys for accessing THIS service ---
+    # --- 访问本服务用的 API Key ---
     # RBAC 后不再有任何管理接口旁路：它只用作 ``POST /admin/onboard`` 的首次引导密钥
     # （置空则关闭 HTTP 引导，改用 python -m app.bootstrap seed）。
     admin_api_key: str = "admin-dev-key"
-    default_request_quota: int = 100  # requests per hour per key
-    admin_session_ttl_seconds: int = 86_400  # admin dashboard bearer token lifetime
+    default_request_quota: int = 100  # 每 Key 每小时请求数上限
+    admin_session_ttl_seconds: int = 86_400  # 控制台 Bearer token 的有效期（秒）
 
-    # --- Database (SQLite by default) ---
+    # --- 数据库（默认 SQLite，生产用 Postgres + pgvector）---
     database_url: str = "sqlite+aiosqlite:///./app.db"
     db_echo: bool = False
 
@@ -255,11 +317,12 @@ class Settings(BaseSettings):
 
     @property
     def media_root(self) -> Path:
+        """媒体根目录的绝对路径（相对值按仓库根解析，绝对值原样用）。"""
         p = Path(self.media_dir)
         return p if p.is_absolute() else _PROJECT_ROOT / p
 
-    # --- Backward-compat aliases (used by tests / legacy .env) ---
-    # These mirror the per-provider values; prefer the nested fields.
+    # --- 向后兼容的旧字段（测试与老 .env 在用）---
+    # 它们是单 provider 时代的形参，与上面的嵌套配置互不联动；新代码请用嵌套字段。
     llm_provider: str = "openai"
     llm_api_key: str = ""
     llm_base_url: str | None = None
@@ -267,7 +330,12 @@ class Settings(BaseSettings):
     llm_embedding_model: str = "text-embedding-3-small"
 
     def provider_config(self, name: str) -> ProviderConfig:
-        """Return the config for a provider name (openai/deepseek/...)."""
+        """取某个 provider 的 ``.env`` 配置（openai/deepseek/…）。
+
+        注意：这是**兜底路径**，带数据库优先的读取请用
+        ``services.llm._provider_cfg``，否则后台改了模型名这里看不到。
+        名字不认识时抛 ``KeyError``（自定义 provider 在 .env 里没有对应块）。
+        """
         key = f"llm_{name}"
         value = getattr(self, key, None)
         if not isinstance(value, ProviderConfig):
@@ -277,4 +345,9 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """全进程唯一的 Settings 实例（缓存后不再重读 .env，改环境需重启）。
+
+    测试里要换配置时，对读配置的模块 ``monkeypatch.setattr(mod, "get_settings", ...)``，
+    而不是真改 .env（conftest 就是这么做的）。
+    """
     return Settings()
