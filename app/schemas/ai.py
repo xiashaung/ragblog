@@ -242,11 +242,21 @@ class EmbeddingResponse(BaseModel):
 # --- RAG / 知识库 ---
 
 
+#: 录入正文的格式。三者都只出现在**请求**里：``html`` 会在服务层被压成 Markdown
+#: （见 :mod:`app.services.markdown_text`），所以落库与回显的只有 ``text`` / ``markdown``。
+#: 保留 ``text`` 这个默认值是为了老前端与历史数据：不传就等于「按纯文本处理」。
+ContentFormat = Literal["text", "markdown", "html"]
+
+
 class KnowledgeIngestRequest(BaseModel):
     """文本录入：一段正文喂给服务层，由它切片 + 向量化。"""
 
     title: str = Field(..., min_length=1, max_length=200)
     content: str = Field(..., min_length=1)
+    format: ContentFormat = Field(
+        default="text",
+        description="正文格式：text / markdown 原样入库，html 先转成 Markdown 再入库",
+    )
     provider: Provider | None = Field(
         default=None,
         description="切片向量化时用哪个向量后端",
@@ -335,6 +345,8 @@ class KnowledgeDocItem(BaseModel):
     source_file: str | None = None
     # 入库途径：file / text / faq / url。
     kind: str = "text"
+    # 正文格式（落库只有 text / markdown）：markdown 的文档前端才值得按语法渲染。
+    format: str = "text"
     source_url: str | None = None
     metadata: dict | None = None
     ingested_at: float = 0.0
@@ -382,6 +394,10 @@ class KnowledgeDocUpdateRequest(BaseModel):
 
     title: str | None = Field(default=None, min_length=1, max_length=200)
     content: str | None = Field(default=None, min_length=1)
+    format: ContentFormat | None = Field(
+        default=None,
+        description="content 的格式；不传则沿用文档原有格式（只改名时无需关心）",
+    )
 
     @field_validator("content")
     @classmethod

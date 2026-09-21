@@ -46,6 +46,7 @@ from ..schemas.ai import (
     Provider,
 )
 from . import llm, reranker, web_page
+from .markdown_text import normalize_content, stored_format, strip_markdown
 
 DEFAULT_CHUNK_SIZE = 500
 PREVIEW_CHARS = 120
@@ -162,6 +163,20 @@ def _doc_kind(doc: KnowledgeDoc) -> str:
     return "file" if (doc.meta or {}).get("source_file") else "text"
 
 
+def _preview_text(meta: dict, source: str) -> str:
+    """列表摘要：Markdown 文档先剥掉语法符号再截断，摘出来的是文字不是 ``#`` / ``|``。"""
+    head = source[: PREVIEW_CHARS * 3]
+    if meta.get("format") == "markdown":
+        head = strip_markdown(head)
+    return head[:PREVIEW_CHARS].replace("\n", " ").strip()
+
+
+def _doc_format(meta: dict) -> str:
+    """正文格式回显：只认 text / markdown（html 在入口处已经转掉了），没记就算纯文本。"""
+    stored = meta.get("format")
+    return stored if stored in ("text", "markdown") else "text"
+
+
 def _doc_item(doc: KnowledgeDoc, chunks: int, chars: int, first_text: str = "") -> dict:
     """管理列表用的文档形状（不带分片正文，避免列表接口拽出全文）。"""
     default = _default_provider()
@@ -175,10 +190,11 @@ def _doc_item(doc: KnowledgeDoc, chunks: int, chars: int, first_text: str = "") 
         "provider": doc.provider,
         "chunks": chunks,
         "chars": len(content) or chars,
-        "preview": source[:PREVIEW_CHARS].replace("\n", " ").strip(),
+        "preview": _preview_text(meta, source),
         "has_content": bool(content),
         "source_file": meta.get("source_file"),
         "kind": _doc_kind(doc),
+        "format": _doc_format(meta),
         "source_url": meta.get("source_url"),
         "metadata": doc.meta,
         "ingested_at": doc.ingested_at,
@@ -275,13 +291,23 @@ async def upsert_document(
     provider: Provider | str | None = None,
     chunk_size: int | None = None,
     metadata: dict | None = None,
+    fmt: str = "text",
 ) -> KnowledgeIngestResponse:
     """入库（或整篇替换）一份文档并重建它的分片向量。
 
     所有录入入口——文件上传、裸文本、问答对、URL——最后都汇到这里，
     否则四路的 ID 规则、元数据写法、向量重建时机很容易各自漂移。
     注：同标题先整体 ``delete_knowledge`` 再重建，所以旧 provider 不会残留。
+
+    ``fmt`` 是正文的录入格式：``html`` 先转成 Markdown 再切块，库里只存一种格式；
+    转完实际是什么记在 ``meta["format"]``（只有 text / markdown 两个值）。
     """
+    body = normalize_content(content, fmt)
+    if not body:
+        raise ValueError(
+            "正文归一化后为空（HTML 里可能只有样式标签），请检查内容或改用 Markdown 录入"
+        )
+
     backend = llm.get_llm(provider, feature="embedding")
     doc_id = _doc_id_for(title)
 
@@ -292,22 +318,23 @@ async def upsert_document(
     meta = dict(metadata or {})
     if chunk_size:
         meta["chunk_size"] = chunk_size
+    meta.setdefault("format", stored_format(fmt))
     doc = KnowledgeDoc(
         id=doc_id,
         title=title,
         provider=backend.provider.value,
-        content=content,
+        content=body,
         meta=meta or None,
     )
     session.add(doc)
     await session.flush()
 
-    chunks = await replace_vectors(session, doc, content, backend=backend)
+    chunks = await replace_vectors(session, doc, body, backend=backend)
     return KnowledgeIngestResponse(
         knowledge_id=doc.id,
         provider=backend.provider,
         chunks=chunks,
-        chars=len(content),
+        chars=len(body),
     )
 
 
@@ -322,6 +349,7 @@ async def ingest(
         provider=payload.provider,
         chunk_size=payload.chunk_size,
         metadata=payload.metadata,
+        fmt=payload.format,
     )
 
 
@@ -493,6 +521,9 @@ async def update_knowledge(
     """改名，和/或替换正文（替换会重新 embedding）。
 
     文档不存在时返 ``None``，由路由翻译成 404（服务层不抛 HTTP 状态）。
+
+    带 ``content`` 时同录入一样过一道格式归一化（html → Markdown）；
+    请求里没写 format 就沿用它现有的格式，只改标题不会动到正文格式。
     """
     doc = await session.get(KnowledgeDoc, knowledge_id)
     if doc is None:
@@ -510,10 +541,20 @@ async def update_knowledge(
     doc.updated_at = time.time()
 
     if payload.content is not None:
+        # 没传 format 就沿用文档原有格式：编辑器只改一段纯文本时不该被误标成 Markdown
+        fmt = payload.format or _doc_format(doc.meta or {})
+        body = normalize_content(payload.content, fmt)
+        if not body:
+            raise ValueError(
+                "正文归一化后为空（HTML 里可能只有样式标签），请检查内容或改用 Markdown 录入"
+            )
         # 换了正文，旧向量全失效，必须同批重建。
-        doc.content = payload.content
+        doc.content = body
+        meta = dict(doc.meta or {})
+        meta["format"] = stored_format(fmt)
+        doc.meta = meta
         await replace_vectors(
-            session, doc, payload.content, backend=llm.get_llm(feature="embedding")
+            session, doc, body, backend=llm.get_llm(feature="embedding")
         )
 
     chunks, size = (await _chunk_stats(session, [doc.id])).get(doc.id, (0, 0))

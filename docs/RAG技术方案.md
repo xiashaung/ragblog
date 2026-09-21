@@ -51,8 +51,8 @@ FastAPI 接口层 (app/routers/)
 | `id` | 书的编号。规则：`kb-{标题的哈希}`，**同名即同 id**，所以重复上传 = 覆盖而不是翻倍 |
 | `title` | 书名 |
 | `provider` | 这本书是用哪个 AI 模型做的指纹（重要，见下文坑） |
-| `content` | **原文全文**（分片会重叠没法还原，所以单独存一份，供编辑 / 重建用） |
-| `metadata` | 附加信息：来源文件名、图片 URL、录入方式等 |
+| `content` | **原文全文**（分片会重叠没法还原，所以单独存一份，供编辑 / 重建用）。只存一种格式：Markdown 源码或纯文本 |
+| `metadata` | 附加信息：来源文件名、图片 URL、录入方式、正文格式（`text` / `markdown`）等 |
 
 ### 2. `knowledge_chunks`（分片表）= 一张卡片一条记录
 
@@ -73,7 +73,10 @@ FastAPI 接口层 (app/routers/)
 **四种录入方式，最后都汇到同一个函数 `upsert_document`（rag.py:258）**，殊途同归不会走偏：
 
 ```
-上传文件 / 纯文本 / 问答对 / 抓网页
+上传文件 / 纯文本 / Markdown / HTML 富文本 / 问答对 / 抓网页
+          ↓
+   [录入时声明了格式] → 归一化成 Markdown：HTML 剥标签保留结构，.md 文件自动按 Markdown 记
+   （app/services/markdown_text.py，只存源码，检索与向量都因此干净）
           ↓
    [如果是图片 / PDF里的图] → 视觉模型生成中文描述，图片落盘存 URL
           ↓
@@ -83,6 +86,11 @@ FastAPI 接口层 (app/routers/)
           ↓
    存进 knowledge_chunks 表
 ```
+
+### 编辑器插图为什么只存地址
+
+Markdown 编辑器里的图片走 `POST /upload/image`：图片落到 `media/uploads/`，
+正文里只写 `![](/media/uploads/x.png)`。base64 不进分块与向量，否则一张图会撑坏整片指纹。
 
 ### 图片的巧妙处理（`app/routers/upload.py`）
 
@@ -172,7 +180,8 @@ System 提示词（RAG_SYSTEM_PROMPT）要求 AI：
 | 接口 | 作用 |
 |------|------|
 | `POST /upload`、`/upload/batch` | 上传文件建库（单个 / 批量 ≤ 20） |
-| `POST /knowledge/ingest` | 纯文本录入 |
+| `POST /upload/image` | 编辑器插图：只落盘返地址，不建文档 |
+| `POST /knowledge/ingest` | 文本录入（`format`：text / markdown / html，html 入库前转 Markdown） |
 | `POST /knowledge/ingest-pairs` | 问答对批量录入 |
 | `POST /knowledge/fetch-url` | 抓网页正文入库 |
 | `POST /knowledge/search` | 相似检索（看命中排名） |

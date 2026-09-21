@@ -16,6 +16,7 @@ import type {
     ChatSession,
     ChatSessionListResult,
     ChatStreamChunk,
+    ContentFormat,
     DataSourceItem,
     DataSourcePayload,
     DataSourceTestResult,
@@ -31,6 +32,7 @@ import type {
     RoleItem,
     SessionItem,
     UploadBatchResult,
+    UploadImageResult,
     WebMode,
 } from '@/typings';
 
@@ -174,7 +176,13 @@ export const ragApi = {
             method: 'get',
             params: chunkLimit ? {chunk_limit: chunkLimit} : undefined,
         }),
-    ingest: (data: { title: string; content: string; chunk_size?: number }) =>
+    // format 决定后端怎么解释 content：text/markdown 原样入库，html 先转成 Markdown
+    ingest: (data: {
+        title: string;
+        content: string;
+        chunk_size?: number;
+        format?: ContentFormat;
+    }) =>
         request<KnowledgeIngestResult>({
             url: '/ai/knowledge/ingest',
             method: 'post',
@@ -207,7 +215,12 @@ export const ragApi = {
             timeout: LLM_TIMEOUT,
         }),
     // 改名（廉价）或替换正文（重新分片 + 重新向量化）
-    update: (id: string, data: { title?: string; content?: string }) =>
+    // format 不传则沿用文档原有格式：只改标题、或改的就是原文格式时都不用带
+    update: (id: string, data: {
+        title?: string;
+        content?: string;
+        format?: ContentFormat;
+    }) =>
         request<KnowledgeDocItem>({
             url: `/ai/knowledge/${id}`,
             method: 'patch',
@@ -325,6 +338,18 @@ export const uploadApi = {
         return http.post('/upload', formData, {
             headers: {'Content-Type': 'multipart/form-data'},
             timeout: LLM_TIMEOUT,
+        });
+    },
+    // 编辑器插图 / 粘贴截图：只落盘拿地址，不建文档（正文里留 ![](/media/uploads/x.png)）
+    uploadImage: (file: File) => {
+        const formData = new FormData();
+        formData.append('file', file);
+        return request<UploadImageResult>({
+            url: '/upload/image',
+            method: 'post',
+            data: formData,
+            headers: {'Content-Type': 'multipart/form-data'},
+            timeout: 60 * 1000,
         });
     },
     // 批量：标题取文件名主干（同名覆盖），一次最多 20 个，逐文件返回成败

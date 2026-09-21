@@ -4,23 +4,38 @@
  * 详情与分片查看、改名 / 改内容 / 重建索引 / 删除。
  * 内容录入（文件 / 文本 / 问答对 / URL）已拆到独立「内容录入」页。
  * 向量化模型由后端 .env 配置决定，前端不选择平台。
+ *
+ * 按钮级：写操作按钮挂 v-perm / :disabled，弹窗「保存」按权限禁用，
+ * 处理函数里再留一道 guard；只读用户看到的空状态与正文标题也跟着权限换文案。
+ *
+ * 正文默认是渲染态（Markdown 文档按语法渲染，纯文本按原样展示），
+ * 点「编辑源码」才切进编辑器；保存时把当前格式一并送回后端（不传则沿用原格式）。
  */
 import { computed, onMounted, reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 // 模板里用的是 PascalCase <Card>，全局注册只提供 a-*，必须显式引入
 import { Card, message } from 'ant-design-vue';
 import { ragApi } from '@/api';
+import MarkdownEditor from '@/components/MarkdownEditor.vue';
+import RichText from '@/components/RichText.vue';
 import { usePerm } from '@/composables/usePerm';
 import { useBusinessStore } from '@/store/modules/business';
-import type { KnowledgeDetail, KnowledgeDocItem, KnowledgeStats } from '@/typings';
+import type { ContentFormat, KnowledgeDetail, KnowledgeDocItem, KnowledgeStats } from '@/typings';
 
 const router = useRouter();
 const route = useRoute();
 const business = useBusinessStore();
 // 按钮级权限：改名 / 重建 / 删除 / 保存正文都是写操作，统一要 knowledge:manage。
 // 能进这一页说明至少有 knowledge:read（路由守卫已挡），所以只需再区分读写。
-const { can, tip: permHint } = usePerm();
+const { can, tip: permHint, need, okProps } = usePerm();
 const canManage = computed(() => can('knowledge:manage'));
+
+/** 写操作兜底闸门（按钮已按权限置灰，这里拦的是回车提交与权限中途被收） */
+function guardManage() {
+  if (canManage.value) return false;
+  message.warning(need('knowledge:manage'));
+  return true;
+}
 
 const stats = ref<KnowledgeStats | null>(null);
 const list = ref<KnowledgeDocItem[]>([]);
@@ -143,15 +158,21 @@ const detailVisible = ref(false);
 const detailLoading = ref(false);
 const editContent = ref('');
 const saving = ref(false);
+/** 正文区默认只读渲染，点「编辑源码」才切成编辑器 */
+const bodyEditing = ref(false);
+/** 编辑中的目标格式：允许把一篇纯文本文档改写成 Markdown（反过来也行） */
+const editFormat = ref<ContentFormat>('markdown');
 
 async function openDetail(row: KnowledgeDocItem) {
   detailVisible.value = true;
   detailLoading.value = true;
   detail.value = null;
+  bodyEditing.value = false;
   try {
     const data = await ragApi.detail(row.knowledge_id, 100);
     detail.value = data;
     editContent.value = data?.content || '';
+    editFormat.value = data?.doc?.format === 'markdown' ? 'markdown' : 'text';
   } catch (e: any) {
     message.error(e?.detail || e?.message || '加载文档详情失败');
   } finally {
@@ -159,18 +180,25 @@ async function openDetail(row: KnowledgeDocItem) {
   }
 }
 
-function onContentInput(ev: Event) {
-  editContent.value = (ev.target as HTMLTextAreaElement).value;
+/** 放弃未保存的改动，回到只读渲染态 */
+function cancelEditBody() {
+  editContent.value = detail.value?.content || '';
+  editFormat.value = detail.value?.doc?.format === 'markdown' ? 'markdown' : 'text';
+  bodyEditing.value = false;
 }
 
 // 保存正文 = 重新分片 + 重新向量化（成本与一次入库相同）
 async function onSaveContent() {
+  if (guardManage()) return;
   const doc = detail.value?.doc;
   if (!doc) return;
   if (!editContent.value.trim()) return message.warning('正文不能为空');
   saving.value = true;
   try {
-    const updated = await ragApi.update(doc.knowledge_id, { content: editContent.value });
+    const updated = await ragApi.update(doc.knowledge_id, {
+      content: editContent.value,
+      format: editFormat.value,
+    });
     message.success(`已更新并重建索引，共 ${updated.chunks} 个分片`);
     await refresh();
     await openDetail(updated);
@@ -191,6 +219,7 @@ function openRename(row: KnowledgeDocItem) {
 }
 
 async function onRename() {
+  if (guardManage()) return;
   if (!renameModal.title.trim()) return message.warning('标题不能为空');
   try {
     await ragApi.update(renameModal.id, { title: renameModal.title.trim() });
@@ -203,6 +232,7 @@ async function onRename() {
 }
 
 async function onReindex(row: KnowledgeDocItem) {
+  if (guardManage()) return;
   reindexing.value = row.knowledge_id;
   try {
     const res = await ragApi.reindex(row.knowledge_id);
@@ -220,6 +250,7 @@ async function onReindex(row: KnowledgeDocItem) {
 }
 
 async function onRemove(row: KnowledgeDocItem) {
+  if (guardManage()) return;
   try {
     await ragApi.remove(row.knowledge_id);
     message.success('已删除');
@@ -230,6 +261,7 @@ async function onRemove(row: KnowledgeDocItem) {
 }
 
 async function onBatchRemove() {
+  if (guardManage()) return;
   const ids = selectedKeys.value;
   if (!ids.length) return message.warning('请先勾选要删除的文档');
   try {
@@ -327,6 +359,9 @@ onMounted(async () => {
             <a-tag :color="kindColors[record.kind] || 'default'" style="margin-left: 6px">
               {{ kindLabels[record.kind] || record.kind }}
             </a-tag>
+            <a-tooltip v-if="record.format === 'markdown'" title="正文是 Markdown 源码，详情里按语法渲染">
+              <a-tag color="geekblue" style="margin-left: 4px">MD</a-tag>
+            </a-tooltip>
             <a-tooltip v-if="record.metadata?.embedded_images" title="文档内嵌图片已由视觉模型生成描述入库（可检索）">
               <a-tag color="gold" style="margin-left: 4px">含图 {{ record.metadata.embedded_images }}</a-tag>
             </a-tooltip>
@@ -371,7 +406,14 @@ onMounted(async () => {
           <template v-else>{{ text }}</template>
         </template>
         <template #emptyText>
-          <a-empty description="知识库为空，点右上角「录入内容」上传文件 / 文本 / 问答对 / URL" />
+          <!-- 无权的人看到「点右上角录入」只会去找那个灰色按钮，换成指路给管理员 -->
+          <a-empty
+            :description="
+              canManage
+                ? '知识库为空，点右上角「录入内容」上传文件 / 文本 / 问答对 / URL'
+                : '知识库还没有内容，需要录入请联系管理员开通 knowledge:manage'
+            "
+          />
         </template>
       </a-table>
     </Card>
@@ -381,6 +423,7 @@ onMounted(async () => {
       :open="renameModal.visible"
       title="修改文档标题"
       ok-text="保存"
+      :ok-button-props="okProps('knowledge:manage')"
       @ok="onRename"
       @cancel="renameModal.visible = false"
     >
@@ -392,7 +435,7 @@ onMounted(async () => {
     <a-drawer
       :open="detailVisible"
       :title="detail?.doc?.title || '文档详情'"
-      :width="720"
+      :width="860"
       @close="detailVisible = false"
     >
       <a-spin :spinning="detailLoading">
@@ -422,25 +465,67 @@ onMounted(async () => {
             type="warning"
             show-icon
             style="margin-top: 12px"
-            :message="`该文档向量属于 ${detail.doc.provider}，当前默认是 ${stats?.default_provider}，检索不会命中，请重建索引`"
+            :message="`该文档向量属于 ${detail.doc.provider}，当前默认是 ${stats?.default_provider}，检索不会命中${canManage ? '，请点「重建」重建索引' : '，需要重建请联系管理员'}`"
           />
 
-          <div class="section-title" style="margin-top: 16px">正文（编辑后保存将重新分片 + 向量化）</div>
-          <a-textarea
-            :value="detail.content || ''"
-            :rows="8"
-            :disabled="!canManage || !detail.doc.has_content"
-            :placeholder="detail.doc.has_content ? '' : '入库时未保存原文，无法编辑，请重新上传该文件'"
-            @input="onContentInput"
-          />
-          <a-space style="margin-top: 8px">
+          <div class="section-title" style="margin-top: 16px">
+            正文
+            <a-tag :color="detail.doc.format === 'markdown' ? 'geekblue' : 'default'">
+              {{ detail.doc.format === 'markdown' ? 'Markdown' : '纯文本' }}
+            </a-tag>
+            <a-button
+              v-if="canManage && detail.doc.has_content && !bodyEditing"
+              type="link"
+              size="small"
+              @click="bodyEditing = true"
+            >编辑源码</a-button>
+            <a-button v-else-if="bodyEditing" type="link" size="small" @click="cancelEditBody">回到预览</a-button>
+          </div>
+
+          <template v-if="bodyEditing">
+            <a-radio-group
+              v-model:value="editFormat"
+              :options="[
+                { label: '纯文本', value: 'text' },
+                { label: 'Markdown', value: 'markdown' },
+              ]"
+              option-type="button"
+              button-style="solid"
+              size="small"
+            />
+            <div class="sub" style="margin: 4px 0 8px">
+              切换格式只是改「后端怎么解释这段正文」，保存后会按新格式渲染；改动正文会重新分片 + 向量化
+            </div>
+            <MarkdownEditor v-model="editContent" :format="editFormat" :rows="12" default-view="split" />
+            <a-space style="margin-top: 8px">
+              <a-button
+                v-perm="'knowledge:manage'"
+                type="primary"
+                :loading="saving"
+                @click="onSaveContent"
+              >保存并重建</a-button>
+              <a-button :disabled="saving" @click="cancelEditBody">取消</a-button>
+            </a-space>
+          </template>
+          <template v-else>
+            <a-alert
+              v-if="!detail.doc.has_content"
+              type="warning"
+              show-icon
+              message="入库时未保存原文，无法编辑 / 重建，请重新上传该文件"
+            />
+            <!-- Markdown 文档按语法渲染，纯文本保持原样：否则历史文档里的 # | 会被误读成排版 -->
+            <RichText v-else-if="detail.doc.format === 'markdown'" :text="detail.content || ''" class="doc-body" />
+            <pre v-else class="doc-plain">{{ detail.content || '（正文为空）' }}</pre>
+          </template>
+          <a-space v-if="!bodyEditing" style="margin-top: 8px">
             <a-button
               v-perm="'knowledge:manage'"
               type="primary"
               :loading="saving"
               :disabled="!detail.doc.has_content"
-              @click="onSaveContent"
-            >保存并重建</a-button>
+              @click="bodyEditing = true"
+            >编辑正文</a-button>
             <a-button
               v-perm="'knowledge:manage'"
               :disabled="!detail.doc.has_content || reindexing === detail.doc.knowledge_id"
@@ -491,10 +576,35 @@ onMounted(async () => {
   margin-top: 2px;
 }
 .section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 14px;
   font-weight: 600;
   color: var(--app-fg);
   margin-bottom: 8px;
+}
+/* 渲染态正文：跟抽屉边框留点呼吸空间，长表 / 长代码块自己滚动 */
+.doc-body {
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--app-panel);
+}
+.doc-plain {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-panel-2);
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .chunk-list {
   max-height: 420px;
@@ -506,7 +616,7 @@ onMounted(async () => {
 }
 .chunk {
   padding: 6px 8px;
-  border-bottom: 1px dashed #e5e7eb;
+  border-bottom: 1px dashed var(--app-border);
 }
 .chunk:last-child { border-bottom: none; }
 .chunk-head {

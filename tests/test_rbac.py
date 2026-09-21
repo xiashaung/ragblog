@@ -80,23 +80,24 @@ async def test_builtin_roles_are_seeded_with_catalog_permissions(client, console
         Permission.ACCOUNT_READ,
         Permission.ROLE_READ,
         Permission.SESSION_READ,
+        Permission.KNOWLEDGE_READ,
     }
 
     resp = await client.get("/admin/permissions", headers=console["headers"])
     assert resp.status_code == HTTPStatus.OK
     assert {item["code"] for item in _data(resp)} == set(ALL_PERMISSIONS)
 
-    # 新增的按钮级权限码默认不预发给任何内置角色（只靠超管的 ``*`` 生效）
-    newly_added = {
-        Permission.SYSTEM_READ,
-        Permission.SYSTEM_MANAGE,
-        Permission.KNOWLEDGE_READ,
-        Permission.KNOWLEDGE_MANAGE,
-    }
+    # 知识库随日常使用面预发（admin 管内容、viewer 只读）；
+    # 模型接入的 system:* 一个都不发，因为 provider 读取接口会回显 API Key
+    assert {Permission.KNOWLEDGE_READ, Permission.KNOWLEDGE_MANAGE} <= set(
+        roles["admin"]["permissions"]
+    )
     for code, item in roles.items():
         if code == SUPERADMIN_ROLE:
             continue
-        assert not (newly_added & set(item["permissions"])), code
+        assert Permission.SYSTEM_READ not in item["permissions"], code
+        assert Permission.SYSTEM_MANAGE not in item["permissions"], code
+    assert Permission.KNOWLEDGE_MANAGE not in roles["viewer"]["permissions"]
 
 
 async def test_viewer_can_read_but_writes_are_denied(client, console, account_factory):
@@ -405,7 +406,8 @@ async def _grant_role(
 
 async def test_knowledge_read_and_manage_gate_rag_apis(client, console, account_factory):
     """知识库接口按读 / 写两档拦：无权连列表都不发。"""
-    viewer = await account_factory("kbviewer", ["viewer"])
+    # 用 operator 当「完全没知识库权限」的对照组：内置 viewer 已经预发了 knowledge:read
+    viewer = await account_factory("kbviewer", ["operator"])
     assert Permission.KNOWLEDGE_READ not in viewer["permissions"]
 
     denied = await client.get("/api/v1/ai/knowledge", headers=viewer["headers"])
@@ -467,6 +469,7 @@ async def test_knowledge_read_and_manage_gate_rag_apis(client, console, account_
 
 async def test_system_config_permissions_gate_model_pages(client, console, account_factory):
     """模型选择 / 模型接入接口：读不涉风险，改 provider 属于危险操作。"""
+    # 内置角色都没被预发 system:*（viewer 有 knowledge:read 也照样读不到模型配置）
     viewer = await account_factory("cfgviewer", ["viewer"])
     denied = await client.get(
         "/api/v1/system/config/models", headers=viewer["headers"]

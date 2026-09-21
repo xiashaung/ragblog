@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
  * 会话页 —— 在线后台会话（token 存的是 SHA-256 摘要，这里只能看到归属与过期时间）。
- * 读需 session:read，强制下线需 session:revoke（按钮无权时置灰 + 悬停说明）。
+ * 读需 session:read，强制下线需 session:revoke（按钮无权时置灰 + 悬停说明，
+ * 确认气泡也一起 disable；处理函数里再留一道兜底）。
  */
 import { computed, onMounted, ref } from 'vue';
 import { Alert, Button, Card, Popconfirm, Space, Table, Tag, message } from 'ant-design-vue';
@@ -15,7 +16,7 @@ const auth = useAuthStore();
 const business = useBusinessStore();
 const loading = ref(false);
 
-const { can } = usePerm();
+const { can, need } = usePerm();
 const canRevoke = computed(() => can('session:revoke'));
 const isSelf = (row: SessionItem) => row.admin_id === auth.userInfo?.id;
 
@@ -36,6 +37,8 @@ async function refresh() {
 }
 
 async function onRevoke(row: SessionItem) {
+  // 按钮与气泡都已按权限关掉，这里拦的是「页面开着时权限被收」这一路
+  if (!canRevoke.value) return message.warning(need('session:revoke'));
   try {
     await adminApi.revokeSession(row.id);
     message.success('该会话已强制下线');

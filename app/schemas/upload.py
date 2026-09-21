@@ -15,8 +15,17 @@ __all__ = [
     "KnowledgeIngestResponse",
     "UploadBatchItem",
     "UploadBatchResponse",
+    "UploadImageResponse",
     "UploadStatusResponse",
 ]
+
+
+class UploadImageResponse(BaseModel):
+    """只落盘一张图、不入库：编辑器插图与粘贴截图拿的是一个可嵌入 Markdown 的地址。"""
+
+    url: str = Field(..., description="浏览器可直接访问的媒体地址，形如 /media/uploads/x.png")
+    name: str = Field(default="", description="文件名，给编辑器当 alt 文本用")
+    bytes: int = 0
 
 
 class UploadStatusResponse(BaseModel):

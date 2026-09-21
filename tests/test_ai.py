@@ -343,7 +343,8 @@ async def test_knowledge_management(client, admin_headers):
     assert resp.status_code == 200
     created = _ok(resp)
     kb_id = created["knowledge_id"]
-    assert created["chars"] == len("Paris is the capital of France. " * 30)
+    # 录入会统一换行并去掉首尾空白，所以字数按 strip 后的正文算
+    assert created["chars"] == len(("Paris is the capital of France. " * 30).strip())
 
     # --- list: keyword + pagination envelope ---
     resp = await client.get(
@@ -357,6 +358,8 @@ async def test_knowledge_management(client, admin_headers):
     row = next(i for i in body["items"] if i["knowledge_id"] == kb_id)
     assert row["has_content"] and row["chars"] > 0 and row["chunks"] > 1
     assert row["stale"] is False and row["preview"]
+    # 不传 format 的旧写法算纯文本
+    assert row["format"] == "text"
 
     # keyword that matches nothing
     resp = await client.get(
@@ -435,6 +438,119 @@ async def test_knowledge_management(client, admin_headers):
     )
     body = _ok(resp)
     assert body["deleted"] == 1 and body["failed"] == [missing]
+
+
+async def test_knowledge_html_ingest_is_normalized_to_markdown(
+    client, admin_headers
+):
+    """富文本录入：HTML 在入口转成 Markdown 才入库，列表/详情都回显 markdown 格式。"""
+    html = (
+        '<h2>退款说明</h2>'
+        '<p>请在<strong>7 天</strong>内申请，详见'
+        '<a href="https://a.cn/r">退款页</a>。</p>'
+        "<ul><li>保留小票</li><li>原路退回</li></ul>"
+        "<table><tr><th>渠道</th><th>时效</th></tr>"
+        "<tr><td>支付宝</td><td>1 天</td></tr></table>"
+    )
+    resp = await client.post(
+        "/api/v1/ai/knowledge/ingest",
+        json={"title": "退款说明", "content": html, "format": "html"},
+        headers=admin_headers,
+    )
+    created = _ok(resp)
+    kb_id = created["knowledge_id"]
+
+    detail = _ok(
+        await client.get(f"/api/v1/ai/knowledge/{kb_id}", headers=admin_headers)
+    )
+    body = detail["content"]
+    assert "## 退款说明" in body
+    assert "请在**7 天**内申请" in body
+    assert "[退款页](https://a.cn/r)" in body
+    assert "- 保留小票" in body
+    assert "| 渠道 | 时效 |" in body
+    # 展示用的标签不该进库：否则分块与向量里全是噪音
+    for noise in ("<h2>", "<strong>", "<table>", "<a href"):
+        assert noise not in body
+    assert detail["doc"]["format"] == "markdown"
+    assert detail["doc"]["kind"] == "text"
+
+    # 列表摘要剥掉语法符号，给人看的是文字不是 # 和 |
+    rows = _ok(
+        await client.get(
+            "/api/v1/ai/knowledge",
+            params={"keyword": "退款说明"},
+            headers=admin_headers,
+        )
+    )
+    item = rows["items"][0]
+    assert item["format"] == "markdown"
+    assert "#" not in item["preview"] and "<" not in item["preview"]
+    assert "退款说明" in item["preview"]
+
+    # 编辑时不传 format 就沿用文档原有格式（只改标题更不会动到正文）
+    resp = await client.patch(
+        f"/api/v1/ai/knowledge/{kb_id}",
+        json={"content": "## 新正文"},
+        headers=admin_headers,
+    )
+    assert _ok(resp)["format"] == "markdown"
+
+
+def test_html_to_markdown_keeps_block_structure():
+    """块级结构转的得对：引用逐行加前缀、代码块保留缩进与语言、列表按缩进嵌套。"""
+    from app.services.markdown_text import html_to_markdown
+
+    html = (
+        "<blockquote><p>注意</p><p>务必按顺序</p></blockquote>"
+        '<pre><code class="language-python">if x:\n    print(1)</code></pre>'
+        "<ol><li>外层<script>alert(1)</script><ul><li>内层</li></ul></li></ol>"
+        "<p>分隔线之前</p><hr><p><del>作废</del>与<u>下划线</u></p>"
+    )
+    md = html_to_markdown(html)
+    assert "> 注意\n>\n> 务必按顺序" in md
+    assert "```python\nif x:\n    print(1)\n```" in md
+    assert "1. 外层\n  - 内层" in md
+    assert "alert" not in md and "---" in md
+    assert "~~作废~~" in md
+    # 没有 Markdown 对应的语义（下划线）只留文字，不编造语法
+    assert "<u>" not in md and "下划线" in md
+
+
+async def test_knowledge_html_without_body_is_rejected(client, admin_headers):
+    """只有样式标签的 HTML 转完是空的：直接 400，别留一篇搜不到的空文档。"""
+    resp = await client.post(
+        "/api/v1/ai/knowledge/ingest",
+        json={"title": "空壳", "content": "<div></div><span></span>", "format": "html"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    assert "归一化后为空" in resp.json()["message"]
+
+
+async def test_upload_image_returns_media_url_without_ingesting(client, admin_headers):
+    """编辑器插图：只落盘返地址，不建文档、也不要视觉模型。"""
+    resp = await client.post(
+        "/api/v1/upload/image",
+        files={"file": ("screenshot.png", b"\x89PNG\r\n\x1a\nfake", "image/png")},
+        headers=admin_headers,
+    )
+    data = _ok(resp)
+    assert data["url"].startswith("/media/uploads/") and data["url"].endswith(".png")
+    assert data["name"] == "screenshot.png" and data["bytes"] > 0
+
+    # 图片只是正文的一部分，不该因此多出一篇文档
+    rows = _ok(await client.get("/api/v1/ai/knowledge", headers=admin_headers))
+    assert all("screenshot" not in item["title"] for item in rows["items"])
+
+    # 粘贴进来的可能根本不是支持的格式：直接 400，不往媒体目录写脏文件
+    resp = await client.post(
+        "/api/v1/upload/image",
+        files={"file": ("diagram.svg", b"<svg></svg>", "image/svg+xml")},
+        headers=admin_headers,
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    assert "不支持的图片格式" in resp.json()["message"]
 
 
 async def test_knowledge_stale_flag_tracks_default(client, admin_headers):

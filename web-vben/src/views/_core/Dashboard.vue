@@ -52,15 +52,20 @@ function can(code: string | string[]): boolean {
   return auth.hasPerm(code);
 }
 
+/**
+ * 指标卡片：perm 是「进那个页面要的权限」，卡片能否点、脚注怎么说都由它定。
+ *
+ * 无权时卡片还在（数据是「—」），但点了不该落到 /403：看不进去就不给进。
+ */
 const metricCards = computed(() => [
-  { key: 'docs', title: '知识文档', value: dash(stats.value?.docs), foot: can('knowledge:read') ? `分布在 ${stats.value?.by_provider?.length ?? 0} 个 provider` : '需 knowledge:read', to: '/knowledge' },
-  { key: 'chunks', title: '向量分片', value: dash(stats.value?.chunks), foot: `维度 ${stats.value?.vector_dim ?? '—'}`, to: '/knowledge' },
-  { key: 'chars', title: '正文字符', value: dash(stats.value?.chars), foot: `最近更新 ${formatDate(stats.value?.latest_updated_at)}`, to: '/knowledge/ingest' },
-  { key: 'chats', title: '我的对话', value: dash(chatCount.value), foot: '仅本人可见（上限 200）', to: '/chat' },
-  { key: 'sessions', title: '在线会话', value: dash(liveCount.value), foot: auth.hasPerm('session:read') ? '可强制下线' : '需 session:read', to: '/sessions' },
-  { key: 'ds', title: '外部数据源', value: dash(dsCount.value), foot: auth.hasPerm('datasource:read') ? '供智能问数切换' : '需 datasource:read', to: '/datasources' },
-  { key: 'accounts', title: '账号', value: dash(accountCount.value), foot: auth.hasPerm('account:read') ? '含未启用' : '需 account:read', to: '/accounts' },
-  { key: 'roles', title: '角色', value: dash(roleCount.value), foot: auth.hasPerm('role:read') ? '' : '需 role:read', to: '/roles' },
+  { key: 'docs', title: '知识文档', value: dash(stats.value?.docs), perm: 'knowledge:read', foot: can('knowledge:read') ? `分布在 ${stats.value?.by_provider?.length ?? 0} 个 provider` : '需 knowledge:read', to: '/knowledge' },
+  { key: 'chunks', title: '向量分片', value: dash(stats.value?.chunks), perm: 'knowledge:read', foot: `维度 ${stats.value?.vector_dim ?? '—'}`, to: '/knowledge' },
+  { key: 'chars', title: '正文字符', value: dash(stats.value?.chars), perm: 'knowledge:read', foot: `最近更新 ${formatDate(stats.value?.latest_updated_at)}`, to: '/knowledge' },
+  { key: 'chats', title: '我的对话', value: dash(chatCount.value), perm: '', foot: '仅本人可见（上限 200）', to: '/chat' },
+  { key: 'sessions', title: '在线会话', value: dash(liveCount.value), perm: 'session:read', foot: can('session:read') ? '可强制下线' : '需 session:read', to: '/sessions' },
+  { key: 'ds', title: '外部数据源', value: dash(dsCount.value), perm: 'datasource:read', foot: can('datasource:read') ? '供智能问数切换' : '需 datasource:read', to: '/datasources' },
+  { key: 'accounts', title: '账号', value: dash(accountCount.value), perm: 'account:read', foot: can('account:read') ? '含未启用' : '需 account:read', to: '/accounts' },
+  { key: 'roles', title: '角色', value: dash(roleCount.value), perm: 'role:read', foot: can('role:read') ? '' : '需 role:read', to: '/roles' },
 ]);
 
 /** 四个功能各用什么模型：provider 来自系统配置，模型名来自模型接入 */
@@ -169,6 +174,12 @@ function go(path: string) {
   router.push(path);
 }
 
+/** 卡片点击：缺权限就不跳（落到 /403 比不给点更让人困惑） */
+function goCard(card: { perm: string; to: string }) {
+  if (card.perm && !can(card.perm)) return;
+  router.push(card.to);
+}
+
 // 逐块独立取数：任何一块失败（离线 / 403）只影响它自己那格显示「—」
 async function load<T>(run: () => Promise<T>, fallback: T): Promise<T> {
   try {
@@ -234,7 +245,7 @@ onMounted(refresh);
       <!-- 核心指标 -->
       <a-row :gutter="[16, 16]">
         <a-col v-for="c in metricCards" :key="c.key" :xs="12" :md="6">
-          <a-card :bordered="false" size="small" hoverable @click="go(c.to)">
+          <a-card :bordered="false" size="small" :hoverable="!c.perm || can(c.perm)" @click="goCard(c)">
             <a-statistic :title="c.title" :value="c.value" />
             <div class="sub">{{ c.foot }}</div>
           </a-card>

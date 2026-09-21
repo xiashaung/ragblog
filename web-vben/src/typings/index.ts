@@ -53,6 +53,12 @@ export interface ChatMessage {
   content: string;
 }
 
+/**
+ * 正文格式（与后端 ``schemas.ai.ContentFormat`` 一对一）。
+ * 请求可以是三者之一，但落库只有 text / markdown：html 在后端先转成 Markdown。
+ */
+export type ContentFormat = 'text' | 'markdown' | 'html';
+
 export interface KnowledgeDocItem {
   knowledge_id: string;
   title: string;
@@ -65,6 +71,8 @@ export interface KnowledgeDocItem {
   source_file?: string | null;
   /** 录入方式：file / text / faq / url */
   kind: 'file' | 'text' | 'faq' | 'url';
+  /** 正文格式：markdown 的文档才按语法渲染，text 按纯文本展示 */
+  format: 'text' | 'markdown';
   source_url?: string | null;
   metadata?: Record<string, any> | null;
   ingested_at: number;
@@ -160,6 +168,13 @@ export interface UploadBatchResult {
   total: number;
   succeeded: number;
   failed: number;
+}
+
+/** 编辑器插图：只落盘返地址，不建文档 */
+export interface UploadImageResult {
+  url: string;
+  name: string;
+  bytes: number;
 }
 
 export interface MenuItem {

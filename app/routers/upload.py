@@ -7,6 +7,8 @@
 savepoint，坏文件不拖累好文件）、以及旧版纯文本录入。
 
 三个入口都是「写库」（要调嵌入模型），所以统一要求 ``knowledge:manage``。
+另外 ``/upload/image`` 不入库：只给 Markdown 编辑器插图用，把图落盘后返一个地址
+（同样是写媒体目录，所要求的权限与录入一致）。
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from ..schemas.upload import (
     KnowledgeIngestResponse,
     UploadBatchItem,
     UploadBatchResponse,
+    UploadImageResponse,
     UploadStatusResponse,
 )
 from ..services.llm import get_llm
@@ -230,12 +233,49 @@ async def _parse_and_ingest(
     ingest_req = KnowledgeIngestRequest(
         title=doc_title,
         content=text,
+        # .md 存的本就是 Markdown 源码，标出来详情页才值得按语法渲染；
+        # PDF / DOCX 抽出的是线性纯文本（排版信息已经丢了），按纯文本算
+        format="markdown" if ext == "md" else "text",
         provider=services.rag._resolved_provider(provider),
         chunk_size=chunk_size,
         metadata=metadata,
     )
     result = await services.rag.ingest(session, ingest_req)
     return result.knowledge_id, result.chunks, result.chars
+
+
+@router.post("/upload/image", response_model=UploadImageResponse)
+async def upload_image(
+    file: UploadFile = File(...),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
+) -> UploadImageResponse:
+    """存一张图片到媒体目录，只返地址（不进知识库）。
+
+    给 Markdown 编辑器的插图与粘贴截图用：正文里只写 ``![](/media/uploads/x.png)``，
+    base64 大 blob 不会混进分块与向量。不要求对话模型支持视觉，
+    也不会新建文档 —— 图只是正文的一部分。
+    """
+    filename = file.filename or "image"
+    ext = pathlib.Path(filename).suffix.lstrip(".").lower() or "png"
+    if ext not in IMAGE_MIME:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的图片格式（.{ext}），仅支持 {' / '.join(IMAGE_MIME)}",
+        )
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="图片内容为空")
+    if len(raw) > MAX_IMAGE_BYTES:
+        limit_mb = MAX_IMAGE_BYTES // 1024 // 1024
+        raise HTTPException(
+            status_code=400,
+            detail=f"图片过大（{len(raw) // 1024 // 1024} MB），单张上限 {limit_mb} MB",
+        )
+    try:
+        url = _save_image_file(raw, ext)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"图片保存失败：{exc}") from exc
+    return UploadImageResponse(url=url, name=filename, bytes=len(raw))
 
 
 @router.post("/upload", response_model=UploadStatusResponse)

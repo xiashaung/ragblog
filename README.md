@@ -147,13 +147,21 @@ POST /admin/login  {username, password}
 | 内置角色        | 权限                                             |
 | --------------- | ------------------------------------------------ |
 | `superadmin`    | `*`（全部权限，恒不可改，只有这一个角色能持有 `*`） |
-| `admin`         | 账号读写 + `role:read` + 会话读写 + `analytics:read` + `datasource:read` |
+| `admin`         | 账号读写 + `role:read` + 会话读写 + `analytics:read` + `datasource:read` + 知识库读写 |
 | `operator`      | `session:read` + `session:revoke`                |
-| `viewer`        | `account:read` + `role:read` + `session:read`（只读） |
+| `viewer`        | `account:read` + `role:read` + `session:read` + `knowledge:read`（只读） |
 
-模型接入（`system:*`）与知识库（`knowledge:*`）四个码**不预发给任何内置角色**，
+模型接入（`system:*`）两个码**不预发给任何内置角色**：`GET /system/config/providers`
+目前会把接入里的 API Key 明文回显，接口做好掩码前不该交给只读角色；
 现阶段只有 `superadmin` 靠 `*` 能用，之后在「角色权限」页按需分配。
 内置角色不可删除、标识不可改；一个账号可挂多个角色，权限取并集。
+
+> 这张表是权限的唯一定义，但角色数据在库里，而 `ensure_builtin_roles` 只在**首次引导**
+> 时跑。所以改动内置角色的权限集后，已有库要手动升级一次：
+> `alembic upgrade h7i8j9k0l1m2`（这版会按代码重刷四个内置角色，顺带清掉 API Key 时代
+> 留下的 `key:*`）。这里故意写具体版本号：项目当前有两个 head，
+> `g6h7i8j9k0l1`（system_configs）是从 `c2a3b4d5e6f7` 分出去、实际没应用过的孤儿分支
+> （表由 `create_all` 建），所以 `upgrade head` 会报歧义、`upgrade heads` 会去重建已存在的表。
 
 ### 端点与所需权限
 
@@ -176,7 +184,7 @@ POST /admin/login  {username, password}
 | GET    | /api/v1/ai/knowledge、/stats、/{id}、/search、/answer | `knowledge:read`  |
 | POST   | /api/v1/ai/knowledge/ingest、/ingest-pairs、/fetch-url | `knowledge:manage` |
 | PATCH / DELETE | /api/v1/ai/knowledge/{id}、/batch-delete、/reindex | `knowledge:manage` |
-| POST   | /api/v1/upload、/upload/batch       | `knowledge:manage` |
+| POST   | /api/v1/upload、/upload/batch、/upload/image | `knowledge:manage` |
 | GET    | /api/v1/system/config/*（各类 GET） | `system:read`     |
 | PATCH / POST / DELETE | /api/v1/system/config/*（写） | `system:manage`   |
 | GET    | /api/v1/datasources                 | `datasource:read` |
@@ -187,13 +195,17 @@ POST /admin/login  {username, password}
 
 ### 前端按钮级权限
 
-同一个权限码在前端要同时管三件事，入口分别是：
+同一个权限码在前端要同时管四件事，入口分别是（前一层管不住后一层）：
 
 - **菜单 / 路由**：`router/index.ts` 的 `meta.permissions` + `MainLayout` 的菜单过滤（无权不显示）；
 - **按钮**：全局指令 `v-perm="'knowledge:manage'"`（`src/directives/perm.ts`）。无权时不摘节点，
   而是置灰 + 悬停说明缺哪条（中文名单在 `src/config/permissions.ts`，与后端 catalog 同一口径）；
   需要「任一命中」用 `v-perm-any`。已经被 `a-tooltip` 包住的按钮不能用指令（原生 title 会被盖掉），
   改写 `:disabled="!canManage"` + `:title="canManage ? 正常文案 : permHint(code)"`；
+  弹窗底部的「确定」由 `a-modal` 自己渲染，指令够不着，用 `usePerm()` 的 `okProps(code)`
+  把 `disabled` 递进 `ok-button-props`（可叠 `{ danger: true }`）；
+- **提交兜底**：禁了按钮仍拦不住回车提交与「页面开着时权限被收」，所以每个写处理函数
+  开头再问一次：`if (!canManage.value) return message.warning(need(code))`；
 - **请求**：`usePerm()` 的 `can()` 用于脚本判断，没权限就干脆不发那个请求（否则只收到一个 403，
   页面还白转圈）——首页「概览」就是按这个取数的。
 
@@ -242,11 +254,12 @@ python -m app.bootstrap seed --username admin --password 'xxx'
 | 方法   | 路径                            | 说明                                   |
 | ------ | ------------------------------- | -------------------------------------- |
 | POST   | /api/v1/ai/chat                 | 对话补全，支持流式/结构化 JSON 输出    |
-| POST   | /api/v1/ai/knowledge/ingest     | RAG：录入文本（自动分块 + 向量化）      |
+| POST   | /api/v1/ai/knowledge/ingest     | RAG：录入文本（`format`: text/markdown/html，自动分块 + 向量化） |
 | POST   | /api/v1/ai/knowledge/ingest-pairs | RAG：录入一批问答对（合为一篇 FAQ）   |
 | POST   | /api/v1/ai/knowledge/fetch-url  | RAG：抓取网页正文后入库                |
 | POST   | /api/v1/upload                  | RAG：单文件入库（pdf/docx/txt/md/csv/log） |
 | POST   | /api/v1/upload/batch            | RAG：批量文件入库（≤20 个，逐文件返回成败） |
+| POST   | /api/v1/upload/image            | 编辑器插图：只落盘拿 `/media/uploads/...` 地址，不建文档 |
 | GET    | /api/v1/ai/knowledge            | RAG：文档列表（关键字 / provider / 仅待重建 / 分页） |
 | GET    | /api/v1/ai/knowledge/stats      | RAG：文档·分片·字符统计与 provider 明细 |
 | GET    | /api/v1/ai/knowledge/{id}       | RAG：文档详情（原文 + 分片）           |
@@ -260,6 +273,10 @@ python -m app.bootstrap seed --username admin --password 'xxx'
 
 > 不同 provider 的向量不可比：换 `APP_LLM_DEFAULT_PROVIDER` 后，旧文档会被
 > 标记为 `stale`（列表接口 `only_stale=true` 可单独筛出），需调 `reindex` 重建。
+
+> 正文只存一种格式（Markdown 源码或纯文本）：录入时的 `format=html` 会先由
+> `app/services/markdown_text.py`（stdlib `html.parser`，无新依赖）转成 Markdown 再入库，
+> 文档 meta 里只记 `text` / `markdown`；PATCH 不传 `format` 则沿用文档原格式。
 
 > 向量存储：Postgres 下 `knowledge_chunks.vector` 是 pgvector 的
 > `vector(<APP_RAG_VECTOR_DIM>)` 定长列，相似度由库内余弦距离 `<=>` 计算并走 HNSW
@@ -387,6 +404,11 @@ APP_LLM_DEEPSEEK_API_KEY=sk-xxx
   路由 `meta.permissions` 不满足时跳 `/403`；刷新页面以 `GET /admin/me` 为权威重拉权限。
   按钮级由 `v-perm` 指令与 `usePerm()` 负责（无权置灰 + 悬停说明 / 干脆不发请求），
   详见上面「前端按钮级权限」。前端过滤只负责渲染，真正的拦截在后端 `require_permission`。
+- **Markdown 录入与展示**：「内容录入」的文本 tab 是自研编辑器 `MarkdownEditor.vue`
+  （工具栏 + 编辑/分栏/预览三态 + 插图与粘截图上传，零新增依赖）；格式可选
+  纯文本 / Markdown / HTML（HTML 由后端转成 Markdown）。文档详情默认按语法渲染
+  （`RichText.vue` + `utils/rich.ts`：标题/列表/引用/代码块/表格/删除线，先转义后白名单），
+  点「编辑源码」才切回编辑器；列表里 Markdown 文档带 `MD` 标签、摘要剔掉语法符号。
 
 ### 开发模式（推荐）
 

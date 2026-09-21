@@ -124,8 +124,12 @@ WILDCARD = "*"
 
 #: 迁移与 seed 共用的内置角色定义。
 #: admin 有意不含 ``role:manage``：能管账号但不能改角色，避免自我提权。
-#: 模型接入（``system:*``）与知识库（``knowledge:*``）只靠 superadmin 的 ``*`` 生效，
-#: 这里一个都不预发：新权限码上线后默认无人可用，由管理员在角色页按需分配。
+#: 知识库（``knowledge:*``）已随日常使用面预发：admin 管内容、viewer 只读。
+#: 模型接入（``system:*``）仍然一个都不预发：``GET /system/config/providers`` 会把接入里的
+#: API Key 明文回显，在接口做好掩码前不该交给只读角色；需要的人靠超管的 ``*`` 操作，
+#: 或在角色页按需授予。
+#: 改这张表后，已有库由迁移（h7i8j9k0l1m2）同步一次；只在首次引导时跑
+#: ``ensure_builtin_roles`` 是不够的。
 BUILTIN_ROLES: list[dict[str, object]] = [
     {
         "code": SUPERADMIN_ROLE,
@@ -145,6 +149,8 @@ BUILTIN_ROLES: list[dict[str, object]] = [
             Permission.SESSION_REVOKE,
             Permission.ANALYTICS_READ,
             Permission.DATASOURCE_READ,
+            Permission.KNOWLEDGE_READ,
+            Permission.KNOWLEDGE_MANAGE,
         ],
     },
     {
@@ -164,6 +170,7 @@ BUILTIN_ROLES: list[dict[str, object]] = [
             Permission.ACCOUNT_READ,
             Permission.ROLE_READ,
             Permission.SESSION_READ,
+            Permission.KNOWLEDGE_READ,
         ],
     },
 ]

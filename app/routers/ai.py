@@ -322,7 +322,11 @@ async def ingest(
     session: AsyncSession = Depends(get_db),
     _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
 ) -> KnowledgeIngestResponse:
-    """文档入库：生产异步入队，测试同步执行（见 ``_sync_mode``）。"""
+    """文档入库：生产异步入队，测试同步执行（见 ``_sync_mode``）。
+
+    正文格式由 ``req.format`` 声明（text / markdown / html），html 在服务层
+    先转成 Markdown；入队时格式随 ``model_dump()`` 一起进 payload，两路行为一致。
+    """
     if _sync_mode():
         # 测试中直接执行并返回结果
         result = await services.rag.ingest(session, req)
@@ -482,7 +486,8 @@ async def update_knowledge(
     """改标题，或换正文（连带重建向量），或两者都改。
 
     改了正文就得重算嵌入，所以同样走「测试同步 / 生产异步入队」两分支；
-    入队时只能回一个占位对象 + ``task_id``。
+    入队时只能回一个占位对象 + ``task_id``。``format`` 随 ``model_dump()``
+    一起进队 payload，由消费端重建请求模型后在 :func:`rag.update_knowledge` 里归一化。
     """
     if req.title is None and req.content is None:
         raise HTTPException(status_code=400, detail="请至少提供 title 或 content")
@@ -513,6 +518,8 @@ async def update_knowledge(
             preview="",
             has_content=False,
             kind="text",
+            # 占位对象也要把格式说对：html 存下来就是 markdown
+            format=services.markdown_text.stored_format(req.format or "text"),
             updated_at=time.time(),
             task_id=task_id,
         )

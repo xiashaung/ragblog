@@ -4,7 +4,8 @@
  *
  * 权限：读需 account:read（路由已挡），写需 account:manage；
  * 按钮级：新建 / 分配角色 / 重置密码只由 v-perm 控制，「不能停用 / 删除自己」这类
- * 逐行判定继续留在 :disabled 里（两者叠加生效，互不覆盖）。
+ * 逐行判定继续留在 :disabled 里（两者叠加生效，互不覆盖）；
+ * 弹窗的「确定」按钮同样按权限禁用（okProps），处理函数里再留一道 guard。
  * 后端还会独立校验「不能停用/删除自己」「不能收回最后一个超管」等守卫。
  */
 import { computed, onMounted, reactive, ref } from 'vue';
@@ -29,8 +30,18 @@ import { useAuthStore } from '@/store/modules/auth';
 import type { AccountItem, RoleItem } from '@/typings';
 
 const auth = useAuthStore();
-const { can, tip: permHint } = usePerm();
+const { can, tip: permHint, need, okProps } = usePerm();
 const canManage = computed(() => can('account:manage'));
+
+/**
+ * 写操作兜底闸门：确定按钮已经按权限置灰，但回车提交、权限中途被收等路径
+ * 仍可能走到这里，所以发请求前再问一次；返回 true 表示「被拦下了」。
+ */
+function guardManage() {
+  if (canManage.value) return false;
+  message.warning(need('account:manage'));
+  return true;
+}
 
 const list = ref<AccountItem[]>([]);
 const roles = ref<RoleItem[]>([]);
@@ -92,6 +103,7 @@ async function load() {
 }
 
 async function onCreate() {
+  if (guardManage()) return;
   if (!form.username.trim() || form.password.length < 8) {
     message.warning('用户名必填，密码至少 8 位');
     return;
@@ -119,6 +131,7 @@ async function onCreate() {
 }
 
 async function onToggle(row: AccountItem, checked: boolean) {
+  if (guardManage()) return;
   try {
     await rbacApi.updateAccount(row.id, { is_active: checked });
     message.success(checked ? '已启用' : '已停用并强制下线');
@@ -130,6 +143,7 @@ async function onToggle(row: AccountItem, checked: boolean) {
 }
 
 async function onResetPassword() {
+  if (guardManage()) return;
   if (!pwdTarget.value || pwdValue.value.length < 8) {
     message.warning('新密码至少 8 位');
     return;
@@ -151,6 +165,7 @@ function openRoles(row: AccountItem) {
 }
 
 async function onAssignRoles() {
+  if (guardManage()) return;
   if (!roleTarget.value) return;
   try {
     await rbacApi.setAccountRoles(roleTarget.value.id, roleValue.value);
@@ -163,6 +178,7 @@ async function onAssignRoles() {
 }
 
 async function onRemove() {
+  if (guardManage()) return;
   if (!deleteTarget.value) return;
   try {
     await rbacApi.removeAccount(deleteTarget.value.id);
@@ -258,7 +274,13 @@ onMounted(load);
       </Table>
     </Card>
 
-    <Modal v-model:open="createOpen" title="新建账号" :confirm-loading="saving" @ok="onCreate">
+    <Modal
+      v-model:open="createOpen"
+      title="新建账号"
+      :confirm-loading="saving"
+      :ok-button-props="okProps('account:manage')"
+      @ok="onCreate"
+    >
       <Form layout="vertical">
         <Form.Item label="用户名" required>
           <Input v-model:value="form.username" placeholder="登录用，全局唯一" />
@@ -280,7 +302,12 @@ onMounted(load);
       </Form>
     </Modal>
 
-    <Modal v-model:open="pwdOpen" :title="`重置密码：${pwdTarget?.username || ''}`" @ok="onResetPassword">
+    <Modal
+      v-model:open="pwdOpen"
+      :title="`重置密码：${pwdTarget?.username || ''}`"
+      :ok-button-props="okProps('account:manage')"
+      @ok="onResetPassword"
+    >
       <Alert
         type="warning"
         show-icon
@@ -290,7 +317,12 @@ onMounted(load);
       <Input.Password v-model:value="pwdValue" placeholder="新密码，至少 8 位" />
     </Modal>
 
-    <Modal v-model:open="roleOpen" :title="`分配角色：${roleTarget?.username || ''}`" @ok="onAssignRoles">
+    <Modal
+      v-model:open="roleOpen"
+      :title="`分配角色：${roleTarget?.username || ''}`"
+      :ok-button-props="okProps('account:manage')"
+      @ok="onAssignRoles"
+    >
       <Alert
         type="info"
         show-icon
@@ -304,7 +336,7 @@ onMounted(load);
       :open="!!deleteTarget"
       title="删除账号"
       ok-text="删除"
-      :ok-button-props="{ danger: true }"
+      :ok-button-props="okProps('account:manage', { danger: true })"
       @cancel="deleteTarget = null"
       @ok="onRemove"
     >

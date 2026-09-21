@@ -5,7 +5,8 @@
  * 权限码目录由后端 app/rbac.py 定义（这里只读渲染），角色本身可自由增删。
  * 内置角色不可删；superadmin 恒为全部权限；含 role:manage 的角色只有超管能建/改
  * —— 这些守卫都在 services/rbac_service 里，前端只负责把后端的中文报错显示出来。
- * 按钮级：新建 / 编辑只挂 v-perm（role:manage）；删除保留「内置角色」的逐行 :disabled。
+ * 按钮级：新建 / 编辑挂 v-perm（role:manage），弹窗的「确定」与权限勾选框同样按权限禁用；
+ * 删除保留「内置角色」的逐行 :disabled。
  */
 import { computed, onMounted, reactive, ref } from 'vue';
 import {
@@ -29,8 +30,15 @@ import { rbacApi } from '@/api';
 import { usePerm } from '@/composables/usePerm';
 import type { PermissionDef, RoleItem } from '@/typings';
 
-const { can } = usePerm();
+const { can, need, okProps } = usePerm();
 const canManage = computed(() => can('role:manage'));
+
+/** 写操作兜底闸门（确定按钮已按权限置灰，这里拦的是回车提交与权限中途被收） */
+function guardManage() {
+  if (canManage.value) return false;
+  message.warning(need('role:manage'));
+  return true;
+}
 
 const list = ref<RoleItem[]>([]);
 const catalog = ref<PermissionDef[]>([]);
@@ -116,6 +124,7 @@ function openEdit(row: RoleItem) {
 }
 
 async function onSave() {
+  if (guardManage()) return;
   if (!form.name.trim()) {
     message.warning('角色名称必填');
     return;
@@ -153,6 +162,7 @@ async function onSave() {
 }
 
 async function onRemove() {
+  if (guardManage()) return;
   if (!deleteTarget.value) return;
   try {
     await rbacApi.removeRole(deleteTarget.value.id);
@@ -241,6 +251,7 @@ onMounted(load);
       v-model:open="editOpen"
       :title="editing ? `编辑角色：${editing.name}` : '新建角色'"
       :confirm-loading="saving"
+      :ok-button-props="okProps('role:manage')"
       width="640px"
       @ok="onSave"
     >
@@ -277,7 +288,7 @@ onMounted(load);
           <Divider style="margin: 8px 0">权限</Divider>
           <div v-for="group in grouped" :key="group.name" style="margin-bottom: 12px">
             <div style="font-weight: 600; margin-bottom: 6px">{{ group.name }}</div>
-            <Checkbox.Group v-model:value="form.permissions" style="width: 100%">
+            <Checkbox.Group v-model:value="form.permissions" :disabled="!canManage" style="width: 100%">
               <Row :gutter="[8, 8]">
                 <Col v-for="item in group.items" :key="item.code" :span="12">
                   <Checkbox :value="item.code">
@@ -297,7 +308,7 @@ onMounted(load);
       :open="!!deleteTarget"
       title="删除角色"
       ok-text="删除"
-      :ok-button-props="{ danger: true }"
+      :ok-button-props="okProps('role:manage', { danger: true })"
       @cancel="deleteTarget = null"
       @ok="onRemove"
     >

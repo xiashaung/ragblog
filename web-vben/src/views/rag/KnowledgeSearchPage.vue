@@ -576,7 +576,7 @@ onMounted(() => {
           />
           <a-empty
             v-else
-            :description="docDrawer.data.doc.has_content ? '暂无正文' : '入库时未保存原文，请到文档列表重新上传'"
+            :description="docDrawer.data.doc.has_content ? '暂无正文' : '入库时未保存原文，只能由有 knowledge:manage 的账号重新上传'"
           />
         </template>
         <a-empty v-else-if="!docDrawer.loading" description="没有加载到文档" />

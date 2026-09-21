@@ -3,7 +3,8 @@
  * 数据源管理 —— 登记可供「智能问数」切换分析的外部数据库（MySQL / SQLite / Postgres）。
  *
  * 权限：读需 datasource:read（路由已挡），写 / 删 / 测试需 datasource:manage。
- * 按钮级：写操作按钮统一挂 v-perm（无权置灰 + 悬停说明缺哪条），开关类控件用 a-tooltip 补提示。
+ * 按钮级：写操作按钮统一挂 v-perm（无权置灰 + 悬停说明缺哪条），开关类控件用 a-tooltip 补提示；
+ * 表单弹窗的「确定」与删除确认的「删除」也按权限禁用（okProps）。
  * 安全：连接串含口令，列表只展示掩码串；编辑时留空表示不修改连接串。
  * 「本应用主库」是内置源，无需在此登记即可在问数页选用。
  */
@@ -13,8 +14,15 @@ import { datasourceApi } from '@/api';
 import { usePerm } from '@/composables/usePerm';
 import type { DataSourceItem } from '@/typings';
 
-const { can, tip: permHint } = usePerm();
+const { can, tip: permHint, need, okProps } = usePerm();
 const canManage = computed(() => can('datasource:manage'));
+
+/** 写操作兜底闸门（确定按钮已按权限置灰，这里拦的是回车提交与权限中途被收） */
+function guardManage() {
+  if (canManage.value) return false;
+  message.warning(need('datasource:manage'));
+  return true;
+}
 
 const list = ref<DataSourceItem[]>([]);
 const loading = ref(false);
@@ -109,6 +117,7 @@ function openEdit(row: DataSourceItem) {
 }
 
 async function onSave() {
+  if (guardManage()) return;
   if (!form.name.trim()) return message.warning('请填写数据源名称');
   if (!editingId.value && !form.url.trim())
     return message.warning('请填写连接串');
@@ -147,6 +156,7 @@ async function onSave() {
 
 // 测试当前表单草稿的连通性（编辑时带 existing_id，url 留空则测已存的）
 async function onTestDraft() {
+  if (guardManage()) return;
   if (!form.dialect) return message.warning('请选择类型');
   if (!form.url.trim() && !editingId.value)
     return message.warning('请先填写连接串');
@@ -171,6 +181,7 @@ async function onTestDraft() {
 }
 
 async function onTestRow(row: DataSourceItem) {
+  if (guardManage()) return;
   testing.value = true;
   try {
     const res = await datasourceApi.test({ dialect: row.dialect, url: '', existing_id: row.id });
@@ -188,6 +199,7 @@ async function onTestRow(row: DataSourceItem) {
 }
 
 async function onToggle(row: DataSourceItem, field: 'enabled' | 'readonly', checked: boolean) {
+  if (guardManage()) return;
   try {
     await datasourceApi.update(row.id, { [field]: checked });
     await load();
@@ -198,6 +210,7 @@ async function onToggle(row: DataSourceItem, field: 'enabled' | 'readonly', chec
 }
 
 async function onRemove() {
+  if (guardManage()) return;
   if (!deleteTarget.value) return;
   try {
     await datasourceApi.remove(deleteTarget.value.id);
@@ -221,7 +234,7 @@ onMounted(load);
       show-icon
       style="margin-bottom: 16px"
       message="只读模式"
-      description="当前账号只有查看数据源的权限（datasource:read）。新建 / 修改需超级管理员的 datasource:manage。"
+      description="当前账号只有查看数据源的权限（datasource:read）。新建 / 修改 / 测试连接需 datasource:manage。"
     />
     <a-alert
       type="warning"
@@ -300,6 +313,7 @@ onMounted(load);
       v-model:open="formOpen"
       :title="editingId ? '编辑数据源' : '新建数据源'"
       :confirm-loading="saving"
+      :ok-button-props="okProps('datasource:manage')"
       width="640px"
       @ok="onSave"
     >
@@ -339,7 +353,7 @@ onMounted(load);
       :open="!!deleteTarget"
       title="删除数据源"
       ok-text="删除"
-      :ok-button-props="{ danger: true }"
+      :ok-button-props="okProps('datasource:manage', { danger: true })"
       @cancel="deleteTarget = null"
       @ok="onRemove"
     >

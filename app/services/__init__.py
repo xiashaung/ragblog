@@ -10,6 +10,7 @@
 - ``document_parser``— 录入前的文件解析：各种格式统一成「文本 + 内嵌图片」
 - ``item_service``   — items 表的异步仓库（示例业务数据）
 - ``llm``            — LLM 网关：provider 注册表（OpenAI 兼容系与 mock）
+- ``markdown_text``  — 录入正文的格式归一化：HTML 富文本压成 Markdown 源码
 - ``provider_store`` — 模型提供者配置的运行时缓存（.env 兜底）
 - ``rag``            — 检索增强生成：切片、入库、混合检索、给答案
 - ``rag_queue``      — 录入 / 重建索引的后台任务队列（不阻塞 HTTP 请求）
@@ -34,6 +35,7 @@ from . import (
     document_parser,
     item_service,
     llm,
+    markdown_text,
     provider_store,
     rag,
     rbac_service,
@@ -52,6 +54,7 @@ __all__ = [
     "document_parser",
     "item_service",
     "llm",
+    "markdown_text",
     "provider_store",
     "rag",
     "rbac_service",

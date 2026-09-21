@@ -4,7 +4,7 @@
  *
  * 权限：读需 system:read（路由已挡），写需 system:manage。
  * 按钮级：新增 / 编辑 / 删除都是写操作，统一由 v-perm（新增）与 canManage （行内链接）控制，
- * 无权时不摘掉操作位，而是给一段带权限名的悬停说明。
+ * 无权时不摘掉操作位，而是给一段带权限名的悬停说明；表单弹窗的「确定」同样按权限禁用。
  * 请求走默认导出的 http 实例（baseURL=/api/v1），与后端 system_config 路由挂载点一致；
  * envelope 由拦截器拆掉，页面直接读 res.data。
  */
@@ -14,7 +14,7 @@ import { PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue';
 import http from '@/api/request';
 import { usePerm } from '@/composables/usePerm';
 
-const { can, tip: permHint, need } = usePerm();
+const { can, tip: permHint, need, okProps } = usePerm();
 const canManage = computed(() => can('system:manage'));
 
 const loading = ref(false);
@@ -247,6 +247,7 @@ onMounted(() => {
         v-model:open="showModal"
         :title="editingProvider ? '编辑模型接入' : '新增模型接入'"
         :confirm-loading="saving"
+        :ok-button-props="okProps('system:manage')"
         @ok="saveProvider"
         @cancel="showModal = false"
         width="600px"

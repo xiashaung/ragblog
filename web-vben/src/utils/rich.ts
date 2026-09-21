@@ -10,7 +10,21 @@
 const IMG_RE = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g;
 const LINK_RE = /(?<!\!)\[([^\]]+)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g;
 const BOLD_RE = /\*\*([^*]+)\*\*/g;
+const ITALIC_RE = /(^|[^*])\*([^*\n]+)\*(?!\*)/g;
+const DEL_RE = /~~([^~]+)~~/g;
 const CODE_RE = /`([^`]+)`/g;
+
+/** 行首块级语法（一次编译好，别在渲染循环里重复造 RegExp）。 */
+const FENCE_RE = /^\s*```\s*([\w+#.-]*)\s*$/;
+const HEADING_RE = /^(#{1,6})\s+(.*)$/;
+/** 行已整体转义，所以 `>` 在到这里时已经是 `&gt;`（嵌套引用就退化成普通文字）。 */
+const QUOTE_RE = /^&gt;\s?(.*)$/;
+const HR_RE = /^(-{3,}|\*{3,}|_{3,})$/;
+const UL_RE = /^([-*+])\s+(.*)$/;
+const OL_RE = /^(\d+)[.)]\s+(.*)$/;
+const TASK_RE = /^\[([ xX])\]\s+(.*)$/;
+const TABLE_ROW_RE = /^\|.*\|$/;
+const TABLE_SEP_RE = /^\|[\s:|-]+\|$/;
 
 const ESCAPE_MAP: Record<string, string> = {
   '&': '&amp;',
@@ -48,7 +62,7 @@ export function isImageFile(file: File): boolean {
   return /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name);
 }
 
-/** 行内元素渲染：图片 / 链接 / 粗体 / 斜体 / 行内代码（输入需已整体转义）。 */
+/** 行内元素渲染：图片 / 链接 / 粗体 / 斜体 / 删除线 / 行内代码（输入需已整体转义）。 */
 function renderInline(escaped: string): string {
   let html = escaped;
   // 图片必须先于链接处理，否则 `![alt](url)` 会被链接规则截断。
@@ -64,78 +78,179 @@ function renderInline(escaped: string): string {
       ? `<a class="rich-link" href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`
       : label;
   });
+  html = html.replace(DEL_RE, '<del class="rich-del">$1</del>');
   html = html.replace(BOLD_RE, '<strong>$1</strong>');
-  html = html.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+  html = html.replace(ITALIC_RE, '$1<em>$2</em>');
   html = html.replace(CODE_RE, '<code class="rich-code">$1</code>');
   return html;
 }
 
+/** 表格一行的单元格（入参需已整体转义；竖线在单元格里已被转义成字面量）。 */
+function splitRow(line: string): string[] {
+  return line.slice(1, -1).split('|').map((cell) => cell.trim());
+}
+
+/** 管道表 -> HTML 表格；首行是表头（分隔行的存在就是表头的信号）。 */
+function renderTable(rows: string[][]): string {
+  const [head, ...body] = rows;
+  const cells = (row: string[], tag: string, cls: string) =>
+    `<tr>${row.map((cell) => `<${tag} class="${cls}">${renderInline(cell)}</${tag}>`).join('')}</tr>`;
+  const parts = [`<thead>${cells(head, 'th', 'rich-th')}</thead>`];
+  if (body.length) parts.push(`<tbody>${body.map((row) => cells(row, 'td', 'rich-td')).join('')}</tbody>`);
+  return `<table class="rich-table">${parts.join('')}</table>`;
+}
+
 /**
  * 把一段 Markdown / 纯文本渲染为安全 HTML。
- * 除行内元素外，额外支持块级结构：`#` 标题、`-`/`*` 无序列表、`1.` 有序列表，
- * 以便 AI 整理后的结构化回答能正常呈现。安全策略仍为“先转义、后白名单”。
+ *
+ * 块级语法：`#` 标题、`-`/`*` 与 `1.` 列表（两个空格一级嵌套，含 `- [ ]` 任务项）、
+ * `>` 引用、` ``` ` 围栏代码块、`---` 分割线、`|a|b|` 管道表；行内语法见 renderInline。
+ * 安全策略不变：先整体转义、再只对白名单协议放行，所以代码块里的尖括号也只会当文字显示。
  */
 export function renderRichText(text: string): string {
   if (!text) return '';
   const lines = escapeHtml(text).split('\n');
   const out: string[] = [];
   let para: string[] = [];
-  let listType: 'ul' | 'ol' | null = null;
+  let listStack: { type: 'ul' | 'ol' }[] = [];
+  let quote: string[] | null = null;
+  let fence: { lang: string; body: string[] } | null = null;
+  // 表格要先看到分隔行才敢认定首行是表头，所以整段 | 行都得缓冲，不能边读边吐
+  let table: { lines: string[]; head: boolean } | null = null;
 
   const flushPara = () => {
-    if (para.length) {
-      out.push(`<p class="rich-p">${para.map(renderInline).join('<br>')}</p>`);
-      para = [];
+    if (!para.length) return;
+    out.push(`<p class="rich-p">${para.map(renderInline).join('<br>')}</p>`);
+    para = [];
+  };
+  const closeLists = () => {
+    while (listStack.length) out.push(`</${listStack.pop()!.type}>`);
+  };
+  const flushQuote = () => {
+    if (!quote) return;
+    out.push(
+      `<blockquote class="rich-quote">${quote.map(renderInline).join('<br>')}</blockquote>`,
+    );
+    quote = null;
+  };
+  const flushTable = () => {
+    if (!table) return;
+    if (table.head) out.push(renderTable(table.lines.map(splitRow)));
+    else para.push(...table.lines); // 含竖线的普通文本，不是表
+    table = null;
+  };
+  /** 关掉所有开着的块：只有一行都不属于它时才需要（空行、围栏、标题）。 */
+  const breakBlocks = () => {
+    flushTable();
+    flushPara();
+    closeLists();
+    flushQuote();
+  };
+  /** 对齐列表层级：不够就补开、超了就关掉（同一层换了列表类型也重建）。 */
+  const syncList = (type: 'ul' | 'ol', level: number) => {
+    while (listStack.length > level + 1) out.push(`</${listStack.pop()!.type}>`);
+    if (listStack.length === level + 1 && listStack[level].type !== type) {
+      out.push(`</${listStack.pop()!.type}>`);
+    }
+    while (listStack.length < level + 1) {
+      out.push(`<${type} class="rich-${type}">`);
+      listStack.push({ type });
     }
   };
-  const closeList = () => {
-    if (listType) {
-      out.push(`</${listType}>`);
-      listType = null;
-    }
+  const emitPre = (block: { lang: string; body: string[] }) => {
+    // 语言名挂在 data-lang 上由 CSS 出角标；body 已整体转义，这里不再加工
+    const attr = block.lang ? ` data-lang="${block.lang}"` : '';
+    out.push(`<pre class="rich-pre"${attr}><code>${block.body.join('\n')}</code></pre>`);
   };
 
   for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line) {
-      flushPara();
-      closeList();
+    // 围栏内的行原样收集：不缩进折叠、不解析语法，直到碰到闭合围栏
+    if (fence) {
+      const closing = FENCE_RE.exec(rawLine);
+      if (closing && !closing[1]) {
+        emitPre(fence);
+        fence = null;
+      } else {
+        fence.body.push(rawLine);
+      }
       continue;
     }
-    let m;
-    if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
+
+    const line = rawLine.trim();
+    if (TABLE_ROW_RE.test(line)) {
       flushPara();
-      closeList();
-      // 对话气泡内降级一档（# -> h3），避免字号过大。
+      closeLists();
+      flushQuote();
+      if (!table) table = { lines: [], head: false };
+      // 分隔行只能出现在表头下面一行；它只是声明表头，自身不是数据
+      if (table.lines.length === 1 && TABLE_SEP_RE.test(line)) {
+        table.head = true;
+        continue;
+      }
+      table.lines.push(line);
+      continue;
+    }
+    flushTable();
+
+    if (!line) {
+      breakBlocks(); // 空行是所有块的边界（也顺带让缓冲中的 | 行定型）
+      continue;
+    }
+
+    const fenceOpen = FENCE_RE.exec(line);
+    if (fenceOpen) {
+      breakBlocks();
+      fence = { lang: fenceOpen[1], body: [] };
+      continue;
+    }
+
+    let m;
+    if ((m = HEADING_RE.exec(line))) {
+      breakBlocks();
+      // 对话气泡与文档抽屉共用这一份渲染，标题一律降级一档（# -> h3）避免字号过大。
       const level = Math.min(m[1].length + 2, 6);
       out.push(`<h${level} class="rich-h">${renderInline(m[2])}</h${level}>`);
       continue;
     }
-    if ((m = line.match(/^[-*+]\s+(.*)$/))) {
-      flushPara();
-      if (listType !== 'ul') {
-        closeList();
-        out.push('<ul class="rich-ul">');
-        listType = 'ul';
-      }
-      out.push(`<li>${renderInline(m[1])}</li>`);
+    if (HR_RE.test(line)) {
+      breakBlocks();
+      out.push('<hr class="rich-hr">');
       continue;
     }
-    if ((m = line.match(/^\d+[.)]\s+(.*)$/))) {
+    if ((m = QUOTE_RE.exec(line))) {
       flushPara();
-      if (listType !== 'ol') {
-        closeList();
-        out.push('<ol class="rich-ol">');
-        listType = 'ol';
-      }
-      out.push(`<li>${renderInline(m[1])}</li>`);
+      closeLists();
+      (quote ??= []).push(m[1]);
       continue;
     }
-    closeList();
+
+    let item: { type: 'ul' | 'ol'; body: string } | null = null;
+    if ((m = UL_RE.exec(line))) item = { type: 'ul', body: m[2] };
+    else if ((m = OL_RE.exec(line))) item = { type: 'ol', body: m[2] };
+    if (item) {
+      flushPara();
+      flushQuote();
+      const indent = rawLine.length - rawLine.trimStart().length;
+      syncList(item.type, Math.min(Math.floor(indent / 2), 3));
+      const task = TASK_RE.exec(item.body);
+      // 不写 `</li>`：嵌套列表靠浏览器的自动闭合才能落进父项里（否则成了兄弟节点）
+      out.push(
+        task
+          ? `<li class="rich-task"><span class="rich-task-box">${
+              task[1] === ' ' ? '☐' : '☑'
+            }</span>${renderInline(task[2])}`
+          : `<li>${renderInline(item.body)}`,
+      );
+      continue;
+    }
+
+    closeLists();
+    flushQuote();
     para.push(line);
   }
-  flushPara();
-  closeList();
+
+  if (fence) emitPre(fence); // 围栏没闭合：至少把已经写的东西展示出来，不吞输入
+  breakBlocks();
   return out.join('');
 }
 
