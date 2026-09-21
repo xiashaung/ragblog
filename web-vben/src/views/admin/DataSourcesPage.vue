@@ -3,17 +3,18 @@
  * 数据源管理 —— 登记可供「智能问数」切换分析的外部数据库（MySQL / SQLite / Postgres）。
  *
  * 权限：读需 datasource:read（路由已挡），写 / 删 / 测试需 datasource:manage。
+ * 按钮级：写操作按钮统一挂 v-perm（无权置灰 + 悬停说明缺哪条），开关类控件用 a-tooltip 补提示。
  * 安全：连接串含口令，列表只展示掩码串；编辑时留空表示不修改连接串。
  * 「本应用主库」是内置源，无需在此登记即可在问数页选用。
  */
 import { computed, onMounted, reactive, ref } from 'vue';
 import { message } from 'ant-design-vue';
 import { datasourceApi } from '@/api';
-import { useAuthStore } from '@/store/modules/auth';
+import { usePerm } from '@/composables/usePerm';
 import type { DataSourceItem } from '@/typings';
 
-const auth = useAuthStore();
-const canManage = computed(() => auth.hasPerm('datasource:manage'));
+const { can, tip: permHint } = usePerm();
+const canManage = computed(() => can('datasource:manage'));
 
 const list = ref<DataSourceItem[]>([]);
 const loading = ref(false);
@@ -233,7 +234,7 @@ onMounted(load);
       <template #extra>
         <a-space>
           <a-button @click="load">刷新</a-button>
-          <a-button v-if="canManage" type="primary" @click="openCreate">新建数据源</a-button>
+          <a-button v-perm="'datasource:manage'" type="primary" @click="openCreate">新建数据源</a-button>
         </a-space>
       </template>
       <a-table
@@ -253,34 +254,38 @@ onMounted(load);
             <code class="url-masked">{{ record.url_masked }}</code>
           </template>
           <template v-else-if="column.key === 'readonly'">
-            <a-switch
-              :checked="record.readonly"
-              :disabled="!canManage"
-              size="small"
-              @change="(c: boolean) => onToggle(record, 'readonly', c)"
-            />
+            <a-tooltip :title="canManage ? '' : permHint('datasource:manage')">
+              <a-switch
+                :checked="record.readonly"
+                :disabled="!canManage"
+                size="small"
+                @change="(c: boolean) => onToggle(record, 'readonly', c)"
+              />
+            </a-tooltip>
           </template>
           <template v-else-if="column.key === 'enabled'">
-            <a-switch
-              :checked="record.enabled"
-              :disabled="!canManage"
-              size="small"
-              checked-children="启"
-              un-checked-children="停"
-              @change="(c: boolean) => onToggle(record, 'enabled', c)"
-            />
+            <a-tooltip :title="canManage ? '' : permHint('datasource:manage')">
+              <a-switch
+                :checked="record.enabled"
+                :disabled="!canManage"
+                size="small"
+                checked-children="启"
+                un-checked-children="停"
+                @change="(c: boolean) => onToggle(record, 'enabled', c)"
+              />
+            </a-tooltip>
           </template>
           <template v-else-if="column.key === 'updated_at'">
             {{ record.updated_at ? new Date(record.updated_at * 1000).toLocaleString() : '-' }}
           </template>
           <template v-else-if="column.key === 'actions'">
             <a-space wrap>
-              <a-button size="small" @click="onTestRow(record)">测试</a-button>
-              <a-button size="small" :disabled="!canManage" @click="openEdit(record)">编辑</a-button>
+              <a-button size="small" v-perm="'datasource:manage'" @click="onTestRow(record)">测试</a-button>
+              <a-button size="small" v-perm="'datasource:manage'" @click="openEdit(record)">编辑</a-button>
               <a-button
                 size="small"
                 danger
-                :disabled="!canManage"
+                v-perm="'datasource:manage'"
                 @click="deleteTarget = record"
               >
                 删除
@@ -324,7 +329,7 @@ onMounted(load);
           <a-checkbox v-model:checked="form.enabled">启用（可在问数页选择）</a-checkbox>
         </a-space>
         <div style="margin-top: 16px">
-          <a-button :loading="testing" @click="onTestDraft">测试连接</a-button>
+          <a-button :loading="testing" v-perm="'datasource:manage'" @click="onTestDraft">测试连接</a-button>
           <span class="hint" style="margin-left: 8px">保存前可先验证连通性与可见表数量。</span>
         </div>
       </a-form>

@@ -10,12 +10,17 @@ import { useRoute, useRouter } from 'vue-router';
 // 模板里用的是 PascalCase <Card>，全局注册只提供 a-*，必须显式引入
 import { Card, message } from 'ant-design-vue';
 import { ragApi } from '@/api';
+import { usePerm } from '@/composables/usePerm';
 import { useBusinessStore } from '@/store/modules/business';
 import type { KnowledgeDetail, KnowledgeDocItem, KnowledgeStats } from '@/typings';
 
 const router = useRouter();
 const route = useRoute();
 const business = useBusinessStore();
+// 按钮级权限：改名 / 重建 / 删除 / 保存正文都是写操作，统一要 knowledge:manage。
+// 能进这一页说明至少有 knowledge:read（路由守卫已挡），所以只需再区分读写。
+const { can, tip: permHint } = usePerm();
+const canManage = computed(() => can('knowledge:manage'));
 
 const stats = ref<KnowledgeStats | null>(null);
 const list = ref<KnowledgeDocItem[]>([]);
@@ -51,6 +56,9 @@ const rowSelection = computed(() => ({
   selectedRowKeys: selectedKeys.value,
   onChange: (keys: (string | number)[]) => (selectedKeys.value = keys.map(String)),
 }));
+
+// 不能删就不给勾选：留着只会让人勾完才发现「批量删除」是灰的
+const tableSelection = computed(() => (canManage.value ? rowSelection.value : undefined));
 
 const kindLabels: Record<string, string> = {
   file: '文件',
@@ -256,7 +264,7 @@ onMounted(async () => {
     <Card :bordered="false">
       <template #title>知识库文档</template>
       <template #extra>
-        <a-button type="primary" @click="goIngest">录入内容</a-button>
+        <a-button v-perm="'knowledge:manage'" type="primary" @click="goIngest">录入内容</a-button>
       </template>
 
       <a-space wrap style="margin-bottom: 12px">
@@ -292,7 +300,7 @@ onMounted(async () => {
           :title="`确认删除选中的 ${selectedKeys.length} 篇文档？`"
           @confirm="onBatchRemove"
         >
-          <a-button danger>批量删除（{{ selectedKeys.length }}）</a-button>
+          <a-button v-perm="'knowledge:manage'" danger>批量删除（{{ selectedKeys.length }}）</a-button>
         </a-popconfirm>
       </a-space>
 
@@ -301,7 +309,7 @@ onMounted(async () => {
         :data-source="list"
         :loading="loading"
         :row-key="(r: any) => r.knowledge_id"
-        :row-selection="rowSelection"
+        :row-selection="tableSelection"
         :pagination="{
           current: page.current,
           pageSize: page.pageSize,
@@ -344,17 +352,19 @@ onMounted(async () => {
           <template v-else-if="column.key === 'actions'">
             <a-space :size="4">
               <a-button size="small" @click="openDetail(record)">详情</a-button>
-              <a-button size="small" @click="openRename(record)">改名</a-button>
-              <a-tooltip title="用当前后端配置重新分片并向量化">
+              <a-button v-perm="'knowledge:manage'" size="small" @click="openRename(record)">改名</a-button>
+              <a-tooltip
+                :title="canManage ? '用当前后端配置重新分片并向量化' : permHint('knowledge:manage')"
+              >
                 <a-button
                   size="small"
-                  :disabled="!record.has_content"
+                  :disabled="!canManage || !record.has_content"
                   :loading="reindexing === record.knowledge_id"
                   @click="onReindex(record)"
                 >重建</a-button>
               </a-tooltip>
               <a-popconfirm title="删除该文档及其全部分片？" @confirm="onRemove(record)">
-                <a-button size="small" danger>删除</a-button>
+                <a-button v-perm="'knowledge:manage'" size="small" danger>删除</a-button>
               </a-popconfirm>
             </a-space>
           </template>
@@ -419,18 +429,20 @@ onMounted(async () => {
           <a-textarea
             :value="detail.content || ''"
             :rows="8"
-            :disabled="!detail.doc.has_content"
+            :disabled="!canManage || !detail.doc.has_content"
             :placeholder="detail.doc.has_content ? '' : '入库时未保存原文，无法编辑，请重新上传该文件'"
             @input="onContentInput"
           />
           <a-space style="margin-top: 8px">
             <a-button
+              v-perm="'knowledge:manage'"
               type="primary"
               :loading="saving"
               :disabled="!detail.doc.has_content"
               @click="onSaveContent"
             >保存并重建</a-button>
             <a-button
+              v-perm="'knowledge:manage'"
               :disabled="!detail.doc.has_content || reindexing === detail.doc.knowledge_id"
               :loading="reindexing === detail.doc.knowledge_id"
               @click="() => detail && onReindex(detail.doc)"

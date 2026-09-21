@@ -7,6 +7,9 @@
 - ``SUPERADMIN_ROLE`` 用通配 ``*`` 表示全权，不逐条列举，避免加新权限码时漏配。
 - 内置角色（``BUILTIN_ROLES``）在迁移里落库；``is_builtin`` 的角色不允许删、
   不允许改 code，但**权限可以调整**（除了 superadmin，它恒为全权）。
+- 写权限隐含同一资源的读权限（``MANAGE_IMPLIES_READ``）：只勾「管理知识库」也能
+  列出文档，否则那一页连数据都取不到。判定集中在 :func:`grants`，路由上依旧只写
+  自己要的那一条码。
 """
 
 from __future__ import annotations
@@ -26,6 +29,10 @@ class Permission(StrEnum):
     ANALYTICS_READ = "analytics:read"
     DATASOURCE_READ = "datasource:read"
     DATASOURCE_MANAGE = "datasource:manage"
+    SYSTEM_READ = "system:read"
+    SYSTEM_MANAGE = "system:manage"
+    KNOWLEDGE_READ = "knowledge:read"
+    KNOWLEDGE_MANAGE = "knowledge:manage"
 
 
 ALL_PERMISSIONS: list[str] = [p.value for p in Permission]
@@ -86,6 +93,30 @@ PERMISSION_CATALOG: list[dict[str, str]] = [
         "group": "数据分析",
         "description": "新建 / 修改 / 删除外部数据源（含连接凭证，高敏感）；默认只给超级管理员",
     },
+    {
+        "code": Permission.SYSTEM_READ,
+        "label": "查看模型配置",
+        "group": "模型接入",
+        "description": "查看各功能选用的 provider 与模型接入列表（接入里含 API Key，故单独控制）",
+    },
+    {
+        "code": Permission.SYSTEM_MANAGE,
+        "label": "管理模型配置",
+        "group": "模型接入",
+        "description": "切换各功能使用的 provider、增删改模型接入（改完直接影响线上调用）",
+    },
+    {
+        "code": Permission.KNOWLEDGE_READ,
+        "label": "查看知识库",
+        "group": "知识库",
+        "description": "浏览知识文档、做向量检索与知识库问答",
+    },
+    {
+        "code": Permission.KNOWLEDGE_MANAGE,
+        "label": "管理知识库",
+        "group": "知识库",
+        "description": "录入 / 上传 / 编辑 / 重建 / 删除知识文档（都要调嵌入模型，影响问答结果）",
+    },
 ]
 
 SUPERADMIN_ROLE = "superadmin"
@@ -93,6 +124,8 @@ WILDCARD = "*"
 
 #: 迁移与 seed 共用的内置角色定义。
 #: admin 有意不含 ``role:manage``：能管账号但不能改角色，避免自我提权。
+#: 模型接入（``system:*``）与知识库（``knowledge:*``）只靠 superadmin 的 ``*`` 生效，
+#: 这里一个都不预发：新权限码上线后默认无人可用，由管理员在角色页按需分配。
 BUILTIN_ROLES: list[dict[str, object]] = [
     {
         "code": SUPERADMIN_ROLE,
@@ -136,6 +169,19 @@ BUILTIN_ROLES: list[dict[str, object]] = [
 ]
 
 
+#: 写权限隐含同一资源的读权限（由 :func:`grants` 统一生效）。
+#: 只勾「管理知识库」而不勾「查看知识库」的角色很常见：入库完总得在列表里看到结果，
+#: 所以「能写」必然包含「能看」；反向不成立（只有读码永远写不动）。不进这张表的
+#: session:revoke 是个例外：它不是同一资源的写权限，运维角色本来就同时持有两个码。
+MANAGE_IMPLIES_READ: dict[str, str] = {
+    Permission.ACCOUNT_MANAGE: Permission.ACCOUNT_READ,
+    Permission.ROLE_MANAGE: Permission.ROLE_READ,
+    Permission.DATASOURCE_MANAGE: Permission.DATASOURCE_READ,
+    Permission.SYSTEM_MANAGE: Permission.SYSTEM_READ,
+    Permission.KNOWLEDGE_MANAGE: Permission.KNOWLEDGE_READ,
+}
+
+
 def is_valid_permission(code: str) -> bool:
     """权限码是否由本模块定义（写库前校验，防脏数据）。"""
     return code in ALL_PERMISSIONS
@@ -152,13 +198,20 @@ def filter_valid_permissions(codes: object) -> list[str]:
 
 
 def grants(permissions: list[str] | set[str], required: str) -> bool:
-    """单个权限判断：通配 ``*`` 覆盖一切。"""
-    return WILDCARD in permissions or required in permissions
+    """单个权限判断：通配 ``*`` 覆盖一切，写码隐含同一资源的读码。"""
+    if WILDCARD in permissions or required in permissions:
+        return True
+    # 隐含关系只记在 MANAGE_IMPLIES_READ 一处；前端 store/modules/auth.ts 有同一份副本。
+    implied = {
+        MANAGE_IMPLIES_READ[code] for code in permissions if code in MANAGE_IMPLIES_READ
+    }
+    return required in implied
 
 
 __all__ = [
     "ALL_PERMISSIONS",
     "BUILTIN_ROLES",
+    "MANAGE_IMPLIES_READ",
     "PERMISSION_CATALOG",
     "Permission",
     "SUPERADMIN_ROLE",

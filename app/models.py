@@ -2,7 +2,7 @@
 
 分组自上而下：示例业务表（users/items）→ 知识库（docs/chunks）→
 后台账号与 RBAC（admin_users/sessions/roles）→ 外部数据源与智能问数历史 →
-AI 对话会话与消息 → 系统配置与模型管理（system_configs/provider_configs）。
+AI 对话会话与消息 → 系统配置与模型接入（system_configs/provider_configs）。
 
 两个统一约定：
 
@@ -301,7 +301,7 @@ class SystemConfigRow(Base):
 
 
 class ProviderConfigRow(Base):
-    """模型管理：一个 provider 一行（端点 + Key + 三个模型名）。
+    """模型接入：一个 provider 一行（端点 + Key + 三个模型名）。
 
     把原先散在 .env 里的 ``APP_LLM_*`` 搬进数据库，支持后台增删改而不用改代码
     或重启；``rerank_model`` 只在被选为精排 provider 时参与拼请求。

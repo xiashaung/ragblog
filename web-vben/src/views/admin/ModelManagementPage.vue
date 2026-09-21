@@ -1,8 +1,10 @@
 <script setup lang="ts">
 /**
- * 模型管理 —— 模型提供者配置的增删改查。
+ * 模型接入 —— 模型提供者配置的增删改查。
  *
  * 权限：读需 system:read（路由已挡），写需 system:manage。
+ * 按钮级：新增 / 编辑 / 删除都是写操作，统一由 v-perm（新增）与 canManage （行内链接）控制，
+ * 无权时不摘掉操作位，而是给一段带权限名的悬停说明。
  * 请求走默认导出的 http 实例（baseURL=/api/v1），与后端 system_config 路由挂载点一致；
  * envelope 由拦截器拆掉，页面直接读 res.data。
  */
@@ -10,10 +12,10 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { message } from 'ant-design-vue';
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue';
 import http from '@/api/request';
-import { useAuthStore } from '@/store/modules/auth';
+import { usePerm } from '@/composables/usePerm';
 
-const auth = useAuthStore();
-const canManage = computed(() => auth.hasPerm('system:manage'));
+const { can, tip: permHint, need } = usePerm();
+const canManage = computed(() => can('system:manage'));
 
 const loading = ref(false);
 const saving = ref(false);
@@ -112,7 +114,7 @@ function openEditModal(record: ProviderConfig) {
 // 保存配置（新增或更新）
 async function saveProvider() {
   if (!canManage.value) {
-    message.warning('无修改权限');
+    message.warning(need('system:manage'));
     return;
   }
 
@@ -166,7 +168,7 @@ async function saveProvider() {
 // 删除配置（表格里的 Popconfirm 已做二次确认，这里直接执行）
 async function deleteProvider(record: ProviderConfig) {
   if (!canManage.value) {
-    message.warning('无修改权限');
+    message.warning(need('system:manage'));
     return;
   }
 
@@ -193,13 +195,13 @@ onMounted(() => {
       </template>
     </a-alert>
 
-    <a-card title="模型管理" :bordered="false">
+    <a-card title="模型接入" :bordered="false">
       <template #extra>
         <a-button @click="loadProviderConfigs" :loading="loading">
           <template #icon><ReloadOutlined /></template>
           刷新
         </a-button>
-        <a-button v-if="canManage" type="primary" @click="openCreateModal" style="margin-left: 8px">
+        <a-button v-perm="'system:manage'" type="primary" @click="openCreateModal" style="margin-left: 8px">
           <template #icon><PlusOutlined /></template>
           新增
         </a-button>
@@ -220,21 +222,22 @@ onMounted(() => {
           </template>
 
           <template v-if="column.key === 'actions'">
-            <template v-if="canManage">
-              <a-space>
-                <a @click="openEditModal(record as ProviderConfig)">编辑</a>
-                <a-popconfirm
-                  title="确定要删除该配置吗？"
-                  ok-text="删除"
-                  cancel-text="取消"
-                  :ok-type="'danger'"
-                  @confirm="deleteProvider(record as ProviderConfig)"
-                >
-                  <a style="color: #ff4d4f">删除</a>
-                </a-popconfirm>
-              </a-space>
-            </template>
-            <span v-else style="color: var(--app-muted)">-</span>
+            <a-space v-if="canManage">
+              <a @click="openEditModal(record as ProviderConfig)">编辑</a>
+              <a-popconfirm
+                title="确定要删除该配置吗？"
+                ok-text="删除"
+                cancel-text="取消"
+                :ok-type="'danger'"
+                @confirm="deleteProvider(record as ProviderConfig)"
+              >
+                <a style="color: #ff4d4f">删除</a>
+              </a-popconfirm>
+            </a-space>
+            <!-- 行内链接没有原生 disabled，所以保留占位但抹掉颜色，挂上 Tooltip 说清缺哪条权限 -->
+            <a-tooltip v-else :title="permHint('system:manage')">
+              <span class="perm-disabled">编辑 / 删除</span>
+            </a-tooltip>
           </template>
         </template>
       </a-table>
@@ -242,7 +245,7 @@ onMounted(() => {
       <!-- 新增/编辑对话框 -->
       <a-modal
         v-model:open="showModal"
-        :title="editingProvider ? '编辑模型配置' : '新增模型配置'"
+        :title="editingProvider ? '编辑模型接入' : '新增模型接入'"
         :confirm-loading="saving"
         @ok="saveProvider"
         @cancel="showModal = false"

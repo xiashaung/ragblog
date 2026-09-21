@@ -5,6 +5,8 @@
 
 三个入口共用 :func:`_parse_and_ingest` 这一条代码路径：单文件、批量（每文件一个
 savepoint，坏文件不拖累好文件）、以及旧版纯文本录入。
+
+三个入口都是「写库」（要调嵌入模型），所以统一要求 ``knowledge:manage``。
 """
 
 from __future__ import annotations
@@ -19,9 +21,10 @@ import uuid
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import services
+from .. import deps, services
 from ..config import get_settings
 from ..db import get_db
+from ..rbac import Permission
 from ..schemas.ai import ChatMessage
 from ..schemas.upload import (
     KnowledgeIngestRequest,
@@ -31,6 +34,7 @@ from ..schemas.upload import (
     UploadStatusResponse,
 )
 from ..services.llm import get_llm
+from ..services.rbac_service import Principal
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -241,6 +245,7 @@ async def upload_file(
     provider: str | None = Form(default=None),
     chunk_size: int | None = Form(default=None, ge=100, le=4000),
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
 ) -> UploadStatusResponse:
     """上传一个文档并直接录入知识库。
 
@@ -283,6 +288,7 @@ async def upload_files_batch(
     provider: str | None = Form(default=None),
     chunk_size: int | None = Form(default=None, ge=100, le=4000),
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
 ) -> UploadBatchResponse:
     """一次请求录入多个文档。
 
@@ -344,6 +350,7 @@ async def ingest_text(
     provider: str | None = Form(default=None),
     chunk_size: int | None = Form(default=None, ge=100, le=4000),
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
 ) -> KnowledgeIngestResponse:
     """直接录入一段文字（给旧版的文本输入界面用）。"""
     req = KnowledgeIngestRequest(

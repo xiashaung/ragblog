@@ -618,7 +618,7 @@ async def knowledge_stats(session: AsyncSession) -> dict:
         "chunks": total_chunks,
         "chars": total_chars,
         "default_provider": default,
-        # 模型名与实际调用同源：「模型管理」里的数据库配置优先，.env 兜底
+        # 模型名与实际调用同源：「模型接入」里的数据库配置优先，.env 兜底
         "embedding_model": llm.embedding_model(default),
         # 向量存在哪、多少维：让前端能说明白「为什么两份文档搜不到」
         "vector_backend": "pgvector" if _uses_pgvector(session) else "json",

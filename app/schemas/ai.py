@@ -23,7 +23,7 @@ class Provider(StrEnum):
     - ``mlx``      : Apple Silicon 本地 MLX（mlx-lm / fastembed）
     - ``mock``     : 离线确定性假后端
 
-    「模型管理」里新建的自定义 provider 由 ``_missing_`` 动态支持（白名单由
+    「模型接入」里新建的自定义 provider 由 ``_missing_`` 动态支持（白名单由
     ``services.provider_store`` 刷新缓存时登记），没配过的名字依旧校验不通过。
     """
 

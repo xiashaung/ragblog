@@ -1,12 +1,12 @@
 <script setup lang="ts">
 /**
- * 概览 —— 整个平台的首页看板：知识库规模、模型配置、会话与权限体量一屏看完。
+ * 概览 —— 整个平台的首页看板：知识库规模、模型使用、会话与权限体量一屏看完。
  *
  * 由原「概览」与知识库「统计概览」合并而来：两页取的数据本就重叠（provider / 健康 /
  * 文档统计），分两处维护只会互相漏改。知识库分组内不再放统计页，
  * 旧的 /knowledge/overview 链接由路由重定向到这里。
  *
- * 模型相关的数字一律以数据库为准（「系统管理 → 模型配置 / 模型管理」），.env 只是兜底，
+ * 模型相关的数字一律以数据库为准（「系统管理 → 模型选择 / 模型接入」），.env 只是兜底，
  * 所以这里看不到任何「改 .env 后重建」之类的指引 —— 那套话在合并时已经过期。
  *
  * 权限：各区块按 RBAC 权限码各自取数，无权就不发这个请求并显示「—」，
@@ -33,7 +33,7 @@ const dsCount = ref<number | null>(null);
 const accountCount = ref<number | null>(null);
 const roleCount = ref<number | null>(null);
 
-/** provider 名 → 生效配置（/ai/providers），供「模型配置」表取端点与模型名 */
+/** provider 名 → 生效配置（/ai/providers），供「模型使用」表取端点与模型名 */
 const providerMap = computed<Record<string, any>>(() => {
   const map: Record<string, any> = {};
   business.providers.forEach((p: any) => {
@@ -47,8 +47,13 @@ function dash(v: number | null | undefined): number | string {
   return v === null || v === undefined ? '—' : v;
 }
 
+/** 首页多处要按权限码取舍，统一走这一个入口（写权限隐含读权限，见 auth store） */
+function can(code: string | string[]): boolean {
+  return auth.hasPerm(code);
+}
+
 const metricCards = computed(() => [
-  { key: 'docs', title: '知识文档', value: dash(stats.value?.docs), foot: `分布在 ${stats.value?.by_provider?.length ?? 0} 个 provider`, to: '/knowledge' },
+  { key: 'docs', title: '知识文档', value: dash(stats.value?.docs), foot: can('knowledge:read') ? `分布在 ${stats.value?.by_provider?.length ?? 0} 个 provider` : '需 knowledge:read', to: '/knowledge' },
   { key: 'chunks', title: '向量分片', value: dash(stats.value?.chunks), foot: `维度 ${stats.value?.vector_dim ?? '—'}`, to: '/knowledge' },
   { key: 'chars', title: '正文字符', value: dash(stats.value?.chars), foot: `最近更新 ${formatDate(stats.value?.latest_updated_at)}`, to: '/knowledge/ingest' },
   { key: 'chats', title: '我的对话', value: dash(chatCount.value), foot: '仅本人可见（上限 200）', to: '/chat' },
@@ -58,7 +63,7 @@ const metricCards = computed(() => [
   { key: 'roles', title: '角色', value: dash(roleCount.value), foot: auth.hasPerm('role:read') ? '' : '需 role:read', to: '/roles' },
 ]);
 
-/** 四个功能各用什么模型：provider 来自系统配置，模型名来自模型管理 */
+/** 四个功能各用什么模型：provider 来自系统配置，模型名来自模型接入 */
 const modelRows = computed(() => {
   const m = models.value;
   const rows = [
@@ -83,9 +88,18 @@ const modelRows = computed(() => {
 
 const rerankOn = computed(() => models.value.rerank_enabled === 'true');
 
-/** 需要人工处理的事项：从知识库统计与 provider 配置里推导 */
+/** 需要人工处理的事项：从知识库统计与 provider 配置里推导
+ *
+ * 每条都带上 ``need``（做成这件事需要的权限码）：无权的人看不到做不到的提醒，
+ * 也不会被「去处理」带到 403 页。 */
 const issues = computed(() => {
-  const list: { level: 'error' | 'warning' | 'info'; text: string; to: string; action: string }[] = [];
+  const list: {
+    level: 'error' | 'warning' | 'info';
+    text: string;
+    to: string;
+    action: string;
+    need: string | string[];
+  }[] = [];
   const s = stats.value;
   if (s?.vectorless_chunks) {
     list.push({
@@ -93,6 +107,7 @@ const issues = computed(() => {
       text: `${s.vectorless_chunks} 个分片没有可用向量，检索不到（多为换了 embedding 模型、维度不符）`,
       to: '/knowledge',
       action: '去重建',
+      need: 'knowledge:manage',
     });
   }
   if (s?.stale_docs) {
@@ -101,6 +116,7 @@ const issues = computed(() => {
       text: `${s.stale_docs} 篇文档的入库 provider 与当前配置的 ${s.default_provider || '—'} 不一致`,
       to: '/knowledge',
       action: '去重建',
+      need: 'knowledge:manage',
     });
   }
   if (s?.missing_content_docs) {
@@ -109,6 +125,7 @@ const issues = computed(() => {
       text: `${s.missing_content_docs} 篇旧文档未保存原文，只能重建索引、无法编辑正文`,
       to: '/knowledge',
       action: '查看',
+      need: 'knowledge:read',
     });
   }
   modelRows.value
@@ -118,15 +135,23 @@ const issues = computed(() => {
         level: 'warning',
         text: r.model
           ? `「${r.feature}」选的 ${r.provider} 还没配端点凭据（API Key）`
-          : `「${r.feature}」选的 ${r.provider} 在模型管理里没配${r.feature === '重排序' ? '重排序' : ''}模型名`,
+          : `「${r.feature}」选的 ${r.provider} 在模型接入里没配${r.feature === '重排序' ? '重排序' : ''}模型名`,
         to: '/model-management',
         action: '去配置',
+        need: 'system:manage',
       }),
     );
-  if (!s?.docs) {
-    list.push({ level: 'info', text: '知识库还是空的，检索问答没有可依据的内容', to: '/knowledge/ingest', action: '去录入' });
+  // 只在真的取到统计且确实为空时提（无 knowledge:read 的人 s 是 null，不能误报「知识库是空的」）
+  if (s && !s.docs) {
+    list.push({
+      level: 'info',
+      text: '知识库还是空的，检索问答没有可依据的内容',
+      to: '/knowledge/ingest',
+      action: '去录入',
+      need: 'knowledge:manage',
+    });
   }
-  return list;
+  return list.filter((it) => can(it.need));
 });
 
 function formatDate(ts?: number | null): string {
@@ -155,12 +180,16 @@ async function load<T>(run: () => Promise<T>, fallback: T): Promise<T> {
 
 async function refresh() {
   loading.value = true;
-  const can = (code: string) => auth.hasPerm(code);
   await Promise.all([
     business.loadProviders(),
     business.pollHealth(),
-    load(() => ragApi.stats().then((s) => (stats.value = s)), null as KnowledgeStats | null),
-    load(() => systemConfigApi.models().then((v) => (models.value = v)), {}),
+    // 知识库与模型配置都已按权限码拦截，没权限就连请求都不发（否则只拿到一个 403）
+    can('knowledge:read')
+      ? load(() => ragApi.stats().then((s) => (stats.value = s)), null as KnowledgeStats | null)
+      : Promise.resolve(),
+    can('system:read')
+      ? load(() => systemConfigApi.models().then((v) => (models.value = v)), {})
+      : Promise.resolve(),
     load(() => chatApi.sessions(200).then((r) => (chatCount.value = r.sessions?.length ?? 0)), null),
     can('session:read')
       ? load(() => adminApi.sessions().then((r) => (liveCount.value = r?.length ?? 0)), null)
@@ -187,7 +216,7 @@ onMounted(refresh);
       <div>
         <h2 class="title">概览</h2>
         <p class="sub">
-          知识库 / 模型配置 / 账号权限的整体情况，数据实时取自后端
+          知识库 / 模型 / 账号权限的整体情况，数据实时取自后端
         </p>
       </div>
       <a-button :loading="loading" @click="refresh">刷新</a-button>
@@ -212,14 +241,14 @@ onMounted(refresh);
         </a-col>
       </a-row>
 
-      <!-- 模型配置 + 待处理事项 -->
+      <!-- 模型使用 + 待处理事项 -->
       <a-row :gutter="[16, 16]" style="margin-top: 16px">
         <a-col :xs="24" :md="14">
-          <a-card :bordered="false" title="模型配置" size="small">
+          <a-card :bordered="false" title="模型使用" size="small">
             <template #extra>
               <a-space>
-                <a-button type="link" size="small" @click="go('/system-config')">模型配置</a-button>
-                <a-button type="link" size="small" @click="go('/model-management')">模型管理</a-button>
+                <a-button v-perm="'system:read'" type="link" size="small" @click="go('/system-config')">模型选择</a-button>
+                <a-button v-perm="'system:read'" type="link" size="small" @click="go('/model-management')">模型接入</a-button>
               </a-space>
             </template>
             <a-table
@@ -262,8 +291,13 @@ onMounted(refresh);
               </template>
             </a-table>
             <div class="sub">
-              这里的值取自数据库（{{ rerankOn ? '重排序已开启' : '重排序已关闭' }}），
-              改完即时生效、无需重启后端
+              <template v-if="can('system:read')">
+                这里的值取自数据库（{{ rerankOn ? '重排序已开启' : '重排序已关闭' }}），
+                改完即时生效、无需重启后端
+              </template>
+              <template v-else>
+                没有 system:read，未取模型配置（下面全是「未启用」并不等于真没配）
+              </template>
             </div>
           </a-card>
         </a-col>
@@ -331,10 +365,10 @@ onMounted(refresh);
             </a-descriptions>
             <a-divider style="margin: 8px 0" />
             <a-space wrap>
-              <a-button size="small" @click="go('/knowledge')">文档列表</a-button>
-              <a-button size="small" type="primary" @click="go('/knowledge/ingest')">录入内容</a-button>
-              <a-button size="small" @click="go('/knowledge/search')">检索问答</a-button>
-              <a-button size="small" @click="go('/analytics')">智能问数</a-button>
+              <a-button v-perm="'knowledge:read'" size="small" @click="go('/knowledge')">文档列表</a-button>
+              <a-button v-perm="'knowledge:manage'" size="small" type="primary" @click="go('/knowledge/ingest')">录入内容</a-button>
+              <a-button v-perm="'knowledge:read'" size="small" @click="go('/knowledge/search')">检索问答</a-button>
+              <a-button v-perm="'analytics:read'" size="small" @click="go('/analytics')">智能问数</a-button>
             </a-space>
           </a-card>
         </a-col>

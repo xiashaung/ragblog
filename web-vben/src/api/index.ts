@@ -154,13 +154,6 @@ export const aiApi = {
     health: () => request<any>({url: '/health', method: 'get'}),
 };
 
-/* ---------------- 嵌入向量 ---------------- */
-// provider / model 不再由前端传递，后端按 APP_LLM_DEFAULT_PROVIDER 配置调用
-export const embedApi = {
-    run: (data: { input: string[] }) =>
-        request<any>({url: '/ai/embeddings', method: 'post', data}),
-};
-
 /* ---------------- 知识库 RAG 管理 ---------------- */
 // provider / model 不再由前端传递，后端按 APP_LLM_DEFAULT_PROVIDER 配置调用
 // 入库 / 重建 / 编辑正文都要重新调用嵌入模型，耗时与文档长度成正比，单独放宽超时

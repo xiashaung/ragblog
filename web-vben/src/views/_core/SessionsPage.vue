@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /**
  * 会话页 —— 在线后台会话（token 存的是 SHA-256 摘要，这里只能看到归属与过期时间）。
- * 读需 session:read，强制下线需 session:revoke。
+ * 读需 session:read，强制下线需 session:revoke（按钮无权时置灰 + 悬停说明）。
  */
 import { computed, onMounted, ref } from 'vue';
 import { Alert, Button, Card, Popconfirm, Space, Table, Tag, message } from 'ant-design-vue';
 import { adminApi } from '@/api';
+import { usePerm } from '@/composables/usePerm';
 import { useAuthStore } from '@/store/modules/auth';
 import { useBusinessStore } from '@/store/modules/business';
 import type { SessionItem } from '@/typings';
@@ -14,7 +15,8 @@ const auth = useAuthStore();
 const business = useBusinessStore();
 const loading = ref(false);
 
-const canRevoke = computed(() => auth.hasPerm('session:revoke'));
+const { can } = usePerm();
+const canRevoke = computed(() => can('session:revoke'));
 const isSelf = (row: SessionItem) => row.admin_id === auth.userInfo?.id;
 
 const columns = [
@@ -88,7 +90,7 @@ onMounted(refresh);
               :disabled="!canRevoke"
               @confirm="onRevoke(record)"
             >
-              <Button size="small" danger :disabled="!canRevoke">下线</Button>
+              <Button size="small" danger v-perm="'session:revoke'">下线</Button>
             </Popconfirm>
           </template>
         </template>

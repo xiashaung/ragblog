@@ -2,7 +2,8 @@
 
 约定：
 - 后台管理接口 = 登录会话（``Authorization: Bearer``）+ 权限码；
-- 引导密钥（``APP_ADMIN_API_KEY``）只能用于 ``POST /admin/onboard``。
+- 引导密钥（``APP_ADMIN_API_KEY``）只能用于 ``POST /admin/onboard``；
+- 知识库与模型配置接口同样按权限码拦截（``knowledge:*`` / ``system:*``）。
 """
 
 from __future__ import annotations
@@ -84,6 +85,18 @@ async def test_builtin_roles_are_seeded_with_catalog_permissions(client, console
     resp = await client.get("/admin/permissions", headers=console["headers"])
     assert resp.status_code == HTTPStatus.OK
     assert {item["code"] for item in _data(resp)} == set(ALL_PERMISSIONS)
+
+    # 新增的按钮级权限码默认不预发给任何内置角色（只靠超管的 ``*`` 生效）
+    newly_added = {
+        Permission.SYSTEM_READ,
+        Permission.SYSTEM_MANAGE,
+        Permission.KNOWLEDGE_READ,
+        Permission.KNOWLEDGE_MANAGE,
+    }
+    for code, item in roles.items():
+        if code == SUPERADMIN_ROLE:
+            continue
+        assert not (newly_added & set(item["permissions"])), code
 
 
 async def test_viewer_can_read_but_writes_are_denied(client, console, account_factory):
@@ -368,3 +381,121 @@ async def test_deleting_account_with_other_superadmin_online(client, console, ac
         for item in _data(await client.get("/admin/accounts", headers=console["headers"]))
     }
     assert "gone" not in usernames
+
+
+async def _grant_role(
+    client,
+    console,
+    account_factory,
+    code: str,
+    permissions: list[str],
+    username: str,
+) -> dict:
+    """建一个只含指定权限的自定义角色，并装好一个成员账号，返它的凭据。"""
+    resp = await client.post(
+        "/admin/roles",
+        json={"code": code, "name": code, "permissions": permissions},
+        headers=console["headers"],
+    )
+    assert resp.status_code == HTTPStatus.CREATED, resp.text
+    member = await account_factory(username, [code])
+    assert set(member["permissions"]) == set(permissions)
+    return member
+
+
+async def test_knowledge_read_and_manage_gate_rag_apis(client, console, account_factory):
+    """知识库接口按读 / 写两档拦：无权连列表都不发。"""
+    viewer = await account_factory("kbviewer", ["viewer"])
+    assert Permission.KNOWLEDGE_READ not in viewer["permissions"]
+
+    denied = await client.get("/api/v1/ai/knowledge", headers=viewer["headers"])
+    assert denied.status_code == HTTPStatus.FORBIDDEN
+    assert "查看知识库" in denied.json()["message"]
+
+    denied = await client.post(
+        "/api/v1/ai/knowledge/ingest",
+        json={"title": "x", "content": "y"},
+        headers=viewer["headers"],
+    )
+    assert denied.status_code == HTTPStatus.FORBIDDEN
+    assert Permission.KNOWLEDGE_MANAGE in denied.json()["message"]
+
+    # 只给读：能列表，不能录入 / 删除 / 上传
+    reader = await _grant_role(
+        client, console, account_factory, "kbreader", [Permission.KNOWLEDGE_READ], "kbread1"
+    )
+    assert (
+        await client.get("/api/v1/ai/knowledge", headers=reader["headers"])
+    ).status_code == HTTPStatus.OK
+    assert (
+        await client.get("/api/v1/ai/knowledge/stats", headers=reader["headers"])
+    ).status_code == HTTPStatus.OK
+    assert (
+        await client.post(
+            "/api/v1/ai/knowledge/ingest",
+            json={"title": "x", "content": "y"},
+            headers=reader["headers"],
+        )
+    ).status_code == HTTPStatus.FORBIDDEN
+    assert (
+        await client.post(
+            "/api/v1/upload",
+            files={"file": ("a.txt", b"a knowledge doc body", "text/plain")},
+            headers=reader["headers"],
+        )
+    ).status_code == HTTPStatus.FORBIDDEN
+
+    # 只给写：写权限隐含读权限（否则入库完看不到结果），所以列表与录入都放行
+    writer = await _grant_role(
+        client,
+        console,
+        account_factory,
+        "kbwriter",
+        [Permission.KNOWLEDGE_MANAGE],
+        "kbwrite1",
+    )
+    assert (
+        await client.get("/api/v1/ai/knowledge", headers=writer["headers"])
+    ).status_code == HTTPStatus.OK
+    resp = await client.post(
+        "/api/v1/ai/knowledge/ingest",
+        json={"title": "按钮级权限", "content": "录入应该被放行"},
+        headers=writer["headers"],
+    )
+    assert resp.status_code == HTTPStatus.OK, resp.text
+
+
+async def test_system_config_permissions_gate_model_pages(client, console, account_factory):
+    """模型选择 / 模型接入接口：读不涉风险，改 provider 属于危险操作。"""
+    viewer = await account_factory("cfgviewer", ["viewer"])
+    denied = await client.get(
+        "/api/v1/system/config/models", headers=viewer["headers"]
+    )
+    assert denied.status_code == HTTPStatus.FORBIDDEN
+    assert Permission.SYSTEM_READ in denied.json()["message"]
+
+    reader = await _grant_role(
+        client, console, account_factory, "cfgreader", [Permission.SYSTEM_READ], "cfgread1"
+    )
+    assert (
+        await client.get("/api/v1/system/config/models", headers=reader["headers"])
+    ).status_code == HTTPStatus.OK
+    assert (
+        await client.get("/api/v1/system/config/providers", headers=reader["headers"])
+    ).status_code == HTTPStatus.OK
+    denied = await client.patch(
+        "/api/v1/system/config/chat-provider",
+        json={"value": "mock"},
+        headers=reader["headers"],
+    )
+    assert denied.status_code == HTTPStatus.FORBIDDEN
+    assert "管理模型配置" in denied.json()["message"]
+
+    # 超管靠 ``*`` 通配，读写都不拦
+    assert (
+        await client.patch(
+            "/api/v1/system/config/chat-provider",
+            json={"value": "mock"},
+            headers=console["headers"],
+        )
+    ).status_code == HTTPStatus.OK

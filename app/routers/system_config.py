@@ -1,9 +1,9 @@
-"""系统配置与模型管理接口（均需后台会话）。
+"""系统配置与模型接入接口（读需 ``system:read``，写需 ``system:manage``）。
 
 两类配置都存库，改完不用重启：
 
 - 功能路由（``system_configs``）：聊天 / 嵌入 / 精排各自用哪个 provider；
-- 模型管理（``provider_configs``）：每个端点的 base_url / key / 模型名。
+- 模型接入（``provider_configs``）：每个端点的 base_url / key / 模型名。
 
 写入后都必须调 :func:`provider_store.refresh` 把新值读回内存（并间接
 重置 ``llm`` 的后端注册表），否则运行中的调用仍拿着旧的端点与模型名。
@@ -20,8 +20,10 @@ from .. import deps
 from ..config import get_settings, Provider
 from ..db import get_db
 from ..models import SystemConfigRow, ProviderConfigRow
+from ..rbac import Permission
 from ..schemas.admin import ConfigItem, ConfigListResponse, ConfigUpdateRequest
 from ..services import provider_store, system_config
+from ..services.rbac_service import Principal
 
 
 class ProviderConfigSchema(BaseModel):
@@ -40,7 +42,7 @@ router = APIRouter(prefix="/system/config", tags=["系统配置"])
 @router.get("/", response_model=ConfigListResponse)
 async def list_configs(
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_READ)),
 ) -> ConfigListResponse:
     """获取所有系统配置。"""
     configs = await system_config.SystemConfig.get_all(session)
@@ -52,7 +54,7 @@ async def list_configs(
 @router.get("/models", response_model=dict[str, str])
 async def get_all_models(
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_READ)),
 ) -> dict[str, str]:
     """获取所有模型相关的配置（对话、问答、向量、重排序）。
 
@@ -79,11 +81,11 @@ async def get_all_models(
 @router.get("/chat-provider", response_model=str)
 async def get_chat_provider(
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_READ)),
 ) -> str:
     """获取 AI 对话的默认 LLM provider。
     
-    支持的值：openai, deepseek, qwen, ollama, mlx, mock，以及「模型管理」里新建的 provider
+    支持的值：openai, deepseek, qwen, ollama, mlx, mock，以及「模型接入」里新建的 provider
     """
     value = await system_config.SystemConfig.get(
         session,
@@ -96,11 +98,11 @@ async def get_chat_provider(
 @router.get("/rag-provider", response_model=str)
 async def get_rag_provider(
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_READ)),
 ) -> str:
     """获取知识库问答的默认 LLM provider。
     
-    支持的值：openai, deepseek, qwen, ollama, mlx, mock，以及「模型管理」里新建的 provider
+    支持的值：openai, deepseek, qwen, ollama, mlx, mock，以及「模型接入」里新建的 provider
     """
     value = await system_config.SystemConfig.get(
         session,
@@ -114,7 +116,7 @@ async def get_rag_provider(
 async def set_chat_provider(
     req: ConfigUpdateRequest,
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> str:
     """设置 AI 对话的默认 LLM provider。
     
@@ -136,7 +138,7 @@ async def set_chat_provider(
 async def set_rag_provider(
     req: ConfigUpdateRequest,
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> str:
     """设置知识库问答的默认 LLM provider。
     
@@ -158,7 +160,7 @@ async def set_rag_provider(
 async def toggle_rerank(
     req: ConfigUpdateRequest,
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> bool:
     """启用/禁用重排序服务。"""
     enabled = req.value.lower() == "true"
@@ -175,11 +177,11 @@ async def toggle_rerank(
 @router.get("/rerank-provider", response_model=str)
 async def get_rerank_provider(
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_READ)),
 ) -> str:
     """获取重排序服务的默认 provider。
     
-    支持的值：openai, deepseek, qwen, ollama, mlx, mock，以及「模型管理」里新建的 provider
+    支持的值：openai, deepseek, qwen, ollama, mlx, mock，以及「模型接入」里新建的 provider
     """
     value = await system_config.SystemConfig.get(
         session,
@@ -193,7 +195,7 @@ async def get_rerank_provider(
 async def set_rerank_provider(
     req: ConfigUpdateRequest,
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> str:
     """设置重排序服务的默认 provider。
     
@@ -216,7 +218,7 @@ async def update_config_by_key(
     key: str,
     req: ConfigUpdateRequest,
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> str:
     """通过 key 更新任意系统配置。
     
@@ -249,7 +251,7 @@ async def update_config_by_key(
 @router.get("/providers", response_model=dict[str, dict])
 async def get_providers(
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_READ)),
 ) -> dict[str, dict]:
     """获取所有模型提供者的配置（从数据库）。
     """
@@ -292,7 +294,7 @@ async def get_providers(
 async def create_provider(
     data: ProviderConfigSchema,
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> dict:
     """创建新的提供者配置。
     """
@@ -332,7 +334,7 @@ async def save_provider(
     provider: str,
     data: ProviderConfigSchema,
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> dict:
     """保存指定提供者的配置到数据库（upsert：内置 provider 首次保存时落库）。
     """
@@ -370,7 +372,7 @@ async def save_provider(
 async def delete_provider(
     provider: str,
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> dict:
     """删除指定的提供者配置。
     """

@@ -2,13 +2,14 @@
  * 路由定义 —— 父级套子级：一个「菜单分组」就是一个父路由，页面是它的子路由。
  *
  * 两个刻意的约定：
- * 1. 分组父路由用组自己的 slug（/ai、/rag、/data、/system），且**不与任何页面 URL 重名**，
+ * 1. 分组父路由用组自己的 slug（/rag、/data、/system），且**不与任何页面 URL 重名**，
  *    各自 redirect 到组内第一个页面，所以直接访问 /rag 也会落到「文档列表」。
  * 2. 子路由写**绝对路径**（vue-router 4 支持：层级来自嵌套而不是路径前缀），因此引入
  *    嵌套不改动任何既有 URL；层级只体现在 route.matched 上，供侧栏菜单与面包屑直接推导
  *    ——不再需要 meta.group 这种「假分组」标记，也不必在布局里维护第二份分组对照表。
  *
- * 守卫：未登录跳登录页；权限不足跳 403（权限码与后端 require_permission 同一套）。
+ * 守卫：未登录跳登录页；权限不足跳 403（权限码与后端 require_permission 同一套，
+ * 包括「写权限隐含读权限」那层含义，见 store/modules/auth.ts 里的 IMPLIED_READ）。
  */
 import { defineComponent, h } from 'vue';
 import { createRouter, createWebHistory, RouterView, type RouteRecordRaw } from 'vue-router';
@@ -41,7 +42,7 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/layouts/MainLayout.vue'),
     redirect: '/dashboard',
     children: [
-      // 顶级单项：不归属任何分组，直接作为侧栏第一项（全平台首页看板）
+      // 顶级单项：不归属任何分组，直接作为侧栏开头两项（全平台看板 + 对话入口）
       {
         path: '/dashboard',
         name: 'dashboard',
@@ -49,48 +50,51 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '概览', needAuth: true, icon: 'DashboardOutlined' },
       },
       {
-        path: '/ai',
-        component: RouteGroup,
-        redirect: '/chat',
-        meta: { title: 'AI 能力', icon: 'ThunderboltOutlined' },
-        children: [
-          {
-            path: '/chat',
-            name: 'chat',
-            component: () => import('@/views/ai/ChatPage.vue'),
-            meta: { title: 'AI 对话', needAuth: true, icon: 'MessageOutlined' },
-          },
-          {
-            path: '/embed',
-            name: 'embed',
-            component: () => import('@/views/ai/EmbedPage.vue'),
-            meta: { title: '嵌入向量', needAuth: true, icon: 'CodeOutlined' },
-          },
-        ],
+        path: '/chat',
+        name: 'chat',
+        component: () => import('@/views/ai/ChatPage.vue'),
+        meta: { title: 'AI 对话', needAuth: true, icon: 'MessageOutlined' },
       },
       {
         path: '/rag',
         component: RouteGroup,
         redirect: '/knowledge',
-        meta: { title: '知识库', icon: 'DatabaseOutlined' },
+        meta: { title: '知识库', icon: 'ReadOutlined' },
         children: [
           {
             path: '/knowledge',
             name: 'knowledge-docs',
             component: () => import('@/views/rag/KnowledgeDocsPage.vue'),
-            meta: { title: '文档列表', needAuth: true, icon: 'FileTextOutlined' },
+            meta: {
+              title: '文档列表',
+              needAuth: true,
+              permissions: ['knowledge:read'],
+              icon: 'FileTextOutlined',
+            },
           },
           {
             path: '/knowledge/ingest',
             name: 'knowledge-ingest',
             component: () => import('@/views/rag/KnowledgeIngestPage.vue'),
-            meta: { title: '内容录入', needAuth: true, icon: 'CloudUploadOutlined' },
+            meta: {
+              // 整页都是写操作，所以要求写权限（写权限隐含读权限，能进这一页的人
+              // 必然也看得到文档列表）
+              title: '内容录入',
+              needAuth: true,
+              permissions: ['knowledge:manage'],
+              icon: 'CloudUploadOutlined',
+            },
           },
           {
             path: '/knowledge/search',
             name: 'knowledge-search',
             component: () => import('@/views/rag/KnowledgeSearchPage.vue'),
-            meta: { title: '检索问答', needAuth: true, icon: 'SearchOutlined' },
+            meta: {
+              title: '检索问答',
+              needAuth: true,
+              permissions: ['knowledge:read'],
+              icon: 'SearchOutlined',
+            },
           },
         ],
       },
@@ -108,7 +112,7 @@ const routes: RouteRecordRaw[] = [
               title: '智能问数',
               needAuth: true,
               permissions: ['analytics:read'],
-              icon: 'BarChartOutlined',
+              icon: 'FundOutlined',
             },
           },
           {
@@ -127,20 +131,11 @@ const routes: RouteRecordRaw[] = [
       {
         path: '/system',
         component: RouteGroup,
-        redirect: '/sessions',
+        redirect: '/accounts',
         meta: { title: '系统管理', icon: 'SettingOutlined' },
         children: [
-          {
-            path: '/sessions',
-            name: 'sessions',
-            component: () => import('@/views/_core/SessionsPage.vue'),
-            meta: {
-              title: '会话',
-              needAuth: true,
-              permissions: ['session:read'],
-              icon: 'SolutionOutlined',
-            },
-          },
+          // 组内顺序按「先理人、再理权限、最后看运维与模型」排：
+          // 账号 / 角色 是日常项，会话是运维检查，两个模型页放到末尾
           {
             path: '/accounts',
             name: 'accounts',
@@ -164,14 +159,27 @@ const routes: RouteRecordRaw[] = [
             },
           },
           {
+            path: '/sessions',
+            name: 'sessions',
+            component: () => import('@/views/_core/SessionsPage.vue'),
+            meta: {
+              title: '会话',
+              needAuth: true,
+              permissions: ['session:read'],
+              icon: 'SolutionOutlined',
+            },
+          },
+          // 两个模型页名字曾经只差一个字，现在按职责改名：
+          // 「模型选择」只切换各功能用哪个已接入的模型，「模型接入」负责新增 / 编辑端点
+          {
             path: '/system-config',
             name: 'system-config',
             component: () => import('@/views/admin/SystemConfigPage.vue'),
             meta: {
-              title: '模型配置',
+              title: '模型选择',
               needAuth: true,
               permissions: ['system:read'],
-              icon: 'SettingOutlined',
+              icon: 'SlidersOutlined',
             },
           },
           {
@@ -179,7 +187,7 @@ const routes: RouteRecordRaw[] = [
             name: 'model-management',
             component: () => import('@/views/admin/ModelManagementPage.vue'),
             meta: {
-              title: '模型管理',
+              title: '模型接入',
               needAuth: true,
               permissions: ['system:read'],
               icon: 'ThunderboltOutlined',
@@ -196,8 +204,11 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '无访问权限', public: true },
   },
   // 知识库的「统计概览」已并入首页「概览」（两处取数重叠、文案互相漏改），
-  // 旧书签与外链靠这条重定向继续可用；放在布局之外，所以不会又冒出一个菜单项。
+  // 旧的「嵌入向量」页也已下线（后端对应端点一并删除），两者都只留重定向。
   { path: '/knowledge/overview', redirect: '/dashboard' },
+  { path: '/embed', redirect: '/chat' },
+  // 「AI 能力」分组已取消（组里只剩对话一页），旧 slug 同样继续可用
+  { path: '/ai', redirect: '/chat' },
   { path: '/:pathMatch(.*)*', component: () => import('@/views/_core/NotFound.vue') },
 ];
 

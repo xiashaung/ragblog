@@ -5,6 +5,7 @@
  * 权限码目录由后端 app/rbac.py 定义（这里只读渲染），角色本身可自由增删。
  * 内置角色不可删；superadmin 恒为全部权限；含 role:manage 的角色只有超管能建/改
  * —— 这些守卫都在 services/rbac_service 里，前端只负责把后端的中文报错显示出来。
+ * 按钮级：新建 / 编辑只挂 v-perm（role:manage）；删除保留「内置角色」的逐行 :disabled。
  */
 import { computed, onMounted, reactive, ref } from 'vue';
 import {
@@ -25,11 +26,11 @@ import {
   message,
 } from 'ant-design-vue';
 import { rbacApi } from '@/api';
-import { useAuthStore } from '@/store/modules/auth';
+import { usePerm } from '@/composables/usePerm';
 import type { PermissionDef, RoleItem } from '@/typings';
 
-const auth = useAuthStore();
-const canManage = computed(() => auth.hasPerm('role:manage'));
+const { can } = usePerm();
+const canManage = computed(() => can('role:manage'));
 
 const list = ref<RoleItem[]>([]);
 const catalog = ref<PermissionDef[]>([]);
@@ -182,7 +183,7 @@ onMounted(load);
       <template #extra>
         <Space>
           <Button @click="load">刷新</Button>
-          <Button v-if="canManage" type="primary" @click="openCreate">新建角色</Button>
+          <Button v-perm="'role:manage'" type="primary" @click="openCreate">新建角色</Button>
         </Space>
       </template>
       <Table
@@ -220,11 +221,12 @@ onMounted(load);
           </template>
           <template v-else-if="column.key === 'actions'">
             <Space>
-              <Button size="small" :disabled="!canManage" @click="openEdit(record)">编辑</Button>
+              <Button size="small" v-perm="'role:manage'" @click="openEdit(record)">编辑</Button>
               <Button
                 size="small"
                 danger
-                :disabled="!canManage || record.is_builtin"
+                v-perm="'role:manage'"
+                :disabled="record.is_builtin"
                 @click="deleteTarget = record"
               >
                 删除

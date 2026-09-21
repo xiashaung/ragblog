@@ -116,7 +116,7 @@ async def lifespan(app: FastAPI):
     # 启动：建数据库引擎 + 建表（开发环境；生产跑 alembic upgrade head）
     db.init_db()
     await db.init_models()
-    # 把「模型管理 / 系统配置」里的 provider 选择读进内存：聊天、嵌入、精排
+    # 把「模型接入 / 系统配置」里的 provider 选择读进内存：聊天、嵌入、精排
     # 实际用哪个端点与模型名以数据库为准，.env 只在没配置时兜底，
     # 所以后台改完不需要重启。
     async with db.get_session_factory()() as session:

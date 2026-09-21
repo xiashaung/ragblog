@@ -11,16 +11,19 @@
 │   ├── main.py              # 应用入口，组装 FastAPI 实例（lifespan 中初始化 DB；可选挂载 web/dist）
 │   ├── config.py            # 基于 pydantic-settings 的配置（读取 .env）
 │   ├── db.py                # 异步引擎 + Session 工厂（get_db 依赖）
-│   ├── models.py            # SQLAlchemy ORM 模型（用户 / 商品 / RAG / API Key / 角色）
+│   ├── models.py            # SQLAlchemy ORM 模型（后台账号 / 角色 / 会话 / 商品 / RAG / 分析记录）
 │   ├── rbac.py              # 权限码目录 + 内置角色种子（权限的唯一来源）
-│   ├── deps.py              # 鉴权依赖：require_api_key / require_admin_principal / require_permission
+│   ├── deps.py              # 鉴权依赖：require_admin_principal / require_admin_session / require_permission
 │   ├── bootstrap.py         # CLI：python -m app.bootstrap seed（建首个超管）
 │   ├── routers/             # 路由层（只处理 HTTP 细节）
 │   │   ├── health.py        # /health 健康检查
 │   │   ├── users.py         # /api/v1/users CRUD
 │   │   ├── items.py         # /api/v1/items CRUD
-│   │   ├── ai.py            # /api/v1/ai/*（LLM + RAG）
-│   │   ├── ai_keys.py       # /api/v1/ai/keys（API Key 管理，key:read / key:manage）
+│   │   ├── ai.py            # /api/v1/ai/*（对话 + 知识库，知识库挂 knowledge:*）
+│   │   ├── upload.py        # /api/v1/upload*（文件入库，属 knowledge:manage）
+│   │   ├── analytics.py     # /api/v1/analytics/*（智能问数，analytics:read）
+│   │   ├── datasources.py   # /api/v1/datasources（数据源，datasource:read/manage）
+│   │   ├── system_config.py # /api/v1/system/config/*（模型选择与接入，system:read/manage）
 │   │   └── admin.py         # /admin/*（登录 + 账号 / 角色 / 会话，全部挂权限码）
 │   ├── schemas/             # Pydantic 请求/响应模型
 │   │   ├── user.py
@@ -33,7 +36,7 @@
 │       ├── admin_service.py  # 登录 / 会话 token / 首次引导
 │       ├── rbac_service.py   # 权限解析 + 角色/账号 CRUD + 防提权守卫
 │       ├── llm.py           # LLM 网关（多 provider 注册表：openai/deepseek/qwen/ollama/mlx/mock）
-│       ├── api_keys.py      # API Key + 每小时配额
+│       ├── system_config.py # 库里存的系统配置（各功能选哪个 provider）
 │       └── rag.py           # RAG：分块 + 向量检索（pgvector / JSON 双路径，多 provider 感知）
 ├── alembic/                 # 数据库迁移（异步）
 │   ├── env.py
@@ -42,14 +45,16 @@
 ├── tests/
 │   ├── conftest.py          # 异步 TestClient（httpx ASGI transport）+ console/account fixture
 │   ├── test_api.py          # 基础 CRUD 测试
-│   ├── test_ai.py           # AI / RAG / Key 测试
+│   ├── test_ai.py           # AI / RAG 测试
 │   └── test_rbac.py         # RBAC：引导、权限矩阵、提权与锁死守卫
 ├── web-vben/                # 前端源码（Vue 3 + Vite + Ant Design Vue 4 + Pinia）
-│   ├── src/api/             # request.ts（envelope + Bearer/X-API-Key 拦截器）、index.ts
+│   ├── src/api/             # request.ts（envelope + Bearer 拦截器）、index.ts
+│   ├── src/directives/      # perm.ts：v-perm / v-perm-any 按钮级权限指令
+│   ├── src/composables/     # usePerm.ts：脚本里判权限 + 无权提示文案
 │   ├── src/store/modules/   # auth.ts（token + roles/permissions）、business.ts
 │   ├── src/router/          # 路由 + meta.permissions 守卫（不足跳 /403）
 │   ├── src/layouts/         # MainLayout.vue：菜单按权限过滤
-│   └── src/views/           # 页面：auth / _core / ai / rag / keys / admin（账号、角色）
+│   └── src/views/           # 页面：auth / _core / ai（对话）/ rag / analytics / admin（账号、角色、数据源、模型）
 ├── web/dist/                # 前端构建产物（被 FastAPI 静态托管，由 web-vben 输出）
 ├── pyproject.toml
 ├── .env.example
@@ -100,9 +105,10 @@ pytest
 
 ## 管理后台与 RBAC 权限
 
-后台管理面（账号 / 角色 / 会话 / API Key）走一套 RBAC：**权限码由代码定义，角色由数据库承载**。
+后台管理面（账号 / 角色 / 会话 / 知识库 / 数据源 / 智能问数 / 模型配置）走一套 RBAC：
+**权限码由代码定义，角色由数据库承载**。
 权限码是唯一来源（`app/rbac.py` 的 `Permission` 枚举 + `PERMISSION_CATALOG`，带中文名与分组），
-角色则是运营数据，可在「角色权限」页自由增删改。
+角色则是运营数据，可在「角色权限」页自由增删改。新增权限码只改代码，不需要迁移。
 
 ### 认证方式
 
@@ -117,24 +123,36 @@ POST /admin/login  {username, password}
 
 ### 权限码与内置角色
 
-| 权限码          | 含义                     |
-| --------------- | ------------------------ |
-| `account:read`  | 查看后台账号与角色       |
-| `account:manage`| 新建 / 停用 / 删除账号、重置密码、分配角色 |
-| `role:read`     | 查看角色与权限目录       |
-| `role:manage`   | 新建 / 修改 / 删除角色（提权敏感，仅超管可授予） |
-| `session:read`  | 查看在线会话             |
-| `session:revoke`| 强制下线某个会话         |
-| `key:read`      | 查看 API Key 列表与用量  |
-| `key:manage`    | 生成 / 吊销 API Key      |
+| 分组     | 权限码            | 含义                         |
+| -------- | ----------------- | ---------------------------- |
+| 账号管理 | `account:read`    | 查看后台账号与角色           |
+| 账号管理 | `account:manage`  | 新建 / 停用 / 删除账号、重置密码、分配角色 |
+| 角色权限 | `role:read`       | 查看角色与权限目录           |
+| 角色权限 | `role:manage`     | 新建 / 修改 / 删除角色（提权敏感，仅超管可授予） |
+| 会话     | `session:read`    | 查看在线会话                 |
+| 会话     | `session:revoke`  | 强制下线某个会话             |
+| 数据分析 | `analytics:read`  | 智能问数（只读 Text-to-SQL） |
+| 数据分析 | `datasource:read` | 查看外部数据源（连接串只回掩码） |
+| 数据分析 | `datasource:manage` | 增删改数据源（含连接凭证，高敏感） |
+| 模型接入 | `system:read`     | 查看各功能选用的 provider 与模型接入列表 |
+| 模型接入 | `system:manage`   | 切换 provider、增删改模型接入 |
+| 知识库   | `knowledge:read`  | 浏览文档、向量检索、知识库问答 |
+| 知识库   | `knowledge:manage`| 录入 / 上传 / 编辑 / 重建 / 删除文档 |
+
+**写权限隐含同一资源的读权限**：规则集中在 `rbac.py::MANAGE_IMPLIES_READ`，由
+`grants()` 统一生效（所以只勾 `xxx:manage` 也能看得懂列表），前端
+`store/modules/auth.ts` 里有同表副本，保证菜单 / 路由 / 按钮三处口径一致。
+`session:revoke` 不算 `session:read` 的写档（它不是同一资源的写操作），运维角色本就同时持有两个。
 
 | 内置角色        | 权限                                             |
 | --------------- | ------------------------------------------------ |
 | `superadmin`    | `*`（全部权限，恒不可改，只有这一个角色能持有 `*`） |
-| `admin`         | 除 `role:manage` 外的全部                         |
-| `operator`      | `session:read/revoke` + `key:read/manage`        |
-| `viewer`        | 四个 `:read`（只读）                             |
+| `admin`         | 账号读写 + `role:read` + 会话读写 + `analytics:read` + `datasource:read` |
+| `operator`      | `session:read` + `session:revoke`                |
+| `viewer`        | `account:read` + `role:read` + `session:read`（只读） |
 
+模型接入（`system:*`）与知识库（`knowledge:*`）四个码**不预发给任何内置角色**，
+现阶段只有 `superadmin` 靠 `*` 能用，之后在「角色权限」页按需分配。
 内置角色不可删除、标识不可改；一个账号可挂多个角色，权限取并集。
 
 ### 端点与所需权限
@@ -155,9 +173,31 @@ POST /admin/login  {username, password}
 | PATCH  | /admin/accounts/{id}                | `account:manage`  |
 | PUT    | /admin/accounts/{id}/roles          | `account:manage`  |
 | DELETE | /admin/accounts/{id}                | `account:manage`  |
-| GET    | /api/v1/ai/keys                     | `key:read`        |
-| POST   | /api/v1/ai/keys                     | `key:manage`      |
-| DELETE | /api/v1/ai/keys/{id}                | `key:manage`      |
+| GET    | /api/v1/ai/knowledge、/stats、/{id}、/search、/answer | `knowledge:read`  |
+| POST   | /api/v1/ai/knowledge/ingest、/ingest-pairs、/fetch-url | `knowledge:manage` |
+| PATCH / DELETE | /api/v1/ai/knowledge/{id}、/batch-delete、/reindex | `knowledge:manage` |
+| POST   | /api/v1/upload、/upload/batch       | `knowledge:manage` |
+| GET    | /api/v1/system/config/*（各类 GET） | `system:read`     |
+| PATCH / POST / DELETE | /api/v1/system/config/*（写） | `system:manage`   |
+| GET    | /api/v1/datasources                 | `datasource:read` |
+| POST / PATCH / DELETE / POST /test | /api/v1/datasources | `datasource:manage` |
+| ALL    | /api/v1/analytics/*                 | `analytics:read`  |
+| ALL    | /api/v1/ai/chat                     | 公开（无鉴权）    |
+| ALL    | /api/v1/ai/chat/sessions*           | 登录（只要会话本身属于自己） |
+
+### 前端按钮级权限
+
+同一个权限码在前端要同时管三件事，入口分别是：
+
+- **菜单 / 路由**：`router/index.ts` 的 `meta.permissions` + `MainLayout` 的菜单过滤（无权不显示）；
+- **按钮**：全局指令 `v-perm="'knowledge:manage'"`（`src/directives/perm.ts`）。无权时不摘节点，
+  而是置灰 + 悬停说明缺哪条（中文名单在 `src/config/permissions.ts`，与后端 catalog 同一口径）；
+  需要「任一命中」用 `v-perm-any`。已经被 `a-tooltip` 包住的按钮不能用指令（原生 title 会被盖掉），
+  改写 `:disabled="!canManage"` + `:title="canManage ? 正常文案 : permHint(code)"`；
+- **请求**：`usePerm()` 的 `can()` 用于脚本判断，没权限就干脆不发那个请求（否则只收到一个 403，
+  页面还白转圈）——首页「概览」就是按这个取数的。
+
+渲染层这一套只管交互观感，绕过也过不了后端的 `require_permission`。
 
 ### 防提权 / 防锁死守卫
 
@@ -185,8 +225,9 @@ python -m app.bootstrap seed --username admin --password 'xxx'
 > 升级时迁移（`f5a6b7c8d9e0`）会把一切现存账号绑到 `superadmin`，语义与升级前的
 > 「唯一管理员」等价，不会降权。
 
-> 尚未纳入 RBAC：`/api/v1/users`、`/api/v1/items` 仍为开放示例接口；
-> `/api/v1/ai/*`（对话/向量化/知识库）只校验 API Key 是否有效与配额，不区分权限码。
+> 尚未纳入 RBAC：`/api/v1/users`、`/api/v1/items` 仍为开放示例接口；`/api/v1/ai/chat`
+> 不鉴权（供外部调用）；「对话会话」那组接口只要求后台登录态
+> （`require_admin_session`），因为它们只作用于调用者自己。
 
 ## AI 接口
 
@@ -201,7 +242,6 @@ python -m app.bootstrap seed --username admin --password 'xxx'
 | 方法   | 路径                            | 说明                                   |
 | ------ | ------------------------------- | -------------------------------------- |
 | POST   | /api/v1/ai/chat                 | 对话补全，支持流式/结构化 JSON 输出    |
-| POST   | /api/v1/ai/embeddings           | 文本向量化（批量，单次 ≤2048 条）      |
 | POST   | /api/v1/ai/knowledge/ingest     | RAG：录入文本（自动分块 + 向量化）      |
 | POST   | /api/v1/ai/knowledge/ingest-pairs | RAG：录入一批问答对（合为一篇 FAQ）   |
 | POST   | /api/v1/ai/knowledge/fetch-url  | RAG：抓取网页正文后入库                |
@@ -216,10 +256,6 @@ python -m app.bootstrap seed --username admin --password 'xxx'
 | POST   | /api/v1/ai/knowledge/batch-delete | RAG：批量删除，返回 deleted / failed  |
 | POST   | /api/v1/ai/knowledge/search     | RAG：向量检索，返回引用片段            |
 | POST   | /api/v1/ai/knowledge/answer     | RAG：检索 + 带引用的回答               |
-| POST   | /api/v1/ai/keys                 | 生成调用本服务的 API Key（管理员）      |
-| GET    | /api/v1/ai/keys                 | 列出 Key 及本小时用量（管理员）         |
-| DELETE | /api/v1/ai/keys/{id}            | 吊销 Key（管理员）                     |
-| GET    | /api/v1/ai/keys/me              | 当前 Key 自校验（管理员/普通 Key 均可） |
 | GET    | /api/v1/ai/providers            | 各 provider 的默认配置（供前端展示）    |
 
 > 不同 provider 的向量不可比：换 `APP_LLM_DEFAULT_PROVIDER` 后，旧文档会被
@@ -248,57 +284,51 @@ python -m app.bootstrap seed --username admin --password 'xxx'
 
 ### 鉴权
 
-- 所有 `/ai/*` 接口需 `X-API-Key: <key>` 或 `Authorization: Bearer <key>`，这里的 key 是**库里的 API Key**。
-- `APP_ADMIN_API_KEY` 不再能调用 `/ai/*`（也不再生效配额豁免）；API Key 由后台管理接口
-  生成：`POST /api/v1/ai/keys`（需控制台 Bearer 会话 + `key:manage`）。
-- 每个 Key 有独立小时配额（`quota_per_hour`），超限返回 `429`。
+- `/api/v1/ai/chat` 与 `/ai/providers` 不鉴权（前者要能被外部调用）。
+- 知识库（`/ai/knowledge/*`）与上传（`/upload*`）走控制台会话 + RBAC：
+  读要 `knowledge:read`，写要 `knowledge:manage`。
+- 调用时带 `Authorization: Bearer <控制台 token>`（`POST /admin/login` 拿）；
+  `APP_ADMIN_API_KEY` 只能用于首次引导（`/admin/onboard`），不再是接口旁路。
+- 会话历史（`/ai/chat/sessions*`）只要求登录，且只能读到自己的会话。
 
 ### 示例
 
 ```bash
-# 先登录控制台，再用 key:manage 权限建一个调用用 Key
+# 先登录控制台，后面的 AI / 知识库接口都用这个 Bearer token
 TOKEN=$(curl -s -X POST http://127.0.0.1:8000/admin/login -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"xxx"}' | sed -n 's/.*"token":"\([^"]\+\)".*/\1/p')
-KEY=$(curl -s -X POST http://127.0.0.1:8000/api/v1/ai/keys -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -d '{"name":"dev","quota_per_hour":1000}' \
-  | sed -n 's/.*"key":"\([^"]\+\)".*/\1/p')
 
-# 对话（走默认 provider）
+# 对话（走默认 provider；此接口本身不鉴权）
 curl -X POST http://127.0.0.1:8000/api/v1/ai/chat \
-  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"你好"}]}'
 
 # 指定 provider（千问）
 curl -X POST http://127.0.0.1:8000/api/v1/ai/chat \
-  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -H 'Content-Type: application/json' \
   -d '{"provider":"qwen","messages":[{"role":"user","content":"你好"}]}'
 
 # 指定 provider + 覆盖模型
 curl -X POST http://127.0.0.1:8000/api/v1/ai/chat \
-  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -H 'Content-Type: application/json' \
   -d '{"provider":"deepseek","model":"deepseek-reasoner","messages":[{"role":"user","content":"1+1?"}]}'
-
-# 本地 Ollama
-curl -X POST http://127.0.0.1:8000/api/v1/ai/embeddings \
-  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
-  -d '{"provider":"ollama","input":["hello world"]}'
 
 # 结构化 JSON 输出
 curl -X POST http://127.0.0.1:8000/api/v1/ai/chat \
-  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"总结"}],"response_format":{"type":"json_object"}}'
 
 # 流式（NDJSON）
 curl -N -X POST http://127.0.0.1:8000/api/v1/ai/chat \
-  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"讲个故事"}],"stream":true}'
 
-# RAG：入库 + 问答（不同 provider 的向量不互通，检索按入库 provider 过滤）
+# RAG：入库需 knowledge:manage，问答需 knowledge:read（不同 provider 的向量不互通）
 curl -X POST http://127.0.0.1:8000/api/v1/ai/knowledge/ingest \
-  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"provider":"qwen","title":"手册","content":"FastAPI 是一个高性能的 Python Web 框架…"}'
 curl -X POST http://127.0.0.1:8000/api/v1/ai/knowledge/answer \
-  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"provider":"qwen","query":"FastAPI 是什么？"}'
 ```
 
@@ -332,15 +362,18 @@ APP_LLM_DEEPSEEK_API_KEY=sk-xxx
 - 配置统一放在 `app/config.py`，环境变量前缀为 `APP_`（如 `APP_DEBUG=true`）。
 - 数据库：默认 SQLite（`sqlite+aiosqlite:///./app.db`），可用 `APP_DATABASE_URL` 切换到 PostgreSQL 等；迁移用 Alembic（异步）。
 - 向量检索：Postgres 需 pgvector 扩展（`create extension if not exists vector`）；启动与迁移都会自动执行这句 IF NOT EXISTS，无权限时降级并记日志。
-- 持久化：users / items / RAG 知识库（Postgres 存 pgvector 列 + HNSW 索引，SQLite 存 JSON）/ API Key / 用量日志全部落库，进程重启不丢数据。
+- 持久化：后台账号 / 角色 / 会话 / items / RAG 知识库（Postgres 存 pgvector 列 + HNSW
+  索引，SQLite 存 JSON）/ 对话历史 / 问数记录全部落库，进程重启不丢数据。
 - 管理面鉴权：权限码定义在 `app/rbac.py`，路由只声明 `Depends(deps.require_permission(Permission.XXX))`；
   新增接口只需选权限码，无需改鉴权中间件（详见「管理后台与 RBAC 权限」）。
 - 代码风格由 `ruff` 检查（`ruff check .`），类型由 `mypy` 检查（`mypy app`）。
 
 ## 前端（Vue 3 + Ant Design Vue）
 
-工程内附 `web-vben/`，用 **Vue 3 + Vite + Ant Design Vue 4** 实现控制台：
-`概览 / AI 对话 / 嵌入向量 / 知识库 / API Key / 会话 / 账号管理 / 角色权限`，
+工程内附 `web-vben/`，用 **Vue 3 + Vite + Ant Design Vue 4** 实现控制台，
+菜单按「两个顶级页 + 三个分组」排（项仍按权限码过滤，无权不显示）：
+`概览`、`AI 对话` 为顶级；分组 `知识库`（文档列表 / 内容录入 / 检索问答）、
+`数据分析`（智能问数 / 数据源管理）、`系统管理`（账号管理 / 角色权限 / 会话 / 模型选择 / 模型接入），
 构建产物直出到 `web/dist` 由后端单进程托管。
 
 **当前前端能力**：
@@ -349,13 +382,11 @@ APP_LLM_DEEPSEEK_API_KEY=sk-xxx
   支持「流式输出」与「非流式」切换，可选「结构化 JSON 输出」（mock 输出 JSON、真实 provider 返回结构化内容）。
 - **Provider 感知**：provider 与模型名完全由后端 `.env` 决定（`GET /ai/providers` 只用于展示），
   前端不再传 `provider` / `model`。
-- **顶部状态**：后端健康状态横幅 + 当前登录账号的角色标签；Key 栏可对现有 Key 自校验
-  （`GET /ai/keys/me`，返 401 不会把控制台踢下线）。
-- **Key 管理**：支持为 Key 命名、复制 plain key（仅显示一次）、设置每小时配额、查看本小时用量、吊销；
-  无 `key:manage` 时自动降为只读。
+- **顶部状态**：后端健康状态横幅 + 当前登录账号的角色标签（`session:read` 才会拉在线会话数）。
 - **RBAC 界面**：登录后拿 `roles/permissions` 渲染菜单（无权限的入口不显示），
   路由 `meta.permissions` 不满足时跳 `/403`；刷新页面以 `GET /admin/me` 为权威重拉权限。
-  前端过滤只负责渲染，真正的拦截在后端 `require_permission`。
+  按钮级由 `v-perm` 指令与 `usePerm()` 负责（无权置灰 + 悬停说明 / 干脆不发请求），
+  详见上面「前端按钮级权限」。前端过滤只负责渲染，真正的拦截在后端 `require_permission`。
 
 ### 开发模式（推荐）
 

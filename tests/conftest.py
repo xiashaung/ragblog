@@ -120,9 +120,15 @@ async def client(
 
 
 @pytest.fixture()
-def admin_headers() -> dict[str, str]:
-    """X-API-Key 仅供调用 AI 接口；后台管理接口已改成 RBAC（见 ``console``）。"""
-    return {"X-API-Key": "admin-test-key"}
+async def admin_headers(client, console) -> dict[str, str]:
+    """AI / 知识库类接口的通用凭据：引导 Key + 超管会话，两个都带上。
+
+    引导 Key（``X-API-Key``）只对 ``/admin/onboard`` 有意义；知识库与模型配置接口
+    已按 RBAC 真拦截（``knowledge:*`` / ``system:*``），光有引导 Key 会 401，
+    所以这里复用 ``console`` 的超管 token（持有 ``*`` 通配，全量放行）。
+    需要验证「无权限被拒」的用例请改用 ``account_factory`` 建普通账号。
+    """
+    return {**BOOTSTRAP_KEY_HEADERS, "Authorization": f"Bearer {console['token']}"}
 
 
 BOOTSTRAP_KEY_HEADERS = {"X-API-Key": "admin-test-key"}

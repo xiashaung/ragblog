@@ -8,7 +8,7 @@
   ``OpenAIBackend`` 类，按 provider 名字各存一个实例。
 - ``mock`` 是确定性的离线后端，给开发与测试用（不需要任何真 Key）。
 
-取配置的口径：端点与模型名一律走 :func:`_provider_cfg`（「模型管理」里的
+取配置的口径：端点与模型名一律走 :func:`_provider_cfg`（「模型接入」里的
 数据库配置优先、``.env`` 兜底），所以后台改完下一次请求就生效。
 所有后端返回的形状统一由 ``app/schemas/ai.py`` 约束，调用方不需知道底下是谁。
 """
@@ -66,7 +66,7 @@ def _content_text(content: object) -> str:
 
 
 def _provider_cfg(provider: Provider | str) -> ProviderConfig:
-    """取 provider 的调用参数：「模型管理」里的数据库配置优先，.env 兜底。
+    """取 provider 的调用参数：「模型接入」里的数据库配置优先，.env 兜底。
 
     缓存由 ``services.provider_store`` 维护（启动时加载、后台每次写入后刷新），
     所以这里保持同步：改了界面里的 base_url / api_key / 模型名，下一次请求就用新的。
@@ -539,12 +539,12 @@ def resolve_name(provider: Provider | str | None = None, *, feature: str = "chat
 
 
 def chat_model(provider: Provider | str | None = None, *, feature: str = "chat") -> str:
-    """该 provider 在「模型管理」里配的聊天模型名（回落 .env）。"""
+    """该 provider 在「模型接入」里配的聊天模型名（回落 .env）。"""
     return _provider_cfg(resolve_name(provider, feature=feature)).chat_model
 
 
 def embedding_model(provider: Provider | str | None = None, *, feature: str = "embedding") -> str:
-    """该 provider 在「模型管理」里配的向量模型名（回落 .env）。
+    """该 provider 在「模型接入」里配的向量模型名（回落 .env）。
 
     与 ``chat_model`` 对称：展示用的模型名必须和实际调用取的是同一份配置，
     否则「概览」页会报一个 .env 里早已换掉的名字。
@@ -555,7 +555,7 @@ def embedding_model(provider: Provider | str | None = None, *, feature: str = "e
 def reset_registry() -> None:
     """清空后端缓存（测试里改了配置时用）。
 
-    生产上不用手动调：``provider_store`` 刷新模型管理配置时会清一次，
+    生产上不用手动调：``provider_store`` 刷新模型接入配置时会清一次，
     使得 base_url / Key 的变更能立刻反映到新实例上。
     """
     _registry.clear()

@@ -18,7 +18,7 @@ import {
   // 图标组件：用于从 meta.icon 名称映射
   DashboardOutlined,
   MessageOutlined,
-  CodeOutlined,
+  ReadOutlined,
   FileTextOutlined,
   CloudUploadOutlined,
   FundOutlined,
@@ -27,7 +27,8 @@ import {
   SolutionOutlined,
   SafetyCertificateOutlined,
   BarChartOutlined,
-  // 分组（父级菜单）图标
+  SlidersOutlined,
+  // 分组标题与叶子页面共用这一份映射（名字取自 router 里的 meta.icon）
   ThunderboltOutlined,
   DatabaseOutlined,
   SettingOutlined,
@@ -47,7 +48,7 @@ const activeMenu = ref(route.path);
 const iconMap: Record<string, unknown> = {
   DashboardOutlined,
   MessageOutlined,
-  CodeOutlined,
+  ReadOutlined,
   FileTextOutlined,
   CloudUploadOutlined,
   FundOutlined,
@@ -56,6 +57,7 @@ const iconMap: Record<string, unknown> = {
   SolutionOutlined,
   SafetyCertificateOutlined,
   BarChartOutlined,
+  SlidersOutlined,
   ThunderboltOutlined,
   DatabaseOutlined,
   SettingOutlined,
@@ -170,7 +172,8 @@ onMounted(async () => {
   }
   business.loadProviders();
   business.pollHealth();
-  business.loadSessions();
+  // 会话计数需要 session:read：无权就不发这个请求（否则每次进页都吃一个 403）
+  if (auth.hasPerm('session:read')) business.loadSessions();
   // 30s 轮询健康
   healthTimer.value = setInterval(() => business.pollHealth(), 30_000);
 });
@@ -243,7 +246,8 @@ onUnmounted(() => {
             </a-tag>
           </a-tooltip>
 
-          <a-tooltip title="在线 admin 会话数">
+          <!-- 会话数本身就是一种只读数据，无权时整块隐藏（摆个「0 会话」只会让人以为真没人在线） -->
+          <a-tooltip v-if="auth.hasPerm('session:read')" title="在线 admin 会话数">
             <a-badge count="0" :badge-offset="[4, 0]">
               <a-button type="text" @click="business.loadSessions()">
                 {{ business.sessions.length }} 会话

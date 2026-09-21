@@ -34,7 +34,7 @@ async def rerank(
     分数的标度因模型而异，所以上层只用它排序与卡 ``rag_rerank_min_score``，不拿去展示。
     """
     settings = get_settings()
-    # 开关与端点都以数据库为准（「系统配置」/「模型管理」），.env 兜底
+    # 开关与端点都以数据库为准（「系统配置」/「模型接入」），.env 兜底
     rerank_cfg = provider_store.get_rerank_config()
     if not rerank_cfg.enabled or not documents or not rerank_cfg.base_url:
         return None

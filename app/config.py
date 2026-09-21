@@ -4,7 +4,7 @@
 请求里的 ``provider`` 字段决定用哪一块；没指定时用 ``llm_default_provider``。
 
 要注意与本模块的分工：**这里只是兜底来源**，运行时真正生效的配置以数据库为准
-（「系统配置」选各功能的 provider、「模型管理」配端点与模型名），由
+（「系统配置」选各功能的 provider、「模型接入」配端点与模型名），由
 ``services/provider_store`` 读库并缓存在内存里；``.env`` 只在库里没配时兜底。
 唯一的例外是 ``rag_vector_dim``、混合检索与智能问数这类结构性参数，仍然只能改 ``.env``。
 
@@ -24,7 +24,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # 使上传的图片无论进程从哪个 CWD 启动都落在同一个地方。
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# 「模型管理」里新建的自定义 provider。由 services.provider_store 在刷新
+# 「模型接入」里新建的自定义 provider。由 services.provider_store 在刷新
 # 缓存时登记，两个 Provider 枚举共用这一份白名单：请求里的 provider 只接受
 # 「内置成员 + 数据库里配过的」，打错的名字仍然会被校验拦下（而不是静默接受）。
 _custom_providers: set[str] = set()
@@ -69,7 +69,7 @@ class Provider(StrEnum):
     与 ``app/schemas/ai.Provider`` 是同一套值，在这里独立定义是为了避开循环导入
     （schemas 要 import 本模块取默认值）。
 
-    内置六个由枚举成员写死；「模型管理」里新建的自定义 provider 由下面的
+    内置六个由枚举成员写死；「模型接入」里新建的自定义 provider 由下面的
     ``_missing_`` 动态认（需在白名单里），无需改代码重启。
     """
 
@@ -82,7 +82,7 @@ class Provider(StrEnum):
 
     @classmethod
     def _missing_(cls, value):
-        """枚举查不到内置成员时的兜底：只认「模型管理」里配过的自定义 provider。"""
+        """枚举查不到内置成员时的兜底：只认「模型接入」里配过的自定义 provider。"""
         return custom_provider_member(cls, value)
 
 

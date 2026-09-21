@@ -1,4 +1,4 @@
-"""Tests for the AI endpoints (chat, embeddings, RAG) using the mock backend."""
+"""Tests for the AI endpoints (chat, RAG) using the mock backend."""
 
 import json
 
@@ -90,19 +90,6 @@ async def test_chat_structured_output(client, admin_headers):
     assert resp.status_code == 200
     parsed = json.loads(_ok(resp)["content"])
     assert "summary" in parsed
-
-
-async def test_embeddings_default_provider(client, admin_headers):
-    resp = await client.post(
-        "/api/v1/ai/embeddings",
-        json={"input": ["hello world", "fastapi is great"]},
-        headers=admin_headers,
-    )
-    assert resp.status_code == 200
-    body = _ok(resp)
-    assert body["provider"] == "mock"
-    assert len(body["items"]) == 2
-    assert len(body["items"][0]["embedding"]) == _dim()
 
 
 def test_chunk_text_bounds_every_chunk():

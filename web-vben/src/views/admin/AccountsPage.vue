@@ -3,6 +3,8 @@
  * 账号管理 —— 后台账号的增删改 + 角色分配（RBAC 管理面）。
  *
  * 权限：读需 account:read（路由已挡），写需 account:manage；
+ * 按钮级：新建 / 分配角色 / 重置密码只由 v-perm 控制，「不能停用 / 删除自己」这类
+ * 逐行判定继续留在 :disabled 里（两者叠加生效，互不覆盖）。
  * 后端还会独立校验「不能停用/删除自己」「不能收回最后一个超管」等守卫。
  */
 import { computed, onMounted, reactive, ref } from 'vue';
@@ -18,14 +20,17 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   message,
 } from 'ant-design-vue';
 import { rbacApi } from '@/api';
+import { usePerm } from '@/composables/usePerm';
 import { useAuthStore } from '@/store/modules/auth';
 import type { AccountItem, RoleItem } from '@/typings';
 
 const auth = useAuthStore();
-const canManage = computed(() => auth.hasPerm('account:manage'));
+const { can, tip: permHint } = usePerm();
+const canManage = computed(() => can('account:manage'));
 
 const list = ref<AccountItem[]>([]);
 const roles = ref<RoleItem[]>([]);
@@ -188,7 +193,7 @@ onMounted(load);
       <template #extra>
         <Space>
           <Button @click="load">刷新</Button>
-          <Button v-if="canManage" type="primary" @click="createOpen = true">新建账号</Button>
+          <Button v-perm="'account:manage'" type="primary" @click="createOpen = true">新建账号</Button>
         </Space>
       </template>
       <Table
@@ -210,23 +215,25 @@ onMounted(load);
             </Space>
           </template>
           <template v-else-if="column.key === 'status'">
-            <Switch
-              :checked="record.is_active"
-              :disabled="!canManage || record.id === auth.userInfo?.id"
-              checked-children="启用"
-              un-checked-children="停用"
-              @change="(checked: boolean) => onToggle(record, checked)"
-            />
+            <Tooltip :title="canManage ? '' : permHint('account:manage')">
+              <Switch
+                :checked="record.is_active"
+                :disabled="!canManage || record.id === auth.userInfo?.id"
+                checked-children="启用"
+                un-checked-children="停用"
+                @change="(checked: boolean) => onToggle(record, checked)"
+              />
+            </Tooltip>
           </template>
           <template v-else-if="column.key === 'created_at'">
             {{ record.created_at ? new Date(record.created_at * 1000).toLocaleString() : '-' }}
           </template>
           <template v-else-if="column.key === 'actions'">
             <Space wrap>
-              <Button size="small" :disabled="!canManage" @click="openRoles(record)">分配角色</Button>
+              <Button size="small" v-perm="'account:manage'" @click="openRoles(record)">分配角色</Button>
               <Button
                 size="small"
-                :disabled="!canManage"
+                v-perm="'account:manage'"
                 @click="
                   () => {
                     pwdTarget = record;
@@ -239,7 +246,8 @@ onMounted(load);
               <Button
                 size="small"
                 danger
-                :disabled="!canManage || record.id === auth.userInfo?.id"
+                v-perm="'account:manage'"
+                :disabled="record.id === auth.userInfo?.id"
                 @click="deleteTarget = record"
               >
                 删除

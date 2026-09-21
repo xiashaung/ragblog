@@ -1,7 +1,7 @@
 """模型提供者配置的运行时缓存。
 
 聊天 / 知识库问答 / 向量嵌入实际用的 ``base_url`` / ``api_key`` / 模型名，
-以数据库里的「模型管理」(``provider_configs``) 与「系统配置」
+以数据库里的「模型接入」(``provider_configs``) 与「系统配置」
 (``system_configs`` 里各功能选用的 provider) 为准，``.env`` 只在数据库没有
 对应配置时兜底。
 
@@ -162,7 +162,7 @@ class RerankSettings:
 
 
 def get_rerank_config() -> RerankSettings:
-    """重排序用哪个服务：「系统配置」的 rerank_provider + 「模型管理」的端点。
+    """重排序用哪个服务：「系统配置」的 rerank_provider + 「模型接入」的端点。
 
     数据库里没配 rerank provider（或该 provider 没有 base_url）时，仍然用
     ``.env`` 的 ``APP_RAG_RERANK_*``，保证老部署升级后行为不变。

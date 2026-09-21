@@ -1,13 +1,19 @@
-"""AI 相关路由：对话、嵌入、RAG 知识库。
+"""AI 相关路由：对话与 RAG 知识库。
 
 所有 AI 接口都接受一个可选的 ``provider`` 字段；没传时用「系统配置」里为该功能
 选的 provider（``chat_provider`` / ``rag_provider`` / ``embedding_provider``），
-只有库里什么都没配时才回退到 ``APP_LLM_DEFAULT_PROVIDER``。
+只有库里什么都没配时才回退到 ``APP_LLM_DEFAULT_PROVIDER``。其中
+``embedding_provider`` 只服务 RAG 的入库与检索（在 ``services.rag`` 里用），
+本层不再暴露对外的文本转向量接口。
 支持的取值：``openai`` / ``deepseek`` / ``qwen`` / ``ollama`` / ``mlx`` / ``mock``，
-加上在「模型管理」里新建的任意自定义 provider。
+加上在「模型接入」里新建的任意自定义 provider。
 
 本层只做「选后端 + 拼响应」：工具循环与流式清洗在 ``services.chat_tools``，
 知识库的一整链路在 ``services.rag``，录入类重活则交给 ``services.rag_queue``。
+
+鉴权口径：知识库相关接口（``/knowledge/*``，含上传路由）按 RBAC 拦截，
+查资料要 ``knowledge:read``、改内容要 ``knowledge:manage``；
+对话本体（``/chat`` 与它自己的会话）只要求后台登录态，不涉权限码。
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import deps, services
 from ..config import Provider, get_settings
 from ..db import get_db
+from ..rbac import Permission
 from ..schemas.ai import (
     ChatAppendRequest,
     ChatAppendResponse,
@@ -37,8 +44,6 @@ from ..schemas.ai import (
     ChatSessionListResponse,
     ChatSessionOut,
     ChatSessionUpdate,
-    EmbeddingRequest,
-    EmbeddingResponse,
     KnowledgeAnswerChunk,
     KnowledgeAnswerRequest,
     KnowledgeAnswerResponse,
@@ -64,6 +69,7 @@ from ..schemas.ai import (
 from ..services.llm import chat_model, default_chat_provider, get_llm, resolve_name
 from ..services.provider_store import get_provider_config, known_providers
 from ..services.rag_queue import TaskType, get_queue
+from ..services.rbac_service import Principal
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -92,7 +98,7 @@ async def list_providers() -> list[dict]:
     """把各 provider 的默认值透出去，让前端预选下拉框、并在真 provider 没配
     API Key 时能提醒用户。
 
-    内置项以 ``.env`` 为准，再合并「模型管理」里新建的自定义 provider（数据库优先）。
+    内置项以 ``.env`` 为准，再合并「模型接入」里新建的自定义 provider（数据库优先）。
 
     这里故意返一个裸 JSON 数组：信封中间件只包对象，包成 ``{"data": [...]}``
     会让客户端拿到双层嵌套，所有 ``providers.filter(...)`` 写法全坏。
@@ -300,26 +306,21 @@ async def append_chat_messages(
     return out
 
 
-@router.post("/embeddings", response_model=EmbeddingResponse)
-async def embeddings(
-    req: EmbeddingRequest,
-    _session: AsyncSession = Depends(get_db),
-) -> EmbeddingResponse:
-    """文本转向量：直接透给嵌入后端（feature=embedding 决定用哪个 provider）。"""
-    return await get_llm(req.provider, feature="embedding").embeddings(req)
-
-
 # --- RAG / 知识库 ---
 #
 # 声明顺序有要求：静态路径（``/knowledge/stats``、``/knowledge/ingest*``、
 # ``/knowledge/fetch-url``）必须排在 ``/knowledge/{knowledge_id}`` 之前，
 # 否则路径参数会把它们吞掉。
+#
+# 权限划分：列表 / 详情 / 检索 / 问答算「读」（``knowledge:read``），
+# 其余会改变库内容的（录入、编辑、重建、删除）一律算「写」（``knowledge:manage``）。
 
 
 @router.post("/knowledge/ingest", response_model=KnowledgeIngestResponse)
 async def ingest(
     req: KnowledgeIngestRequest,
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
 ) -> KnowledgeIngestResponse:
     """文档入库：生产异步入队，测试同步执行（见 ``_sync_mode``）。"""
     if _sync_mode():
@@ -356,6 +357,7 @@ async def ingest(
 async def ingest_pairs(
     req: KnowledgePairsIngestRequest,
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
 ) -> KnowledgeIngestResponse:
     """录入一批问答对（FAQ），合为一篇文档重建索引。"""
     if _sync_mode():
@@ -383,6 +385,7 @@ async def ingest_pairs(
 async def ingest_from_url(
     req: KnowledgeFetchRequest,
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
 ) -> KnowledgeFetchResponse:
     """抓取一个网页地址，抽正文后入库。"""
     if _sync_mode():
@@ -415,6 +418,7 @@ async def ingest_from_url(
 @router.get("/knowledge/stats", response_model=KnowledgeStatsResponse)
 async def knowledge_stats(
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_READ)),
 ) -> KnowledgeStatsResponse:
     """文档数 / 分块数总量，另带按 provider 的拆解（看多少文档需要重索引）。"""
     return await services.rag.knowledge_stats(session)
@@ -428,6 +432,7 @@ async def list_knowledge(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=200),
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_READ)),
 ) -> KnowledgeListResponse:
     """分页列出知识文档，支持标题/正文关键字、provider 过滤与「只看陈旧的」。"""
     return await services.rag.list_knowledge(
@@ -444,6 +449,7 @@ async def list_knowledge(
 async def batch_delete_knowledge(
     req: KnowledgeBatchDeleteRequest,
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
 ) -> KnowledgeBatchDeleteResponse:
     """批量删文档：逐条删，失败的单独回到 ``failed`` 里，不全盘回滚。"""
     deleted, failed = await services.rag.delete_knowledge_many(session, req.ids)
@@ -455,6 +461,7 @@ async def knowledge_detail(
     knowledge_id: str,
     chunk_limit: int = Query(default=200, ge=1, le=2000),
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_READ)),
 ) -> KnowledgeDetailResponse:
     """单篇文档详情 + 它的全部分块（最多 ``chunk_limit`` 块）。"""
     detail = await services.rag.get_knowledge(
@@ -470,6 +477,7 @@ async def update_knowledge(
     knowledge_id: str,
     req: KnowledgeDocUpdateRequest,
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
 ) -> KnowledgeDocItem:
     """改标题，或换正文（连带重建向量），或两者都改。
 
@@ -514,6 +522,7 @@ async def update_knowledge(
 async def reindex_knowledge(
     knowledge_id: str,
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
 ) -> KnowledgeReindexResponse:
     """用当前配置的 provider 重建向量（换嵌入模型后把旧文档拉回一致）。"""
     if _sync_mode():
@@ -548,6 +557,7 @@ async def replace_vectors(
     knowledge_id: str,
     req: KnowledgeReplaceVectorsRequest,
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
 ) -> KnowledgeReindexResponse:
     """更换向量模型后重建索引（异步）。"""
     new_provider = resolve_name(req.provider, feature="embedding")
@@ -575,6 +585,7 @@ async def replace_vectors(
 async def delete_knowledge(
     knowledge_id: str,
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
 ) -> dict[str, int]:
     """删一篇文档（连带它的分块）；id 不存在返 404。"""
     if not await services.rag.delete_knowledge(session, knowledge_id):
@@ -586,6 +597,7 @@ async def delete_knowledge(
 async def search(
     req: KnowledgeSearchRequest,
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_READ)),
 ) -> KnowledgeSearchResponse:
     """向量/混合检索：参数开关（融合、精排）都在请求体里，流程见 ``rag.search``。"""
     return await services.rag.search(session, req)
@@ -595,6 +607,7 @@ async def search(
 async def answer(
     req: KnowledgeAnswerRequest,
     session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_READ)),
 ) -> KnowledgeAnswerResponse:
     """知识库问答（同步）。
     

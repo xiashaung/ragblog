@@ -32,6 +32,26 @@ const PERMS_KEY = 'user_permissions';
 /** `*` 是后端给超级管理员的通配权限，前端同样识别 */
 const WILDCARD = '*';
 
+/**
+ * 写权限隐含同资源的读权限 —— 后端 app/rbac.py::MANAGE_IMPLIES_READ 的前端副本。
+ *
+ * 只勾「管理知识库」的角色也该能进文档列表（入库完总得看到结果），否则菜单会
+ * 把那一页藏起来、按钮判定也跟着错。改后端那张表要一起改这里。
+ */
+const IMPLIED_READ: Record<string, string> = {
+  'account:manage': 'account:read',
+  'role:manage': 'role:read',
+  'datasource:manage': 'datasource:read',
+  'system:manage': 'system:read',
+  'knowledge:manage': 'knowledge:read',
+};
+
+/** 单个码是否命中：直接持有，或由持有的某个写权限隐含带出来 */
+function holds(owned: string[], code: string): boolean {
+  if (owned.includes(code)) return true;
+  return owned.some((held) => IMPLIED_READ[held] === code);
+}
+
 export const useAuthStore = defineStore('auth', () => {
   const token = usePersistedState<string>(TOKEN_KEY, '');
   const userInfo = usePersistedState<AdminUser>(USER_KEY, {} as AdminUser);
@@ -118,14 +138,14 @@ export const useAuthStore = defineStore('auth', () => {
     const owned = permissions.value || [];
     if (owned.includes(WILDCARD)) return true;
     const need = Array.isArray(code) ? code : [code];
-    return need.every((item) => owned.includes(item));
+    return need.every((item) => holds(owned, item));
   }
 
   /** 任一命中即可（用于「读或写任一可见」的入口） */
   function hasAnyPerm(codes: string[]): boolean {
     const owned = permissions.value || [];
     if (owned.includes(WILDCARD)) return true;
-    return codes.some((item) => owned.includes(item));
+    return codes.some((item) => holds(owned, item));
   }
 
   function logout() {

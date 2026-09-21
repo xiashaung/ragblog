@@ -75,3 +75,11 @@ html[data-theme='dark'] .ant-message-notice-content {
   color: rgba(255, 255, 255, 0.85);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
+
+/* 按钮级权限（v-perm / v-perm-any）的禁用态，见 src/directives/perm.ts。
+   刻意不用 pointer-events: none —— 那样原生 title 提示就悬不出来了；
+   点击由指令在捕获阶段吞掉，cursor 用 !important 压过 antd 的 .ant-btn。 */
+.perm-disabled {
+  cursor: not-allowed !important;
+  opacity: 0.55;
+}
