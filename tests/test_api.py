@@ -67,3 +67,61 @@ async def test_item_crud(client) -> None:
 
     assert _ok(await client.get(f"/api/v1/items/{item_id}"))["price"] == 9.99
     assert (await client.delete(f"/api/v1/items/{item_id}")).status_code == 204
+
+
+async def test_envelope_middleware_streams_ndjson_and_wraps_json():
+    """中间件必须「流式逐块透传、只攒 application/json」——否则换云端模型后前端要等整个回答。
+
+    直接用一个假 downstream ASGI app 驱动中间件，数外层 ``send`` 收到几个 body 消息：
+    流式响应若被「攒齐再发」，这里就只会看到一个合并成整块的 body。
+    """
+    import json as _json
+
+    from app.main import _EnvelopeMiddleware
+
+    async def drive(content_type: bytes, chunks: list[bytes]):
+        outer: list[dict] = []
+
+        async def downstream(scope, receive, send):
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", content_type)],
+                }
+            )
+            for i, body in enumerate(chunks):
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": body,
+                        "more_body": i < len(chunks) - 1,
+                    }
+                )
+
+        mw = _EnvelopeMiddleware(downstream)
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            outer.append(message)
+
+        await mw({"type": "http"}, receive, send)
+        return outer
+
+    # 流式（NDJSON 对话）：3 块各自透传，绝不合并成一块
+    sent = await drive(b"application/x-ndjson", [b'{"a":1}\n', b'{"b":2}\n', b'{"c":3}\n'])
+    bodies = [m for m in sent if m["type"] == "http.response.body"]
+    assert len(bodies) == 3, "流式响应被中间件攒齐了——前端就看不到逐字输出"
+    assert [b["body"] for b in bodies] == [b'{"a":1}\n', b'{"b":2}\n', b'{"c":3}\n']
+
+    # application/json 对象：攒齐后包成信封，只发一块
+    sent = await drive(b"application/json", [b'{"a":1}'])
+    final = [m for m in sent if m["type"] == "http.response.body"][-1]["body"]
+    assert _json.loads(final) == {"code": 0, "data": {"a": 1}, "message": "success"}
+
+    # 裸数组不包信封（原样过），否则前端 filter 全坏
+    sent = await drive(b"application/json", [b"[1,2]"])
+    final = [m for m in sent if m["type"] == "http.response.body"][-1]["body"]
+    assert final == b"[1,2]"

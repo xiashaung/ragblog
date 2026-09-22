@@ -100,7 +100,9 @@ WEB_SYSTEM_HINT = (
     "1. 需要最新或你不确定的事实时先调用工具，不要凭记忆编造，也不要给出虚构的链接。\n"
     "2. 回答时把依据的网页以「标题 + 原始链接」列在末尾，链接只能来自工具返回结果。\n"
     "3. 工具返回失败或结果为空时，直接说明查不到，并给出你的判断，不要反复重试同一个词。\n"
-    "4. 闲聊、改写、翻译、以及基于用户所给材料的问题不需要联网，直接作答。"
+    "4. 闲聊、改写、翻译、以及基于用户所给材料的问题不需要联网，直接作答。\n"
+    "5. 一次提问最多搜索两次：先把最核心的一个实体词搜准，拿结果作答；"
+    "禁止为同一个话题换措辞连搜、或去搜与用户当前问题无关的内容。"
 )
 
 # 历史里出现过这类自我否定时，得明确纠一次：小模型会模仿自己上几轮的说法，
@@ -292,6 +294,18 @@ ROUND_LIMIT_CALLED = (
 REPEAT_STOP_HINT = (
     "已停止继续搜索：刚才换了词但结果与前面完全相同，不会又有新信息。"
     "请基于上面已有的搜索结果直接给出结论，确实查不到的部分就说明查不到。"
+)
+
+# 每次提问真正允许执行的 web_search 次数上限（预检索也算一次）。为什么需要它：
+# 结果签名只能拦住「同一批 URL」，模型换着措辞搜相关话题时每次都能命中
+# 不同结果，一路把轮数烧光——思考模式的云端模型尤其好搜（实测会连带搜出
+# 与提问无关的词条）。超预算直接不执行，比任何提示词都可靠。
+MAX_SEARCH_CALLS = 2
+
+SEARCH_BUDGET_STOP = (
+    f"本次提问的搜索次数已达上限（{MAX_SEARCH_CALLS} 次），这次搜索没有执行。"
+    "不要再尝试搜索：基于上面已有的搜索结果直接给出结论，"
+    "没查到的部分明确说“没查到”，并建议用户把问题拆小后单独再问。"
 )
 
 # 模型把函数调用当正文吐出来时的标记（Qwen / Hermes 风格）。三种情形必现：
@@ -622,11 +636,14 @@ def needs_web(query: str) -> bool:
 
 
 def first_round_choice(web_mode: str, query: str) -> str:
-    """首轮该不该先搜（``required`` 会被当成「由服务端先检索一次」的意图）。
+    """首轮该不该先搜（``required`` 只表示「由服务端先检索一次」的意图）。
 
-    注意：这个值只是**意图**。实测 omlx 一类端点会直接忽略 ``tool_choice=required``
-    （required / auto / 不传三种写法触发率一样），所以真需要搜的时候不能指望端点，
-    得靠下面的预检索自己执行。后续轮永远是 auto（否则模型拿不到搜索结果会一直要工具）。
+    注意：这个值只是**意图，不会透传给端点**（端点永远只收 auto）：
+    实测 omlx 一类端点会直接忽略 ``tool_choice=required``（required / auto /
+    不传三种写法触发率一样），而思考模式的 Qwen 兼容端点会直接 400
+    （"The tool_choice parameter does not support being set to required or
+    object in thinking mode"）。真需要搜的时候靠下面的预检索自己执行，
+    后续轮永远是 auto（否则模型拿不到搜索结果会一直要工具）。
     """
     if web_mode == "forced":
         return "required"
@@ -702,10 +719,11 @@ async def stream_with_tools(
     max_rounds = max(settings.web_search_max_rounds, 1) if enabled else 0
     total = Usage()
     round_no = 0
+    # 本次提问真正执行过的 web_search 次数（预检索也算），超预算的搜索请求不再执行
+    searches_used = 0
     # 整条流里到底出现过思考内容没有：上限轮靠它决定要不要把思考抹掉。
     # 思考逐块直发也不在这层累计（累计一份再随收尾块发一遍，非流式聚合就会数两份）
     thinking_seen = False
-    model_calls = 0  # 预检索不占模型调用，而 ``first_choice`` 只对首次模型调用有意义
     # 累计已经拿到手的真实来源：上限轮模型只吐伪标记时，这些链接就是能给用户的最后答案
     collected: list[WebSource] = []
     seen_urls: set[str] = set()
@@ -717,6 +735,7 @@ async def stream_with_tools(
         # 模型也可能干脆凭记忆开说）。所以判定该搜时我们自己搜一次，再合成一个工具
         # 回合喂进去，模型只负责基于结果作答。
         round_no = 1
+        searches_used += 1
         # 预检索不能占模型的调用额度：实跑「预检索 + 一次失败搜索 + 一次成功搜索」
         # 正好把 max_rounds=3 用光，上限轮只吐伪标记，手里握着 5 条好来源却给用户
         # 一句「没额度了」。多给一轮只多一次搜索，但能正常拿到答案。
@@ -761,7 +780,6 @@ async def stream_with_tools(
 
     while True:
         round_no += 1
-        model_calls += 1
         exhausted = enabled and round_no > max_rounds
         if exhausted:
             # 最后一轮不再声明工具，并明确要求它基于已有信息作答
@@ -783,9 +801,9 @@ async def stream_with_tools(
             max_tokens=max_tokens,
             response_format=response_format,
             tools=tools,
-            # 首轮带上「该搜」的意图（守规矩的端点会真的强制调工具）；走了预检索时
-            # 它依然是第一次模型调用，不能因为 round_no 被预检索占位就失效
-            tool_choice=first_choice if model_calls == 1 else "auto",
+            # 端点永远只收 auto：「必查」意图（first_choice==required）由上面的预检索
+            # 兑现，不往这里透传 required——思考模式端点会 400，本地端点又会忽略它
+            tool_choice="auto",
         ):
             if chunk.usage:
                 # 先记账再看 tool_calls：收尾块往往同时带着 usage 与工具调用，
@@ -860,6 +878,7 @@ async def stream_with_tools(
 
         # 模型要调工具：先把这个带 tool_calls 的助手回合原样回位，下一轮才能接上
         msgs.append(ChatMessage(role="assistant", content=None, tool_calls=calls))
+        budget_hit = False  # 本轮里有没有被「搜索预算」拦下来的调用
         for index, call in enumerate(calls):
             name = call.function.name
             arguments = call.function.arguments
@@ -872,7 +891,33 @@ async def stream_with_tools(
                     detail=_describe(name, arguments),
                 )
             )
+            if name == "web_search" and searches_used >= MAX_SEARCH_CALLS:
+                # 换词搜相关话题时结果签名拦不住，这里才是硬闸：不执行、
+                # 回一句拒接文本，并让下一轮直接变成强制作答轮
+                budget_hit = True
+                msgs.append(
+                    ChatMessage(
+                        role="tool",
+                        tool_call_id=call.id or f"call_{round_no}_{index}",
+                        name=name,
+                        content=SEARCH_BUDGET_STOP,
+                    )
+                )
+                yield ChatChunk(
+                    tool=ToolEvent(
+                        phase="result",
+                        name=name,
+                        round=round_no,
+                        ok=False,
+                        error="搜索次数已达上限",
+                        detail=_describe(name, arguments),
+                    )
+                )
+                continue
             result = await execute(name, arguments)
+            if name == "web_search":
+                # 失败也计入：不计的话，连续失败会让它无限重试烧额度
+                searches_used += 1
             content = result.content
             if name == "web_search" and result.ok and result.sources:
                 sig = _sig_of(result.sources)
@@ -903,14 +948,17 @@ async def stream_with_tools(
                 )
             )
 
-        if repeated:
+        if repeated or budget_hit:
             # 下一轮就是「上限轮」：剥掉工具并要求基于已有资料作答。
             # 不等它自己收手：实测它会一直换词搜到额度用尽，反而拿不到答案。
             # 这里只把 REPEAT_STOP_HINT 贴在搜索结果后面（离结果越近越管用），
             # 不再额外补一条 system：连续两条 system 会把下一轮的 ROUND_LIMIT_HINT 挤成噪音
             tools = None
             max_rounds = round_no
-            logger.info("检索结果重复，已停止后续搜索并强制作答")
+            logger.info(
+                "{}，已停止后续搜索并强制作答",
+                "搜索结果重复" if repeated else "搜索次数超预算",
+            )
 
 
 def _sig_of(sources: list[dict]) -> tuple[str, ...]:

@@ -32,6 +32,7 @@ from ..schemas.blog import (
     BlogCategoryUpdate,
     BlogChatChunk,
     BlogChatRequest,
+    BlogNeighborsResponse,
     BlogPostCreate,
     BlogPostDetail,
     BlogPostItem,
@@ -261,6 +262,31 @@ async def public_post_detail(
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文章不存在或未发布")
     return data
+
+
+@public_router.get("/posts/{slug}/neighbors", response_model=BlogNeighborsResponse)
+async def public_post_neighbors(
+    slug: str,
+    session: AsyncSession = Depends(get_db),
+) -> dict:
+    """上/下篇导航（按发布时间）；不计阅读数。"""
+    data = await services.blog.post_neighbors(session, slug)
+    if data is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "文章不存在或未发布")
+    return data
+
+
+@public_router.get("/posts/{slug}/related", response_model=BlogPublicListResponse)
+async def public_post_related(
+    slug: str,
+    limit: int = Query(default=5, ge=1, le=10),
+    session: AsyncSession = Depends(get_db),
+) -> dict:
+    """相关文章推荐：同分类优先、共同标签加权，只推已发布。"""
+    items = await services.blog.related_posts(session, slug, limit=limit)
+    if items is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "文章不存在或未发布")
+    return {"total": len(items), "offset": 0, "limit": limit, "items": items}
 
 
 @public_router.post("/search", response_model=BlogSearchResponse)

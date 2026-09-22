@@ -38,6 +38,17 @@ export interface ListResult<T> {
   items: T[];
 }
 
+/** 上/下篇导航项（后端只给 slug 与标题） */
+export interface NavItem {
+  slug: string;
+  title: string;
+}
+
+export interface Neighbors {
+  prev: NavItem | null;
+  next: NavItem | null;
+}
+
 export interface TagItem {
   name: string;
   count: number;
@@ -123,6 +134,10 @@ export const blogApi = {
   posts: (params: { tag?: string; category?: string; offset?: number; limit?: number } = {}) =>
     get<ListResult<PostItem>>(`${BASE}/posts`, params),
   post: (slug: string) => get<PostDetail>(`${BASE}/posts/${encodeURIComponent(slug)}`),
+  neighbors: (slug: string) =>
+    get<Neighbors>(`${BASE}/posts/${encodeURIComponent(slug)}/neighbors`),
+  related: (slug: string) =>
+    get<ListResult<PostItem>>(`${BASE}/posts/${encodeURIComponent(slug)}/related`),
   tags: () => get<{ items: TagItem[] }>(`${BASE}/tags`),
   categories: () => get<{ items: CategoryItem[] }>(`${BASE}/categories`),
   search: (query: string, topK = 5) =>

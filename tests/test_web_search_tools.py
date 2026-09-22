@@ -186,6 +186,46 @@ async def test_zero_match_results_are_dropped_and_query_narrowed(monkeypatch):
     assert [r.url for r in results] == ["https://a.example", "https://b.example"]
 
 
+async def test_interior_bigram_polyseme_noise_is_dropped(monkeypatch):
+    """问「中秋高速免费」时模型二轮会把政策名「重大节假日」当词搜，结果全涌出「重庆大学」。
+
+    实测：「重大」是「重大节假日」的内部 2-gram，又恰好是重庆大学的简称，
+    旧闸门“命中任意 2-gram 就放行”会把这些同词不同义的页面喂给模型。
+    新闸门要求“命中完整词 或 同时命中 >=2 个 2-gram”，单蹭一个碎片不再算数。
+    """
+
+    async def fake(query, count):
+        return [
+            # 只命中“重大”一个 2-gram（重大是重庆大学简称）：同词不同义的噪声，必须被丢掉
+            web_search.SearchResult(
+                title="重庆大学", url="https://cqu.edu.cn", snippet="简称重大"
+            ),
+            web_search.SearchResult(
+                title="国家重大建设项目库", url="https://ndrc.gov.cn", snippet="重大项目管理"
+            ),
+            # 真相关：命中完整词“高速免费”
+            web_search.SearchResult(
+                title="高速免费通行政策", url="https://gov.example/jiedia", snippet="节假日免费"
+            ),
+        ]
+
+    monkeypatch.setattr(web_search, "_search_bing", fake)
+    monkeypatch.setattr(web_search, "resolve_source", lambda: ("bing", ""))
+    web_search.reset_cache()
+
+    results = await web_search.search("重大节假日 高速免费")
+    assert [r.url for r in results] == ["https://gov.example/jiedia"], "只留真相关那条"
+
+
+def test_gate_terms_splits_full_terms_from_interior_bigrams():
+    """闸门拆两组串：完整词与内部 2-gram 不同对待（前者命中即放行，后者需多个共现）。"""
+    full, bigrams = web_search._gate_terms(web_search.terms_of("重大节假日 高速免费"))
+    assert full == ["重大节假日", "高速免费"]
+    assert "重大" in bigrams and "高速" in bigrams
+    # 两字短词不拆 2-gram（它本身就是完整词，无需再降粒度）
+    assert web_search._gate_terms(["北京"]) == (["北京"], [])
+
+
 def test_refine_query_handles_the_model_copying_the_whole_sentence():
     """实跑形态：模型把用户原句当关键词，既没空格也搜不到东西。
 
@@ -318,6 +358,8 @@ async def test_forced_mode_presearches_before_asking_model(monkeypatch):
     events = [c.tool for c in chunks if c.tool]
     assert events[0].detail == "预检索：讲讲北京的历史城区"
     assert events[0].phase == "call" and events[1].phase == "result"
+    # forced 也只给端点 auto：required 在思考模式端点上直接 400
+    assert all(call["tool_choice"] == "auto" for call in backend.seen)
     # 搜完的结果以工具回合的形式喂进去，模型看得到，不需要再自己请求一次
     first = backend.seen[0]["messages"]
     assert [m.role for m in first] == ["system", "user", "assistant", "tool"]
@@ -363,12 +405,19 @@ async def test_loop_stops_at_round_limit_and_forces_answer(monkeypatch):
         ]
 
     monkeypatch.setattr(web_search, "search", fake_search)
+    # 预算和轮数两道闸先撞哪道就会改写后面的计数：这条路径要测轮数闸，放飞预算
+    monkeypatch.setattr(chat_tools, "MAX_SEARCH_CALLS", 10**3)
     max_rounds = chat_tools.get_settings().web_search_max_rounds
     # 每轮都坚持要工具：模拟模型卡在「再搜一下」的循环里
     rounds = [[_tool_call_chunk(f"q{i}")] for i in range(max_rounds + 3)]
-    chunks, backend = await _collect(ScriptedBackend(rounds), web_mode="auto")
+    # 用不带时效词的问题：预检索会多占一轮并改写轮数计算，这条线要测纯轮数耗尽
+    chunks, backend = await _collect(
+        ScriptedBackend(rounds),
+        web_mode="auto",
+        messages=_msgs(("user", "讲讲北京的历史城区")),
+    )
 
-    assert len(hits) == max_rounds + 1, "上限后必须停止执行工具（+1 是预检索那次）"
+    assert len(hits) == max_rounds, "上限后必须停止执行工具"
     last = backend.seen[-1]
     assert last["tools"] is None, "最后一轮要把工具撤掉才能强制作答"
     assert chat_tools.ROUND_LIMIT_HINT in [m.content for m in last["messages"][-1:]]
@@ -405,6 +454,69 @@ async def test_duplicate_search_stops_rounds_and_forces_answer(monkeypatch):
     assert backend.seen[-1]["messages"][-1].content == chat_tools.ROUND_LIMIT_HINT
     assert backend.seen[-1]["tools"] is None
     assert "".join(c.content for c in chunks if c.content) == "晴，24 度"
+
+
+async def test_search_budget_blocks_extra_searches(monkeypatch):
+    """换词搜不同话题时结果签名拦不住（每批 URL 都不同），硬闸只能是搜索次数预算。
+
+    实跑的坑：思考模式云端模型会「北京天气」→「北京气温趋势」→「北京历史」
+    一路搜下去，每次结果都“新鲜”，轮数烧光也没给答案。
+    """
+    hits: list[str] = []
+
+    async def ever_new(query, count=None):
+        hits.append(query)
+        return [web_search.SearchResult(title="t", url=f"https://e.com/{query}", snippet="s")]
+
+    monkeypatch.setattr(web_search, "search", ever_new)
+    # 预检索占一次 + 模型首轮占一次（共 2=预算），第二轮再要搜就被拦；
+    # 拦下后下一轮就是强制作答轮（exhausted），剧本里正文要放在这一轮
+    rounds = [
+        [_tool_call_chunk("北京天气")],
+        [_tool_call_chunk("北京气温趋势")],
+        _answer("晴，24 度", 5),
+    ]
+    chunks, backend = await _collect(ScriptedBackend(rounds), web_mode="auto")
+
+    assert len(hits) == chat_tools.MAX_SEARCH_CALLS, "搜索引擎最多被打这么多次"
+    # 模型调用轮：预检索那轮不占它，预算内两次搜索各一轮，再加发现超预算的那一轮
+    assert len(backend.seen) == chat_tools.MAX_SEARCH_CALLS + 1, "预算内两轮 + 撞闸一轮"
+    last_tool = backend.seen[-1]["messages"][-2]
+    assert last_tool.role == "tool"
+    assert last_tool.content == chat_tools.SEARCH_BUDGET_STOP
+    # 被拦下的那次不只能见地告诉前端「没执行」，下一轮还要撤工具强制作答
+    blocked = [c.tool for c in chunks if c.tool and c.tool.phase == "result"][-1]
+    assert blocked.ok is False and "上限" in blocked.error
+    assert backend.seen[-1]["tools"] is None
+    assert "".join(c.content for c in chunks if c.content) == "晴，24 度"
+
+
+def _named_call(name: str, args: dict | None = None) -> ChatChunk:
+    call = _tool_call_chunk()
+    call.tool_calls[0].function.name = name
+    call.tool_calls[0].function.arguments = json.dumps(args or {}, ensure_ascii=False)
+    return call
+
+
+async def test_non_search_tools_do_not_eat_search_budget(monkeypatch):
+    """预算数的是 web_search 次数：fetch_page / 未知工具占的是轮数，不是搜索额度。"""
+    hits: list[str] = []
+
+    async def fake_search(query, count=None):
+        hits.append(query)
+        return [web_search.SearchResult(title="t", url=f"https://e.com/{query}", snippet="s")]
+
+    monkeypatch.setattr(web_search, "search", fake_search)
+    rounds = [
+        [_tool_call_chunk("北京天气")],
+        [_named_call("browse_history")],
+        [_named_call("browse_history")],
+        _answer("晴，24 度", 5),
+    ]
+    chunks, backend = await _collect(ScriptedBackend(rounds), web_mode="auto")
+
+    assert len(hits) == 2, "预检索 + 模型一次，非搜索工具不该把它顶到超预算"
+    assert len(backend.seen) == 4, "三次工具回合都正常执行，没触发预算熔断"
 
 
 async def test_tool_failure_is_reported_to_model_not_raised(monkeypatch):
@@ -480,8 +592,8 @@ async def test_non_stream_chat_also_supports_tools(client, monkeypatch):
     monkeypatch.setattr(web_search, "search", fake_search)
     backend = ScriptedBackend(
         [
-            [_tool_call_chunk("北京天气")],
-            [_tool_call_chunk("北京气温")],
+            [_tool_call_chunk("北京烤鸭的历史")],
+            [_tool_call_chunk("北京小吃分布")],
             _answer("晴，24 度", 3),
         ]
     )
@@ -489,18 +601,17 @@ async def test_non_stream_chat_also_supports_tools(client, monkeypatch):
 
     res = await client.post(
         "/api/v1/ai/chat",
-        json={"messages": [{"role": "user", "content": "今天天气"}]},
+        json={"messages": [{"role": "user", "content": "说说北京饮食"}]},
     )
     assert res.status_code == HTTPStatus.OK, res.text
     body = res.json()["data"]
     assert body["content"] == "晴，24 度"
     assert body["usage"]["total_tokens"] == 108 + 108 + 6  # 三轮模型调用累加
-    # 预检索先用原问题搜一次，所以第一条 query 链接是「今天天气」而不是「北京天气」
+    # 两次搜索各带一条新链接（问题不带时效词、不触发预检索，不占搜索预算）
     assert [s["url"] for s in body["web_sources"]] == [
         "https://w.example",
-        "https://w.example/今天天气",
-        "https://w.example/北京天气",
-        "https://w.example/北京气温",
+        "https://w.example/北京烤鸭的历史",
+        "https://w.example/北京小吃分布",
     ]
 
 
@@ -630,7 +741,8 @@ async def test_refusal_history_plus_time_sensitive_still_forces_search(monkeypat
             ("user", "苏州今天天气"),
         ),
     )
-    assert backend.seen[0]["tool_choice"] == "required"
+    # 必查意图不透传给端点：思考模式端点收 required 会 400，强制靠预检索兑现
+    assert backend.seen[0]["tool_choice"] == "auto"
     first = backend.seen[0]["messages"]
     # 更正提示注入在提问之后；预检索合成的工具回合接在它后面（越靠近当前轮越管用）
     assert [m.role for m in first] == [
@@ -717,11 +829,21 @@ async def _exhausted(monkeypatch, tail_script: list[ChatChunk]):
         ]
 
     monkeypatch.setattr(web_search, "search", fake_search)
-    max_rounds = chat_tools.get_settings().web_search_max_rounds
+    # 这两条路径的开关互斥：预算比轮数先到的话，看到的就是熔断而不是上限轮
+    monkeypatch.setattr(chat_tools, "MAX_SEARCH_CALLS", 10**3)
+    settings = chat_tools.get_settings()
+    # 默认值就是 3，显式钉住：上面把预算放飞后，撞上限的必须是轮数
+    max_rounds = 3
+    monkeypatch.setattr(settings, "web_search_max_rounds", max_rounds)
     # 预检索不占模型的调用额度（max_rounds 已在里面 +1），所以正好是 max_rounds 轮
     # “坚持要工具”之后才撞上限，那一轮才是收尾轮（tail_script）
     rounds = [[_tool_call_chunk(f"q{i}")] for i in range(max_rounds)] + [tail_script]
-    chunks, _ = await _collect(ScriptedBackend(rounds), web_mode="auto")
+    chunks, _ = await _collect(
+        ScriptedBackend(rounds),
+        web_mode="auto",
+        # 不带时效词：预检索会多占一轮并改写轮数计算，这条路径要测的是纯轮数耗尽
+        messages=_msgs(("user", "讲讲北京的历史城区")),
+    )
     return "".join(c.content for c in chunks if c.content)
 
 

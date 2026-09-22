@@ -301,3 +301,77 @@ async def test_post_category_assignment_and_public_filter(client, console):
     assert payload(resp)["category"] is None
     resp = await client.delete(f"/admin/blogs/categories/{cat['id']}", headers=h)
     assert resp.status_code == HTTPStatus.NO_CONTENT
+
+
+async def test_post_neighbors_navigation(client, console):
+    """上/下篇：按发布时间串链，两端方向给 null，乱 slug 404。"""
+    h = console["headers"]
+    slugs = []
+    for title in [("初识协程"), ("进阶 asyncio"), ("实战调优")]:
+        post = await _create_post(client, h, title=title, content=f"# {title}\n正文内容。")
+        resp = await client.post(f"/admin/blogs/{post['id']}/publish", headers=h)
+        assert resp.status_code == HTTPStatus.OK, resp.text
+        slugs.append(payload(resp)["slug"])
+
+    data = payload(await client.get(f"/api/v1/blog/posts/{slugs[1]}/neighbors"))
+    assert data["prev"] == {"slug": slugs[0], "title": "初识协程"}
+    assert data["next"] == {"slug": slugs[2], "title": "实战调优"}
+
+    oldest = payload(await client.get(f"/api/v1/blog/posts/{slugs[0]}/neighbors"))
+    assert oldest["prev"] is None and oldest["next"]["slug"] == slugs[1]
+    newest = payload(await client.get(f"/api/v1/blog/posts/{slugs[2]}/neighbors"))
+    assert newest["next"] is None and newest["prev"]["slug"] == slugs[1]
+
+    # 导航请求不计阅读数（区别于详情接口）
+    detail = payload(await client.get(f"/api/v1/blog/posts/{slugs[0]}"))
+    views = detail["view_count"]
+    await client.get(f"/api/v1/blog/posts/{slugs[0]}/neighbors")
+    after = payload(await client.get(f"/api/v1/blog/posts/{slugs[0]}"))
+    # 第二次详情本身 +1，邻居请求不再额外加
+    assert after["view_count"] == views + 1
+
+    resp = await client.get("/api/v1/blog/posts/no-such-post/neighbors")
+    assert resp.status_code == HTTPStatus.NOT_FOUND
+
+
+async def test_post_related_recommendations(client, console):
+    """相关推荐：同分类优先、共同标签加权；草稿与自身不进候选。"""
+    h = console["headers"]
+    cat = payload(
+        await client.post("/admin/blogs/categories", json={"name": "Backend"}, headers=h)
+    )
+
+    async def _publish(**body) -> dict:
+        post = await _create_post(client, h, **body)
+        resp = await client.post(f"/admin/blogs/{post['id']}/publish", headers=h)
+        assert resp.status_code == HTTPStatus.OK, resp.text
+        return payload(resp)
+
+    a = await _publish(
+        title="A 缓存", content="x", category_id=cat["id"], tags=["python", "redis"]
+    )
+    # 同分类 + 共同标签 python：得分最高
+    b = await _publish(
+        title="B 连接池", content="x", category_id=cat["id"], tags=["python"]
+    )
+    # 无分类、仅共同标签 python：其次
+    c = await _publish(title="C 语法糖", content="x", tags=["python"])
+    # 无分类无标签：不该出现在任何推荐里
+    await _publish(title="D 孤岛", content="x", tags=["go"])
+    # 草稿：即便同分类也不该被推荐
+    await _create_post(
+        client, h, title="E 草稿", category_id=cat["id"], tags=["python", "redis"]
+    )
+
+    items = payload(await client.get(f"/api/v1/blog/posts/{a['slug']}/related"))["items"]
+    assert [i["slug"] for i in items] == [b["slug"], c["slug"]]
+    # 输出走公开形状：无内部 ID，分类只留展示摘要
+    assert "id" not in items[0]
+    assert items[0]["category"] == {"name": "Backend", "slug": "backend"}
+
+    empty = payload(await client.get("/api/v1/blog/posts/" + items[-1]["slug"] + "/related"))
+    # C 与 A 共 python、与 B 共 python：仍有命中；孤岛 D 无人共
+    assert {i["slug"] for i in empty["items"]} >= {a["slug"], b["slug"]}
+
+    resp = await client.get("/api/v1/blog/posts/no-such-post/related")
+    assert resp.status_code == HTTPStatus.NOT_FOUND

@@ -185,6 +185,20 @@ class BlogPublicListResponse(BaseModel):
     items: list[BlogPublicItem] = Field(default_factory=list)
 
 
+class BlogNavItem(BaseModel):
+    """上/下篇导航项：只给 slug 与标题。"""
+
+    slug: str
+    title: str
+
+
+class BlogNeighborsResponse(BaseModel):
+    """文章页上/下篇：已到最早/最新一端时对应方向为 null。"""
+
+    prev: BlogNavItem | None = None
+    next: BlogNavItem | None = None
+
+
 class BlogTagItem(BaseModel):
     name: str
     count: int

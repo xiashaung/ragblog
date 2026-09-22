@@ -63,18 +63,21 @@ def terms_of(query: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-def _gate_terms(terms: list[str]) -> list[str]:
-    """判相关用的词：中文连写额外切 2-gram。
+def _gate_terms(terms: list[str]) -> tuple[list[str], list[str]]:
+    """拆成（完整词, 2-gram）两组判相关用的串。
 
-    整串比对会漏掉正确答案——查询「苏州天气」时「苏州-天气预报」并不包含
-    连续四字，但显然就是我们要的那条。
+    分开返而不是合成一个列表：调用方要区分「命中了用户真正说出的词」
+    与「只命中了某个长词的内部碎片」——前者可直接放行，后者单命中不算数（见 :func:`_any_match`）。
+    中文连写切 2-gram 是为了不要误杀正确答案——查询「苏州天气」时「苏州-天气预报」
+    并不连续包含四字，但显然就是我们要的那条。
     """
-    out: list[str] = []
+    full: list[str] = []
+    bigrams: list[str] = []
     for term in terms:
-        out.append(term)
+        full.append(term)
         if _CJK_RE.fullmatch(term) and len(term) > 2:
-            out.extend(term[i : i + 2] for i in range(len(term) - 1))
-    return list(dict.fromkeys(out))
+            bigrams.extend(term[i : i + 2] for i in range(len(term) - 1))
+    return list(dict.fromkeys(full)), list(dict.fromkeys(bigrams))
 
 
 def _hay(result: SearchResult) -> str:
@@ -82,12 +85,22 @@ def _hay(result: SearchResult) -> str:
     return f"{result.title} {result.snippet} {result.url}".lower()
 
 
-def _any_match(result: SearchResult, gate: list[str]) -> bool:
-    """与查询有没有任何一点相关性（一条都不沾的就是 Bing 的降级垃圾）。"""
-    if not gate:
+def _any_match(result: SearchResult, gate: tuple[list[str], list[str]]) -> bool:
+    """与查询有没有相关性：命中一个完整词，或同时命中 >=2 个不同 2-gram。
+
+    为什么不能「命中任意一个 2-gram」就放行：像「重大节假日」这种连写词，
+    它的内部 2-gram「重大」会撞上「重庆大学（简称重大）」「国家重大建设项目库」
+    这类同词不同义的结果（实测问「中秋高速免费」就是这样搜出一堆重庆大学的）。
+    真相关的页面不会只蹭到一个碎片：要么直接命中用户说出的完整词，
+    要么 2-gram 多段同时命中（如「中秋」+「高速」+「免费」）。
+    """
+    full, bigrams = gate
+    if not full and not bigrams:
         return True
     hay = _hay(result)
-    return any(term in hay for term in gate)
+    if any(term in hay for term in full):
+        return True
+    return sum(1 for bg in bigrams if bg in hay) >= 2
 
 
 def _hit_count(result: SearchResult, terms: list[str]) -> int:

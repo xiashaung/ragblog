@@ -50,15 +50,19 @@ from .services import rag_queue
 
 
 class _EnvelopeMiddleware(BaseHTTPMiddleware):
-    """把所有成功的 2xx 响应统一包成 ``{code, data, message}`` 信封。
+    """把所有成功的 2xx JSON **对象**响应统一包成 ``{code, data, message}`` 信封。
 
-    做法是在 ASGI 层把下游 body 接住再重放：2xx 且能解出 JSON **对象**时重写成
-    ``{"code": 0, "data": <原体>, "message": "success"}``；已是信封形状的不动；
-    非 JSON 体（流式对话、SPA 的 HTML）原样透传。错误响应体由 app/responses.py
-    的异常处理器自己拼好，不经过本中间件。
+    看到 ``http.response.start`` 时按 content-type 判定这条响应怎么走：
+    - ``application/json`` 的 2xx 才攒齐 body 重组信封（这类本就是单次 JSONResponse，
+      不存在流式）；已是信封形状的不动，裸数组/标量原样过（否则前端会多套一层
+      data 嵌套，``providers.filter(...)`` 这类写法全坏）；
+    - 其余（流式对话的 ``application/x-ndjson``、SPA 的 HTML、文件、非 2xx）**逐块
+      原样透传**，一块都不攒。
 
-    注意：只包对象、**不包裸数组**（如 ``GET /admin/roles``）——否则前端会拿到
-    多套一层的 data 嵌套，``providers.filter(...)`` 这类写法全坏。
+    为什么必须分流：若对流式响应也「攒齐再发」，就把流式退化成「等全部生成完再
+    一次性返回」——这正是「换了云端模型后前端仍要等整个 chat 回答、看不到逐字输出」
+    的根因（mock 瞬间返完所以此前没暴露）。错误响应体由 app/responses.py 的异常处理
+    器自己拼好，本中间件不改动它（非 2xx 直接透传）。
 
     形式上继承 ``BaseHTTPMiddleware`` 只为拿到 ``app`` 引用，真正的活全在重写的
     :meth:`__call__` 里：不走基类的 ``dispatch``，下家的 ``send`` 整个由本类接管。
@@ -69,38 +73,52 @@ class _EnvelopeMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """非 http 事件（websockets 等）直接放行；http 请求走「拦下再重放」。"""
+        """非 http 事件（websockets 等）直接放行；http 请求按响应类型分流。"""
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
+        wrap = False  # 这条响应是否要攒 body 包信封（仅 application/json 的 2xx 候选）
         status_code = 200
         headers: list[tuple[bytes, bytes]] = []
         sent_body = b""
 
         async def send_wrapped(message: dict) -> None:
-            """替下游的 ``send``：只收集状态码/响应头/响应体，先不发。"""
-            nonlocal status_code, headers, sent_body
+            """替下游的 ``send``：按 content-type 决定「攒齐包信封」还是「逐块透传」。"""
+            nonlocal wrap, status_code, headers, sent_body
 
             if message["type"] == "http.response.start":
+                ctype = b""
+                for name, value in message.get("headers", []):
+                    if name.lower() == b"content-type":
+                        ctype = value.lower()
+                        break
                 status_code = message["status"]
                 headers = list(message.get("headers", []))
-            elif message["type"] == "http.response.body":
+                wrap = 200 <= status_code < 300 and b"application/json" in ctype
+                if not wrap:
+                    # 流式/文件/HTML/错误响应：start 原样转发，后续 body 逐块透传
+                    await send(message)
+                # wrap 时先扣住 start，等 body 收齐、重算 content-length 后再发
+                return
+
+            if not wrap:
+                await send(message)  # 透传后续 body/trailers，一块都不攒
+                return
+
+            if message["type"] == "http.response.body":
                 sent_body = sent_body + (message.get("body", b"") or b"")
+                if message.get("more_body", False):
+                    return  # 还没收完（单次 JSONResponse 不会进这里）
+            else:
+                return  # http.response.trailers 之类：包信封后不保留
 
-        # 跑下家但把它的 send 换掉：只收集（单块的）响应体，之后重放自己的
-        # start + （包完信封的）body。
-        await self.app(scope, receive, send_wrapped)
-
-        raw = sent_body
-        if 200 <= status_code < 300 and sent_body:
+            raw = sent_body
             try:
                 parsed = json.loads(raw)
             except (ValueError, TypeError):
                 parsed = None
-            # 只包真正的 JSON 对象。非 JSON 体（SPA 的 index.html、纯文本、
-            # 已经是字符串的信封）必须原样过：否则 index.html 会被包成
-            # {"code":0,"data":"<!doctype html ..."}。
+            # 只包真正的 JSON 对象；裸数组与标量原样过。
             if isinstance(parsed, dict):
                 if "code" in parsed and "message" in parsed:
                     pass  # 已是信封——不动
@@ -110,15 +128,16 @@ class _EnvelopeMiddleware(BaseHTTPMiddleware):
                     parsed.model_dump(), ensure_ascii=False
                 ).encode("utf-8")
 
-        # 丢掉旧的 content-length，否则客户端会拿它去校验新响应体。
-        kept = [
-            (n, v) for n, v in headers if n.lower() not in (b"content-length",)
-        ]
+            # 丢掉旧的 content-length，否则客户端会拿它去校验新响应体。
+            kept = [
+                (n, v) for n, v in headers if n.lower() not in (b"content-length",)
+            ]
+            await send({"type": "http.response.start", "status": status_code, "headers": kept})
+            await send(
+                {"type": "http.response.body", "body": raw, "more_body": False}
+            )
 
-        await send({"type": "http.response.start", "status": status_code, "headers": kept})
-        await send(
-            {"type": "http.response.body", "body": raw, "more_body": False}
-        )
+        await self.app(scope, receive, send_wrapped)
 
 
 @asynccontextmanager

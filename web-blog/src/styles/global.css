@@ -194,6 +194,33 @@ a:hover {
   background: var(--grad);
 }
 
+/* 分类下拉入口是个 span（非 router-link），手动补上当前页高亮态 */
+.blog-nav .nav-link-dropdown {
+  cursor: pointer;
+  user-select: none;
+}
+
+.blog-nav .nav-link-dropdown.nav-link-active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.blog-nav .nav-link-dropdown.nav-link-active::after {
+  content: '';
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--grad);
+}
+
+.nav-caret {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
 .blog-main {
   flex: 1;
   width: 100%;
@@ -359,16 +386,6 @@ a:hover {
   color: var(--text-soft);
 }
 
-.cover-thumb {
-  width: 100%;
-  max-width: 220px;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
-  border-radius: 10px;
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-}
-
 /* --- 正文页容器 --- */
 .post-body {
   position: relative;
@@ -461,12 +478,39 @@ a:hover {
 }
 
 .markdown-body pre {
+  position: relative; /* 代码复制按钮的定位基准 */
   background: var(--bg-soft);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 14px 16px;
   overflow-x: auto;
   line-height: 1.55;
+}
+
+/* 代码块「复制」：由 PostPage 动态注入，hover 代码块才现身，不干扰阅读 */
+.markdown-body .copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-soft);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.markdown-body pre:hover .copy-btn {
+  opacity: 1;
+}
+
+.markdown-body .copy-btn:hover {
+  color: var(--primary);
+  border-color: var(--primary);
 }
 
 .markdown-body pre code {
@@ -504,6 +548,28 @@ a:hover {
   height: 1px;
   background: linear-gradient(90deg, transparent, var(--border), transparent);
   margin: 2em 0;
+}
+
+/* --- 回到顶部悬浮按钮（App.vue 外壳全局组件） --- */
+.back-top {
+  position: fixed;
+  right: 28px;
+  bottom: 44px;
+  z-index: 20;
+  border: 1px solid var(--border) !important;
+  box-shadow: var(--shadow-lift);
+  opacity: 0.92;
+}
+
+.fade-up-enter-active,
+.fade-up-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.fade-up-enter-from,
+.fade-up-leave-to {
+  opacity: 0;
+  transform: translateY(10px);
 }
 
 /* --- 搜索结果片段高亮 --- */
