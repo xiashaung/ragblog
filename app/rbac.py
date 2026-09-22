@@ -33,6 +33,8 @@ class Permission(StrEnum):
     SYSTEM_MANAGE = "system:manage"
     KNOWLEDGE_READ = "knowledge:read"
     KNOWLEDGE_MANAGE = "knowledge:manage"
+    BLOG_READ = "blog:read"
+    BLOG_MANAGE = "blog:manage"
 
 
 ALL_PERMISSIONS: list[str] = [p.value for p in Permission]
@@ -117,6 +119,21 @@ PERMISSION_CATALOG: list[dict[str, str]] = [
         "group": "知识库",
         "description": "录入 / 上传 / 编辑 / 重建 / 删除知识文档（都要调嵌入模型，影响问答结果）",
     },
+    {
+        "code": Permission.BLOG_READ,
+        "label": "查看博客",
+        "group": "博客",
+        "description": "浏览博客文章（含草稿）与其 AI 索引状态",
+    },
+    {
+        "code": Permission.BLOG_MANAGE,
+        "label": "管理博客",
+        "group": "博客",
+        "description": (
+            "新建 / 编辑 / 发布 / 下线 / 删除文章"
+            "（发布会同步重建知识索引，影响前台 AI 检索结果）"
+        ),
+    },
 ]
 
 SUPERADMIN_ROLE = "superadmin"
@@ -125,6 +142,7 @@ WILDCARD = "*"
 #: 迁移与 seed 共用的内置角色定义。
 #: admin 有意不含 ``role:manage``：能管账号但不能改角色，避免自我提权。
 #: 知识库（``knowledge:*``）已随日常使用面预发：admin 管内容、viewer 只读。
+#: 博客（``blog:*``）同一口径：admin 管文章、viewer 只读列表。
 #: 模型接入（``system:*``）仍然一个都不预发：``GET /system/config/providers`` 会把接入里的
 #: API Key 明文回显，在接口做好掩码前不该交给只读角色；需要的人靠超管的 ``*`` 操作，
 #: 或在角色页按需授予。
@@ -151,6 +169,8 @@ BUILTIN_ROLES: list[dict[str, object]] = [
             Permission.DATASOURCE_READ,
             Permission.KNOWLEDGE_READ,
             Permission.KNOWLEDGE_MANAGE,
+            Permission.BLOG_READ,
+            Permission.BLOG_MANAGE,
         ],
     },
     {
@@ -171,6 +191,7 @@ BUILTIN_ROLES: list[dict[str, object]] = [
             Permission.ROLE_READ,
             Permission.SESSION_READ,
             Permission.KNOWLEDGE_READ,
+            Permission.BLOG_READ,
         ],
     },
 ]
@@ -186,6 +207,7 @@ MANAGE_IMPLIES_READ: dict[str, str] = {
     Permission.DATASOURCE_MANAGE: Permission.DATASOURCE_READ,
     Permission.SYSTEM_MANAGE: Permission.SYSTEM_READ,
     Permission.KNOWLEDGE_MANAGE: Permission.KNOWLEDGE_READ,
+    Permission.BLOG_MANAGE: Permission.BLOG_READ,
 }
 
 

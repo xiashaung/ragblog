@@ -99,6 +99,38 @@ const routes: RouteRecordRaw[] = [
         ],
       },
       {
+        // 分组 slug 用 /blog-manage：公开博客前台挂在后端的 /blog/ 下，
+        // 管理台自身的页面不能占用那个前缀（否则刷新时被博客 SPA 兜底接走）
+        path: '/blog-manage',
+        component: RouteGroup,
+        redirect: '/blog-posts',
+        meta: { title: '博客', icon: 'FileMarkdownOutlined' },
+        children: [
+          {
+            path: '/blog-posts',
+            name: 'blog-posts',
+            component: () => import('@/views/blog/BlogPostsPage.vue'),
+            meta: {
+              title: '文章管理',
+              needAuth: true,
+              permissions: ['blog:read'],
+              icon: 'FormOutlined',
+            },
+          },
+          {
+            path: '/blog-categories',
+            name: 'blog-categories',
+            component: () => import('@/views/blog/BlogCategoriesPage.vue'),
+            meta: {
+              title: '分类管理',
+              needAuth: true,
+              permissions: ['blog:read'],
+              icon: 'FolderOutlined',
+            },
+          },
+        ],
+      },
+      {
         path: '/data',
         component: RouteGroup,
         redirect: '/analytics',

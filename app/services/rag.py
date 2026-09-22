@@ -853,14 +853,27 @@ async def _rerank_hits(
 
 
 async def search(
-    session: AsyncSession, payload: KnowledgeSearchRequest
+    session: AsyncSession,
+    payload: KnowledgeSearchRequest,
+    *,
+    restrict_doc_ids: Sequence[str] | None = None,
 ) -> KnowledgeSearchResponse:
     """检索主流程：问句转向量 → 召回 →（融合）→（精排）→ 拼引用。
 
     开关决定三件事：用哪条召回腿（pgvector / 内存 cosine）、要不要叠词法腿、
     要不要精排。只要下游会重排就先宽召回（recall_k），最后再裁到 top_k；
     两个开关都没开时行为与单段式完全一致。
+
+    ``restrict_doc_ids`` 把召回限定在一批文档内（博客前台用它只检已发布文章，
+    不混入其他知识文档）；传空列表直接返空结果，不发 embedding 请求。
     """
+    if restrict_doc_ids is not None and not restrict_doc_ids:
+        return KnowledgeSearchResponse(
+            query=payload.query,
+            provider=_resolved_provider(payload.provider),
+            items=[],
+        )
+
     backend = llm.get_llm(payload.provider, feature="embedding")
     provider = backend.provider
     query_emb = (
@@ -868,11 +881,10 @@ async def search(
     ).items[0].embedding
 
     # 只检同一个 provider 录入的文档：跨 provider/模型的向量不可比（维度与词表都不同）。
-    doc_ids = (
-        await session.scalars(
-            select(KnowledgeDoc.id).where(KnowledgeDoc.provider == provider.value)
-        )
-    ).all()
+    doc_stmt = select(KnowledgeDoc.id).where(KnowledgeDoc.provider == provider.value)
+    if restrict_doc_ids is not None:
+        doc_stmt = doc_stmt.where(KnowledgeDoc.id.in_(list(restrict_doc_ids)))
+    doc_ids = (await session.scalars(doc_stmt)).all()
     if not doc_ids:
         return KnowledgeSearchResponse(query=payload.query, provider=provider, items=[])
 

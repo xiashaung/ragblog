@@ -2,7 +2,8 @@
 
 分组自上而下：示例业务表（users/items）→ 知识库（docs/chunks）→
 后台账号与 RBAC（admin_users/sessions/roles）→ 外部数据源与智能问数历史 →
-AI 对话会话与消息 → 系统配置与模型接入（system_configs/provider_configs）。
+AI 对话会话与消息 → 系统配置与模型接入（system_configs/provider_configs）→
+个人博客（blog_posts）。
 
 两个统一约定：
 
@@ -322,6 +323,67 @@ class ProviderConfigRow(Base):
     updated_at: Mapped[float] = mapped_column(Float, default=_now, onupdate=_now)
 
 
+# --- 个人博客 ---
+
+
+class BlogCategory(Base):
+    """一个博客分类：文章最多归属一个（个人博客量级，不引多对多关联表）。
+
+    ``slug`` 供前台 URL 用（/category/:slug）。与 ``knowledge_id`` 同一取舍，
+    文章 → 分类也不建外键，删分类前的占用校验由服务层负责。
+    """
+
+    __tablename__ = "blog_categories"
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=lambda: _uid("bc")
+    )
+    # 展示名（唯一，方便后台下拉里认出）
+    name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    # URL 片段（唯一）；纯中文名生成不出可用 slug 时退回随机后缀
+    slug: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
+    # 前台展示顺序（小的在前），后台可改
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[float] = mapped_column(Float, default=_now)
+    updated_at: Mapped[float] = mapped_column(Float, default=_now)
+
+
+class BlogPost(Base):
+    """一篇博客文章（正文 Markdown），发布时同步进知识库做 AI 检索。
+
+    ``knowledge_id`` 指向发布时同步出的知识文档（meta.kind == "blog"）：
+    下线/删除会连带删掉它，重新发布则先删旧再重建。没外键约束（与
+    ``KnowledgeChunk`` 同一取舍），一致性全在服务层 ``services.blog`` 维护。
+    """
+
+    __tablename__ = "blog_posts"
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=lambda: _uid("bp")
+    )
+    # 前台 URL 用的短链标识（唯一）；中文标题生成不出可用 slug 时退回随机后缀
+    slug: Mapped[str] = mapped_column(String(150), unique=True, nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    # 留空时服务层从正文自动摘取（剥掉 Markdown 语法后截断）
+    summary: Mapped[str] = mapped_column(String(500), default="")
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # 封面图：``/api/v1/upload`` 落盘后的 /media URL，可空
+    cover_url: Mapped[str | None] = mapped_column(String(500), default=None)
+    # 标签名列表（不设标签表：个人博客的量级 JSON 足够）
+    tags: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
+    # 所属分类（None = 未分类）；无外键，删分类前服务层校验文章数
+    category_id: Mapped[str | None] = mapped_column(String(64), index=True, default=None)
+    # draft | published（只有已发布文章进公开接口与检索索引）
+    status: Mapped[str] = mapped_column(String(20), index=True, default="draft")
+    featured: Mapped[bool] = mapped_column(Boolean, default=False)
+    view_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 发布同步出的知识文档 ID；未发布/已下线为 None
+    knowledge_id: Mapped[str | None] = mapped_column(String(64), default=None)
+    published_at: Mapped[float | None] = mapped_column(Float, default=None)
+    created_at: Mapped[float] = mapped_column(Float, default=_now)
+    updated_at: Mapped[float] = mapped_column(Float, default=_now)
+
+
 # --- 给 Alembic autogenerate 用的便捷再导出 ---
 __all__ = [
     "UserRow",
@@ -338,4 +400,6 @@ __all__ = [
     "ChatMessageRow",
     "SystemConfigRow",
     "ProviderConfigRow",
+    "BlogCategory",
+    "BlogPost",
 ]

@@ -32,6 +32,10 @@ import {
   ThunderboltOutlined,
   DatabaseOutlined,
   SettingOutlined,
+  // 博客分组：分组封面、文章管理、分类管理
+  FileMarkdownOutlined,
+  FormOutlined,
+  FolderOutlined,
 } from '@ant-design/icons-vue';
 
 const route = useRoute();
@@ -61,6 +65,9 @@ const iconMap: Record<string, unknown> = {
   ThunderboltOutlined,
   DatabaseOutlined,
   SettingOutlined,
+  FileMarkdownOutlined,
+  FormOutlined,
+  FolderOutlined,
 };
 
 // ── 菜单与面包屑都从路由树本身推导（父级套子级），不再在布局里维护第二份分组表 ──

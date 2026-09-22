@@ -56,6 +56,7 @@
 │   ├── src/layouts/         # MainLayout.vue：菜单按权限过滤
 │   └── src/views/           # 页面：auth / _core / ai（对话）/ rag / analytics / admin（账号、角色、数据源、模型）
 ├── web/dist/                # 前端构建产物（被 FastAPI 静态托管，由 web-vben 输出）
+├── web-blog/                # 博客前台源码（Vue 3 + Vite + Ant Design Vue 4，独立 pnpm 项目；产物 dist 挂 /blog）
 ├── pyproject.toml
 ├── .env.example
 └── README.md
@@ -439,3 +440,26 @@ uvicorn app.main:app --port 8000
 
 `/api/*` 与 `/admin/*` 路由优先匹配，剩余路径回退到 `index.html`，
 支持 history 模式的客户端路由。
+
+## 个人博客前台（web-blog/）
+
+文章在后台「博客管理 → 文章管理 / 分类管理」（`blog:read` / `blog:manage`）创作；
+每篇最多归属一个分类（也可不归类），删分类前需先重新归类其下文章；
+**发布 = 同步进知识库**（`kind: "blog"` 文档，复用三段式混合检索），下线/删除会连带删掉索引。
+前台是独立的 `web-blog/` 项目（Vue 3 + Vite SPA），走公开接口 `/api/v1/blog/*`（无鉴权，只出已发布文章），
+提供首页/文章页/标签页/分类页（`/category/:slug`）与 AI 搜索页（语义检索 + 带 `[n]` 引用的多轮流式对话）。
+
+```bash
+# 开发（:5174，/api 与 /media 代理到 :8011；与后台 :5173 并行）
+uvicorn app.main:app --reload --port 8011
+cd web-blog && pnpm install && pnpm dev   # http://127.0.0.1:5174/blog/
+
+# 生产：构建后后端自动托管，无需额外配置
+pnpm build                                 # 输出 web-blog/dist/
+# 启动后端后访问 http://127.0.0.1:8000/blog/
+```
+
+> 挂载约定：`web-blog/dist` 存在时，后端在 `/blog` 提供静态资源与 SPA 回退
+> （`vite base` 与 `createWebHistory` 都是 `/blog/`，两者必须保持一致）；
+> 博客公开接口在 FastAPI 层优先于管理台 SPA 通配回退，互不影响。
+> 发布/问答依赖「系统配置」里的 embedding_provider 与 rag_provider，与知识库同一套要求。

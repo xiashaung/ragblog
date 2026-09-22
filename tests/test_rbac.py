@@ -81,23 +81,28 @@ async def test_builtin_roles_are_seeded_with_catalog_permissions(client, console
         Permission.ROLE_READ,
         Permission.SESSION_READ,
         Permission.KNOWLEDGE_READ,
+        Permission.BLOG_READ,
     }
 
     resp = await client.get("/admin/permissions", headers=console["headers"])
     assert resp.status_code == HTTPStatus.OK
     assert {item["code"] for item in _data(resp)} == set(ALL_PERMISSIONS)
 
-    # 知识库随日常使用面预发（admin 管内容、viewer 只读）；
+    # 知识库与博客随日常使用面预发（admin 管内容、viewer 只读）；
     # 模型接入的 system:* 一个都不发，因为 provider 读取接口会回显 API Key
-    assert {Permission.KNOWLEDGE_READ, Permission.KNOWLEDGE_MANAGE} <= set(
-        roles["admin"]["permissions"]
-    )
+    assert {
+        Permission.KNOWLEDGE_READ,
+        Permission.KNOWLEDGE_MANAGE,
+        Permission.BLOG_READ,
+        Permission.BLOG_MANAGE,
+    } <= set(roles["admin"]["permissions"])
     for code, item in roles.items():
         if code == SUPERADMIN_ROLE:
             continue
         assert Permission.SYSTEM_READ not in item["permissions"], code
         assert Permission.SYSTEM_MANAGE not in item["permissions"], code
     assert Permission.KNOWLEDGE_MANAGE not in roles["viewer"]["permissions"]
+    assert Permission.BLOG_MANAGE not in roles["viewer"]["permissions"]
 
 
 async def test_viewer_can_read_but_writes_are_denied(client, console, account_factory):

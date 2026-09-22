@@ -10,6 +10,11 @@ import type {
     AnalyticsQueryResult,
     AnalyticsSchema,
     AnalyticsSource,
+    BlogListResult,
+    BlogPostItem,
+    BlogPostPayload,
+    BlogCategoryItem,
+    BlogCategoryPayload,
     ChatAppendPayload,
     ChatAppendResult,
     ChatMessageListResult,
@@ -456,3 +461,38 @@ export async function streamChat(
     buffer += decoder.decode();
     feed(buffer);
 }
+
+/* ---------------- 博客（后台 /admin/blogs，权限 blog:read|blog:manage）---------------- */
+// 发布会调嵌入模型重建该文章的知识索引（与知识库同一条链路），耗时随正文长度增长，
+// 发布 / 改已发布文章的超时沿用 LLM_TIMEOUT。
+export const blogApi = {
+    list: (params?: {
+        keyword?: string;
+        status?: string;
+        tag?: string;
+        category_id?: string;
+        offset?: number;
+        limit?: number;
+    }) => adminRequest<BlogListResult>({url: '/admin/blogs', method: 'get', params}),
+    create: (data: BlogPostPayload & {title: string}) =>
+        adminRequest<BlogPostItem>({url: '/admin/blogs', method: 'post', data}),
+    // 详情含正文 Markdown（列表项不带 content）
+    detail: (id: string) => adminRequest<BlogPostItem>({url: `/admin/blogs/${id}`, method: 'get'}),
+    update: (id: string, data: BlogPostPayload) =>
+        adminRequest<BlogPostItem>({url: `/admin/blogs/${id}`, method: 'patch', data, timeout: LLM_TIMEOUT}),
+    publish: (id: string) =>
+        adminRequest<BlogPostItem>({url: `/admin/blogs/${id}/publish`, method: 'post', timeout: LLM_TIMEOUT}),
+    unpublish: (id: string) => adminRequest<BlogPostItem>({url: `/admin/blogs/${id}/unpublish`, method: 'post'}),
+    remove: (id: string) => adminRequest<void>({url: `/admin/blogs/${id}`, method: 'delete'}),
+};
+
+// 分类 CRUD：复用 blog:read / blog:manage 两个码，不新增权限；
+// 删除有占用校验（分类下还有文章时后端 400，中文原因直接透出）。
+export const blogCategoryApi = {
+    list: () => adminRequest<{ items: BlogCategoryItem[] }>({url: '/admin/blogs/categories', method: 'get'}),
+    create: (data: BlogCategoryPayload & {name: string}) =>
+        adminRequest<BlogCategoryItem>({url: '/admin/blogs/categories', method: 'post', data}),
+    update: (id: string, data: BlogCategoryPayload) =>
+        adminRequest<BlogCategoryItem>({url: `/admin/blogs/categories/${id}`, method: 'patch', data}),
+    remove: (id: string) => adminRequest<void>({url: `/admin/blogs/categories/${id}`, method: 'delete'}),
+};

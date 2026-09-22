@@ -44,6 +44,7 @@ const IMPLIED_READ: Record<string, string> = {
   'datasource:manage': 'datasource:read',
   'system:manage': 'system:read',
   'knowledge:manage': 'knowledge:read',
+  'blog:manage': 'blog:read',
 };
 
 /** 单个码是否命中：直接持有，或由持有的某个写权限隐含带出来 */

@@ -4,6 +4,7 @@
 
 - ``admin_service``  — 控制台账号 / 会话 / 角色的认证仓库
 - ``analytics``      — 数据分析（Text-to-SQL 智能问数，只读）
+- ``blog``           — 个人博客：文章 CRUD、发布同步知识库与前台 AI 检索
 - ``chat_history``   — AI 对话会话 / 消息持久化（仅本人可见）
 - ``chat_tools``     — 给对话模型挂的联网工具与「生成→工具→再生成」循环
 - ``datasource``     — 外部数据源登记 / 掩码 / 连通性测试（问数可选目标库）
@@ -29,6 +30,7 @@
 from . import (
     admin_service,
     analytics,
+    blog,
     chat_history,
     chat_tools,
     datasource,
@@ -48,6 +50,7 @@ from . import (
 __all__ = [
     "admin_service",
     "analytics",
+    "blog",
     "chat_history",
     "chat_tools",
     "datasource",

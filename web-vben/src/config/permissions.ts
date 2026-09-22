@@ -20,6 +20,8 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'system:manage': '管理模型配置',
   'knowledge:read': '查看知识库',
   'knowledge:manage': '管理知识库',
+  'blog:read': '查看博客',
+  'blog:manage': '管理博客',
 };
 
 /** 把权限码翻成「中文名（code）」，查不到名字就只给 code。 */

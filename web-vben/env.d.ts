@@ -4,15 +4,5 @@ declare module '*.vue' {
   const component: DefineComponent<{}, {}, any>;
   export default component;
 }
-
-// 路由 meta 字段（与 src/router/index.ts 里的定义保持一致）
-declare module 'vue-router' {
-  interface RouteMeta {
-    title?: string;
-    needAuth?: boolean;
-    public?: boolean;
-    icon?: string;
-    /** RBAC：进入该页所需的权限码 */
-    permissions?: string[];
-  }
-}
+// 注意：本文件是脚本（无顶层 import），只能放环境模块声明；
+// vue-router 的 RouteMeta 增强在 src/types/vue-router.d.ts（需要是模块）。

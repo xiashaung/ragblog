@@ -33,7 +33,18 @@ from .responses import (
     _validation_exception_handler,
     _value_error_handler,
 )
-from .routers import admin, ai, analytics, datasources, health, items, system_config, upload, users
+from .routers import (
+    admin,
+    ai,
+    analytics,
+    blog,
+    datasources,
+    health,
+    items,
+    system_config,
+    upload,
+    users,
+)
 from .schemas.envelope import ApiResponse
 from .services import rag_queue
 
@@ -170,6 +181,9 @@ def create_app() -> FastAPI:
         analytics.router, prefix="/api/v1/analytics", tags=["analytics"]
     )
     application.include_router(admin.router, tags=["admin"])
+    # 博客：后台管理（自带 /admin/blogs 前缀）与前台公开 API（自带 /api/v1/blog）
+    application.include_router(blog.admin_router)
+    application.include_router(blog.public_router)
     application.include_router(system_config.router, prefix="/api/v1")
     application.include_router(datasources.router)
     application.include_router(upload.router, prefix="/api/v1", tags=["upload"])
@@ -186,6 +200,39 @@ def create_app() -> FastAPI:
         StaticFiles(directory=str(media_root)),
         name="media",
     )
+
+    # --- 博客前台（web-blog/dist 挂在 /blog 下）---
+    # 独立前端项目 ``web-blog/`` 的产物（``pnpm --dir web-blog run build``，
+    # 它的 vite base 就是 /blog/）：与下面管理台 SPA 同一单进程托管思路。
+    # 注意要在管理台兜底路由 ``/{full_path:path}`` **之前**注册：
+    # FastAPI 按注册顺序匹配，具体的 /blog/... 得跑在通配前面。
+    blog_dist = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "web-blog",
+        "dist",
+    )
+    if os.path.isdir(blog_dist):
+        blog_assets = os.path.join(blog_dist, "assets")
+        if os.path.isdir(blog_assets):
+            application.mount(
+                "/blog/assets",
+                StaticFiles(directory=blog_assets),
+                name="blog-assets",
+            )
+
+        @application.get("/blog", include_in_schema=False)
+        @application.get("/blog/", include_in_schema=False)
+        async def blog_index():
+            """博客入口：/blog 与 /blog/ 都回博客自己的 index.html。"""
+            return FileResponse(os.path.join(blog_dist, "index.html"))
+
+        @application.get("/blog/{full_path:path}", include_in_schema=False)
+        async def blog_spa(full_path: str):
+            """博客 SPA 兜底：命中真实文件（favicon 等）直接给，否则回客户端路由。"""
+            candidate = os.path.join(blog_dist, full_path)
+            if full_path and os.path.isfile(candidate):
+                return FileResponse(candidate)
+            return FileResponse(os.path.join(blog_dist, "index.html"))
 
     # --- 静态前端（web/dist）---
     # dist 目录是可选的：开发时用 Vite dev server（:5173，它会把 /api 代理到本后端）；

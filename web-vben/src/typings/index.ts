@@ -378,3 +378,72 @@ export interface ChatStreamChunk {
   /** 联网检索过程；只在开了 web_mode 时出现 */
   tool?: ChatToolEvent | null;
 }
+
+/* ---------------- 博客（后台文章管理）---------------- */
+
+/** 嵌在文章里的分类摘要（后台/前台同一形状，与后端 BlogCategoryBrief 对齐） */
+export interface BlogCategoryBrief {
+  name: string;
+  slug: string;
+}
+
+/** 后台列表 / 详情共用形状（详情多 content；对应后端 BlogPostItem/Detail） */
+export interface BlogPostItem {
+  id: string;
+  slug: string;
+  title: string;
+  summary: string;
+  cover_url?: string | null;
+  tags: string[];
+  /** 归属分类：id 供表单回填，category 供列表直接展示 */
+  category_id?: string | null;
+  category?: BlogCategoryBrief | null;
+  status: 'draft' | 'published';
+  featured: boolean;
+  view_count: number;
+  /** 发布同步出的知识文档；已发布但为 null 说明索引缺失，重新发布可修复 */
+  knowledge_id?: string | null;
+  published_at?: number | null;
+  created_at: number;
+  updated_at: number;
+  content?: string;
+}
+
+/** 分页列表响应（统一信封拆包后的 data） */
+export interface BlogListResult {
+  total: number;
+  offset: number;
+  limit: number;
+  items: BlogPostItem[];
+}
+
+/** 新建 / 编辑文章的提交体（编辑走 PATCH，只带改过的字段） */
+export interface BlogPostPayload {
+  title?: string;
+  slug?: string | null;
+  summary?: string;
+  content?: string;
+  cover_url?: string | null;
+  tags?: string[];
+  // null = 移出分类；undefined = 不改（PATCH exclude_unset 语义）
+  category_id?: string | null;
+  featured?: boolean;
+}
+
+/** 分类列表项（post_count 后台算全部文章；对应后端 BlogCategoryItem） */
+export interface BlogCategoryItem {
+  id: string;
+  name: string;
+  slug: string;
+  sort_order: number;
+  post_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
+/** 新建 / 编辑分类的提交体 */
+export interface BlogCategoryPayload {
+  name?: string;
+  slug?: string | null;
+  sort_order?: number;
+}
