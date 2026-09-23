@@ -41,6 +41,12 @@ def upgrade() -> None:
     if bind.dialect.name != "postgresql":
         return
 
+    # 先把 pgvector 扩展建好，vector 类型才可用：否则下面 alter column ... type
+    # vector(<dim>) 会在新库上报 type "vector" does not exist（本地库因启动时
+    # init_models 已建过扩展而暴露不出这个顺序问题）。幂等，已存在则空转；
+    # HNSW 索引仍由末尾的 ensure_pgvector_schema 负责（它要等列变成 vector 类型后才建）。
+    op.execute("create extension if not exists vector")
+
     dim = int(get_settings().rag_vector_dim)
     op.execute(
         f"""create table if not exists {BACKUP_TABLE} (
