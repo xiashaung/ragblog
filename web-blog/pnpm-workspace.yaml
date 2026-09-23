@@ -1,3 +1,11 @@
+# pnpm 10+ 出于安全默认不执行依赖的 postinstall 构建脚本，不放行会报
+# ERR_PNPM_IGNORED_BUILDS，且 esbuild 缺平台二进制可能导致 Vite 构建失败。
+# 两个键分别对应不同 pnpm 大版本的配置格式：onlyBuiltDependencies（pnpm 10/11）、
+# allowBuilds（pnpm 12+，approve-builds 生成的就是这个键的脚手架）。双写保兼容。
+# 本项目无 vue-demi（见 pnpm-lock.yaml），只放行实际存在的两个。
+onlyBuiltDependencies:
+  - core-js
+  - esbuild
 allowBuilds:
-  core-js: set this to true or false
-  esbuild: set this to true or false
+  core-js: true
+  esbuild: true
