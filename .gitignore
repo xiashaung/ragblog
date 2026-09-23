@@ -16,3 +16,7 @@ web-vben/node_modules
 /media/
 .idea
 web-blog/node_modules
+.pnpm-store
+
+# 生产启动脚本（scripts/start.sh）的运行日志与 pid
+logs/

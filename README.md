@@ -80,6 +80,7 @@ AI 对话 / RAG 知识库 / 智能问数，后台管理面走一套 RBAC。
 ├── media/uploads/           # 上传的文件（经 /media 对外服务）
 ├── docs/                    # 文档（RAG 技术方案等）
 ├── run.py                   # 本地开发入口（uvicorn --reload :8011）
+├── scripts/                 # 部署脚本：build.sh / deploy.sh / start.sh / stop.sh
 ├── pyproject.toml           # 依赖与 ruff/mypy/pytest 配置
 ├── .env.example             # 配置模板
 └── README.md
@@ -138,6 +139,16 @@ cd .. && uvicorn app.main:app --port 8000
 匹配顺序：`/api/*`（含管理 API `/api/v1/admin/*`）与 `/media/*` 优先；`/admin/*`
 回退到控制台 `index.html`；旧 `/blog/*` 302 到新地址；其余路径回退到博客前台
 `index.html`——两个 SPA 的 history 路由刷新都不会 404。
+
+### 部署脚本（scripts/）
+
+| 脚本 | 用途 |
+| --- | --- |
+| `scripts/build.sh [all\|admin\|blog] [user@host:/repo]` | 构建两个前端；带第二参数时构建后 rsync 产物到服务器（服务器无 Node 时用） |
+| `scripts/deploy.sh` | 服务器端一键部署：git pull → 同步依赖 → 迁移（钉住 `MIGRATION_REVISION`，原因见脚本头注释）→ 重建前端 → 重启 → 健康检查 |
+| `scripts/start.sh` / `stop.sh` | 生产启停：单进程 uvicorn（勿 `--workers` 多开，RAG 队列会重复消费），pid 与日志在 `logs/` |
+
+首次部署的手动准备步骤与 `.env` 生产要点清单见 `scripts/deploy.sh` 头部注释。
 
 ## 配置
 
