@@ -1287,7 +1287,8 @@ onUnmounted(() => {
   border: 1px solid var(--app-border);
   border-radius: 8px;
   overflow: hidden;
-  background: var(--app-panel-bg, #fafafa);
+  /* 内凹一层：用 --app-bg 与 ai-card 的 panel-2 拉开明暗两级，两套主题都不再是写死的浅色 */
+  background: var(--app-bg);
 }
 .thinking-header {
   padding: 10px 12px;

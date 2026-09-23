@@ -31,6 +31,19 @@ interface ChatTurn extends ChatMessage {
   matching?: boolean;
 }
 
+/** 落本地的最小回合：只存内容/引用/命中/错误，派生态（html/streaming/matching）不进盘 */
+interface StoredTurn {
+  role: 'user' | 'assistant';
+  content: string;
+  citations?: BlogCitation[];
+  matches?: BlogCitation[];
+  error?: string;
+}
+
+// 历史存本地（单会话）：刷新或重开页面自动接上，上限 MAX_STORED_TURNS 条
+const STORAGE_KEY = 'blog_ai_chat_v1';
+const MAX_STORED_TURNS = 60;
+
 const route = useRoute();
 
 const turns = ref<ChatTurn[]>([]);
@@ -69,6 +82,57 @@ function pct(score: number, list: BlogCitation[]): string {
   return `${Math.max(1, Math.round((score / max) * 100))}%`;
 }
 
+/** 把当前对话写入 localStorage；只留有效回合，配额满/隐私模式静默忽略 */
+function persist(): void {
+  try {
+    const slim: StoredTurn[] = turns.value
+      .filter((t) => t.content.trim() || t.error || t.matches?.length)
+      .slice(-MAX_STORED_TURNS)
+      .map(({ role, content, citations, matches, error }) => ({
+        role,
+        content,
+        ...(citations?.length ? { citations } : {}),
+        ...(matches?.length ? { matches } : {}),
+        ...(error ? { error } : {}),
+      }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(slim));
+  } catch {
+    /* 忽略：写失败不影响对话进行 */
+  }
+}
+
+/** 从 localStorage 恢复历史；助手回合按正文重新渲染 markdown，坏数据直接清掉重来 */
+function restoreHistory(): void {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return;
+  }
+  if (!raw) return;
+  try {
+    const list = JSON.parse(raw) as StoredTurn[];
+    if (!Array.isArray(list)) return;
+    turns.value = list.map((t) => {
+      const turn: ChatTurn = { role: t.role, content: t.content };
+      if (t.citations?.length) turn.citations = t.citations;
+      if (t.matches?.length) turn.matches = t.matches;
+      if (t.error) turn.error = t.error;
+      if (t.role === 'assistant' && t.content) {
+        turn.html = linkifyCitations(renderMarkdown(t.content));
+      }
+      return turn;
+    });
+    if (turns.value.length) scrollChat();
+  } catch {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      /* 忽略 */
+    }
+  }
+}
+
 async function sendChat(preset?: string): Promise<void> {
   const text = (preset ?? input.value).trim();
   if (!text || chatBusy.value) return;
@@ -95,6 +159,7 @@ async function sendChat(preset?: string): Promise<void> {
     .finally(() => {
       userTurn.matching = false;
       scrollChat();
+      persist();
     });
 
   chatBusy.value = true;
@@ -125,15 +190,24 @@ async function sendChat(preset?: string): Promise<void> {
     chatBusy.value = false;
     aborter = null;
     scrollChat();
+    persist();
   }
 }
 
 function resetChat(): void {
   aborter?.abort();
   turns.value = [];
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /* 忽略：清不掉也不影响本页重置 */
+  }
 }
 
 onBeforeUnmount(() => aborter?.abort());
+
+// 先恢复本地历史，再处理 ?q= 自动提问（带词进来时是接在历史后续问）
+restoreHistory();
 
 // ?q= 进入（比如从别处带关键词跳来）自动提出这个问题
 const initialQuery = typeof route.query.q === 'string' ? route.query.q : '';
@@ -144,7 +218,7 @@ if (initialQuery.trim()) sendChat(initialQuery);
   <div class="blog-card chat-card">
     <div class="chat-head">
       <h2 class="chat-title"><RobotOutlined /> AI 对话搜索</h2>
-      <span class="chat-sub">基于博客内容回答 · 自动附上命中文章与引用来源</span>
+      <span class="chat-sub">基于博客内容回答 · 自动附上命中文章与引用 · 历史保存在本地</span>
       <a-button v-if="turns.length" type="text" size="small" class="clear-btn" @click="resetChat">
         <template #icon><ClearOutlined /></template>
         清空

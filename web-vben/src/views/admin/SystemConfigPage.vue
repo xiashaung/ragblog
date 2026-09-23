@@ -268,7 +268,7 @@ onMounted(() => {
   }
 
   .config-item {
-    background: var(--app-panel-bg, #fafafa);
+    background: var(--app-panel-2);
     border: 1px solid var(--app-border);
     border-radius: 8px;
     padding: 16px;

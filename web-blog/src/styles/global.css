@@ -27,6 +27,12 @@
   --card-glass: none;
   --shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06);
   --shadow-lift: 0 4px 12px rgba(37, 99, 235, 0.08), 0 16px 40px rgba(37, 99, 235, 0.12);
+  /* 内容栏宽度单点管理：顶栏 / 主体 / 页脚同一取值，加宽即整站一起松绑 */
+  --content-w: 1180px;
+  /* 顶栏高度单点管理：首页动态背景据此下移，不涂到半透明吸顶栏背后 */
+  --header-h: 64px;
+  /* 首页动态背景光斑透明度：亮色下压得更低，避免大色块抢正文 */
+  --fx-orb-opacity: 0.28;
 }
 
 html[data-theme='dark'] {
@@ -48,6 +54,8 @@ html[data-theme='dark'] {
   --card-glass: blur(14px);
   --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 8px 32px rgba(0, 0, 0, 0.45);
   --shadow-lift: 0 2px 0 rgba(255, 255, 255, 0.05) inset, 0 16px 48px rgba(34, 211, 238, 0.1);
+  /* 暗色下光斑可更亮，深空底上更有纵深感 */
+  --fx-orb-opacity: 0.55;
 }
 
 * {
@@ -88,6 +96,8 @@ a:hover {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
+  /* 顶栏改为 fixed 脱离文档流后，用它把主体顶下去，避免首屏内容被吸顶栏盖住 */
+  padding-top: calc(var(--header-h) + 1px);
 }
 
 .blog-shell::before {
@@ -107,8 +117,12 @@ a:hover {
 }
 
 .blog-header {
-  position: sticky;
+  /* 用 fixed 而非 sticky：sticky 在本地环境不生效（滚动时被顶走），fixed 更确定；
+     下面 .blog-shell 的 padding-top 已为其占位 */
+  position: fixed;
   top: 0;
+  left: 0;
+  right: 0;
   z-index: 10;
   background: var(--header-bg);
   backdrop-filter: blur(14px);
@@ -117,10 +131,10 @@ a:hover {
 }
 
 .blog-header-inner {
-  max-width: 1080px;
+  max-width: var(--content-w);
   margin: 0 auto;
-  padding: 0 20px;
-  height: 60px;
+  padding: 0 24px;
+  height: var(--header-h);
   display: flex;
   align-items: center;
   gap: 24px;
@@ -224,9 +238,9 @@ a:hover {
 .blog-main {
   flex: 1;
   width: 100%;
-  max-width: 1080px;
+  max-width: var(--content-w);
   margin: 0 auto;
-  padding: 28px 20px 56px;
+  padding: 40px 24px 80px;
 }
 
 .blog-footer {
@@ -253,9 +267,9 @@ a:hover {
 
 /* 上段：品牌 + 快捷导航 */
 .blog-footer-inner {
-  max-width: 1080px;
+  max-width: var(--content-w);
   margin: 0 auto;
-  padding: 26px 20px 18px;
+  padding: 30px 24px 18px;
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
@@ -293,9 +307,9 @@ a:hover {
 
 /* 下段：版权 / 备案 */
 .footer-bottom {
-  max-width: 1080px;
+  max-width: var(--content-w);
   margin: 0 auto;
-  padding: 12px 20px 20px;
+  padding: 12px 24px 20px;
   border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   display: flex;
   justify-content: space-between;

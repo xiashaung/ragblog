@@ -21,6 +21,7 @@ const html = computed(() => renderRichText(props.text));
   word-break: break-word;
   font-size: 14px;
   line-height: 1.7;
+  color: var(--app-fg);
 }
 .rich-text :deep(.rich-p) { margin: 0 0 8px; }
 .rich-text :deep(.rich-p:last-child) { margin-bottom: 0; }
@@ -51,7 +52,7 @@ const html = computed(() => renderRichText(props.text));
   border: 1px solid var(--app-border);
 }
 .rich-text :deep(.rich-link) {
-  color: #2563eb;
+  color: var(--app-link);
   text-decoration: none;
   word-break: break-all;
 }

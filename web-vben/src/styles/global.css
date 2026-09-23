@@ -17,6 +17,7 @@
   --app-muted: #6b7280;
   --app-border: #eef0f2;
   --app-hover: #f0f5ff;
+  --app-link: #2563eb;
 
   /* 侧边栏（菜单）：不跟随主题时会变成白底黑菜单或深底白菜单错乱，单独一组变量 */
   --app-sider-bg: #fff;
@@ -38,6 +39,7 @@ html[data-theme='dark'] {
   --app-muted: rgba(255, 255, 255, 0.55);
   --app-border: #303030;
   --app-hover: rgba(22, 119, 255, 0.16);
+  --app-link: #58a6ff;
 
   --app-sider-bg: #1f1f1f;
   --app-sider-fg: rgba(255, 255, 255, 0.65);

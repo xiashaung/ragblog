@@ -1,13 +1,14 @@
 <script setup lang="ts">
 // 首页、标签页与分类页共用：顶部横向 Hero（左站点主张 + 右 AI 搜索入口），下方封面卡片网格。
-// 分类导航已上收到顶栏下拉；标签作为横向浏览入口收在网格底部。
+// 分类与标签导航都已上收到顶栏下拉；页面底层铺一层动态背景（漂移光斑 + 星座粒子）。
 // 路由 /、/tag/:tag、/category/:slug 都指向本组件，参数变化时重新拉列表。
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import dayjs from 'dayjs';
 import { FileTextOutlined, EyeOutlined, RobotOutlined, SearchOutlined, StarFilled } from '@ant-design/icons-vue';
-import { blogApi, type PostItem, type TagItem } from '@/api';
+import { blogApi, type PostItem } from '@/api';
 import { categories, loadCategories } from '@/stores/categories';
+import { tags, loadTags } from '@/stores/tags';
 
 const PAGE_SIZE = 10;
 
@@ -17,11 +18,155 @@ const router = useRouter();
 const posts = ref<PostItem[]>([]);
 const total = ref(0);
 const offset = ref(0);
-const tags = ref<TagItem[]>([]);
 const loading = ref(false);
 const error = ref('');
 // Hero 右侧搜索框的关键词：回车/点按钮跳 /search，带 ?q= 让 AI 对话页自动提问
 const heroQuery = ref('');
+
+// --- 首页动态背景：漂移光斑（CSS）+ 画布「星座」粒子（JS，随鼠标连线）---
+// 只在 HomePage 挂载期间运行；颜色从 CSS 变量读，切明暗时自动跟随；尊重 prefers-reduced-motion。
+const fxCanvas = ref<HTMLCanvasElement | null>(null);
+let fxRaf = 0;
+let fxThemeObserver: MutationObserver | null = null;
+let fxCleanup: (() => void) | null = null;
+
+function initFx(): void {
+  const canvas = fxCanvas.value;
+  const ctx = canvas?.getContext('2d');
+  if (!canvas || !ctx) return;
+  // 取非空别名供内层闭包使用：TS 不在嵌套函数里保留上方控制流的 narrow
+  const el = canvas;
+  const g = ctx;
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let w = 0;
+  let h = 0;
+  let rgb = { r: 56, g: 189, b: 248 };
+  const mouse = { x: -9999, y: -9999 };
+  let parts: { x: number; y: number; vx: number; vy: number }[] = [];
+
+  // 从 --primary 读主题色（十六进制），MutationObserver 监听 data-theme 变化重读
+  function readColor(): void {
+    const s = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim();
+    const m = /^#?([0-9a-f]{6})$/i.exec(s);
+    if (m) {
+      const n = parseInt(m[1], 16);
+      rgb = { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+    }
+  }
+
+  function resize(): void {
+    w = el.clientWidth;
+    h = el.clientHeight;
+    el.width = Math.floor(w * dpr);
+    el.height = Math.floor(h * dpr);
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // 粒子数随视口面积缩放，上限兼顾观感与开销
+    const n = Math.max(28, Math.min(80, Math.round((w * h) / 18000)));
+    parts = Array.from({ length: n }, () => ({
+      x: Math.random() * w,
+      y: Math.random() * h,
+      vx: (Math.random() - 0.5) * 0.35,
+      vy: (Math.random() - 0.5) * 0.35,
+    }));
+  }
+
+  function drawStatic(): void {
+    g.clearRect(0, 0, w, h);
+    for (const p of parts) {
+      g.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},0.65)`;
+      g.beginPath();
+      g.arc(p.x, p.y, 1.6, 0, Math.PI * 2);
+      g.fill();
+    }
+  }
+
+  function frame(): void {
+    g.clearRect(0, 0, w, h);
+    const LINK = 130;
+    const MOUSE = 170;
+    for (const p of parts) {
+      p.x += p.vx;
+      p.y += p.vy;
+      if (p.x < 0 || p.x > w) p.vx *= -1;
+      if (p.y < 0 || p.y > h) p.vy *= -1;
+    }
+    for (let i = 0; i < parts.length; i++) {
+      const a = parts[i];
+      for (let j = i + 1; j < parts.length; j++) {
+        const b = parts[j];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (d < LINK) {
+          g.strokeStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},${(1 - d / LINK) * 0.22})`;
+          g.lineWidth = 1;
+          g.beginPath();
+          g.moveTo(a.x, a.y);
+          g.lineTo(b.x, b.y);
+          g.stroke();
+        }
+      }
+      const md = Math.hypot(a.x - mouse.x, a.y - mouse.y);
+      if (md < MOUSE) {
+        g.strokeStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},${(1 - md / MOUSE) * 0.45})`;
+        g.lineWidth = 1;
+        g.beginPath();
+        g.moveTo(a.x, a.y);
+        g.lineTo(mouse.x, mouse.y);
+        g.stroke();
+      }
+    }
+    for (const p of parts) {
+      g.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},0.85)`;
+      g.beginPath();
+      g.arc(p.x, p.y, 1.6, 0, Math.PI * 2);
+      g.fill();
+    }
+    fxRaf = requestAnimationFrame(frame);
+  }
+
+  const onMove = (e: MouseEvent): void => {
+    const rect = el.getBoundingClientRect();
+    mouse.x = e.clientX - rect.left;
+    mouse.y = e.clientY - rect.top;
+  };
+  const onLeave = (): void => {
+    mouse.x = -9999;
+    mouse.y = -9999;
+  };
+  const onResize = (): void => {
+    resize();
+    if (reduce) drawStatic();
+  };
+
+  readColor();
+  resize();
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseout', onLeave);
+  window.addEventListener('resize', onResize);
+  fxThemeObserver = new MutationObserver(readColor);
+  fxThemeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  });
+
+  if (reduce) drawStatic();
+  else fxRaf = requestAnimationFrame(frame);
+
+  fxCleanup = () => {
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseout', onLeave);
+    window.removeEventListener('resize', onResize);
+  };
+}
+
+function stopFx(): void {
+  if (fxRaf) cancelAnimationFrame(fxRaf);
+  fxRaf = 0;
+  if (fxThemeObserver) fxThemeObserver.disconnect();
+  fxThemeObserver = null;
+  if (fxCleanup) fxCleanup();
+  fxCleanup = null;
+}
 
 /** 当前生效的标签筛选（/tag/:tag 或无筛选） */
 function currentTag(): string | undefined {
@@ -62,15 +207,10 @@ async function loadPosts(): Promise<void> {
   }
 }
 
-async function loadSide(): Promise<void> {
-  // 分类走共享 store（顶栏已拉取）；这里只补标签，失败不阻塞正文
+function loadSide(): void {
+  // 分类与标签都走共享 store（顶栏已拉取，这里只保证 Hero 统计有数），失败不阻塞正文
   loadCategories();
-  try {
-    const t = await blogApi.tags();
-    tags.value = t.items;
-  } catch {
-    /* 侧栏失败不阻塞正文 */
-  }
+  loadTags();
 }
 
 function goPost(slug: string): void {
@@ -112,11 +252,22 @@ watch(() => route.fullPath, () => {
 onMounted(() => {
   loadPosts();
   loadSide();
+  initFx();
 });
+
+onBeforeUnmount(stopFx);
 </script>
 
 <template>
   <div class="home">
+    <!-- 动态背景：漂移渐变光斑 + 画布「星座」粒子（随鼠标连线），铺满视口且在内容之下 -->
+    <div class="fx-backdrop" aria-hidden="true">
+      <span class="fx-orb fx-orb--a"></span>
+      <span class="fx-orb fx-orb--b"></span>
+      <span class="fx-orb fx-orb--c"></span>
+      <canvas ref="fxCanvas" class="fx-canvas"></canvas>
+    </div>
+
     <!-- Hero：横向信息区 —— 左侧站点主张与统计，右侧 AI 搜索入口 -->
     <section v-if="route.name === 'home'" class="hero">
       <div class="hero-text">
@@ -163,9 +314,15 @@ onMounted(() => {
       <a-button type="link" size="small" @click="clearFilter">清除筛选</a-button>
     </div>
 
+    <!-- 区块标题：首页才有的「最新文章」导引行，让网格不再突然开始 -->
+    <div v-if="route.name === 'home' && !filterBanner" class="grid-head">
+      <h2 class="grid-head-title">最新文章</h2>
+      <span class="grid-head-sub">共 {{ total }} 篇 · 支持 AI 语义检索</span>
+    </div>
+
     <a-spin :spinning="loading">
       <!-- 封面卡片网格：一行 lg 3 / sm 2 / xs 1，封面置顶、正文在下 -->
-      <a-row :gutter="[20, 20]">
+      <a-row :gutter="[24, 24]">
         <a-col v-for="post in posts" :key="post.slug" :xs="24" :sm="12" :lg="8">
           <article class="blog-card post-grid-card" @click="goPost(post.slug)">
             <div class="grid-cover">
@@ -210,37 +367,121 @@ onMounted(() => {
         />
       </div>
     </a-spin>
-
-    <!-- 标签云：分类已上收顶栏，标签作为横向浏览入口收在网格底部 -->
-    <section v-if="route.name === 'home'" class="tag-section">
-      <h3 class="side-title">按标签浏览</h3>
-      <div class="tag-cloud">
-        <a-tag
-          v-for="t in tags"
-          :key="t.name"
-          :color="t.name === currentTag() ? 'blue' : undefined"
-          class="cloud-tag"
-          @click="goTag(t.name)"
-        >
-          {{ t.name }} <span class="tag-count">{{ t.count }}</span>
-        </a-tag>
-        <span v-if="!tags.length" class="side-empty">暂无标签</span>
-      </div>
-    </section>
   </div>
 </template>
 
 <style scoped>
 /* --- Hero：横向信息区，左文右搜索面板 --- */
 .home {
+  position: relative;
   min-height: 240px;
+}
+
+/* 动态背景层：fixed 铺满顶栏以下的视口（top 避开半透明吸顶栏）；
+   再用顶部遮罩把最上一段渐隐掉，避免光斑/粒子“贴”在顶栏下沿随鼠标动，像顶栏在跟着下来 */
+.fx-backdrop {
+  position: fixed;
+  top: var(--header-h);
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 140px);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 140px);
+}
+
+.home > :not(.fx-backdrop) {
+  position: relative;
+  z-index: 1;
+}
+
+.fx-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.fx-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(64px);
+  opacity: var(--fx-orb-opacity, 0.4);
+  will-change: transform;
+}
+
+.fx-orb--a {
+  width: 46vw;
+  height: 46vw;
+  top: -14vw;
+  left: -10vw;
+  background: radial-gradient(circle at 50% 50%, var(--accent), transparent 70%);
+  animation: fx-drift-a 20s ease-in-out infinite;
+}
+
+.fx-orb--b {
+  width: 42vw;
+  height: 42vw;
+  top: -8vw;
+  right: -8vw;
+  background: radial-gradient(circle at 50% 50%, var(--violet), transparent 70%);
+  animation: fx-drift-b 26s ease-in-out infinite;
+}
+
+.fx-orb--c {
+  width: 36vw;
+  height: 36vw;
+  bottom: -12vw;
+  left: 32vw;
+  background: radial-gradient(circle at 50% 50%, var(--primary), transparent 70%);
+  animation: fx-drift-c 30s ease-in-out infinite;
+}
+
+@keyframes fx-drift-a {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(7vw, 6vh) scale(1.18);
+  }
+}
+
+@keyframes fx-drift-b {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(-6vw, 8vh) scale(1.12);
+  }
+}
+
+@keyframes fx-drift-c {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(5vw, -7vh) scale(1.22);
+  }
+}
+
+/* 尊重系统「减弱动态效果」：光斑静止，画布侧在 initFx 里只画静态点 */
+@media (prefers-reduced-motion: reduce) {
+  .fx-orb {
+    animation: none !important;
+  }
 }
 
 .hero {
   display: flex;
   align-items: stretch;
-  gap: 28px;
-  padding: 30px 0 10px;
+  gap: 40px;
+  padding: 48px 0 24px;
 }
 
 .hero-text {
@@ -251,18 +492,18 @@ onMounted(() => {
 .hero-kicker {
   margin: 0;
   font-family: 'SF Mono', Menlo, Consolas, monospace;
-  font-size: 12px;
-  letter-spacing: 3px;
+  font-size: 12.5px;
+  letter-spacing: 4px;
   color: var(--primary);
   opacity: 0.9;
 }
 
 .hero-title {
-  margin: 12px 0 10px;
-  font-size: clamp(26px, 4vw, 40px);
+  margin: 16px 0 14px;
+  font-size: clamp(32px, 5.2vw, 54px);
   font-weight: 800;
-  letter-spacing: 1px;
-  line-height: 1.25;
+  letter-spacing: 0.5px;
+  line-height: 1.18;
   background: var(--grad);
   -webkit-background-clip: text;
   background-clip: text;
@@ -271,35 +512,35 @@ onMounted(() => {
 
 .hero-desc {
   margin: 0;
-  max-width: 520px;
+  max-width: 560px;
   color: var(--text-soft);
-  font-size: 15px;
-  line-height: 1.7;
+  font-size: 16px;
+  line-height: 1.75;
 }
 
 .hero-stats {
   display: flex;
-  gap: 14px;
-  margin-top: 22px;
+  gap: 16px;
+  margin-top: 30px;
 }
 
 .hero-stat {
-  min-width: 92px;
-  padding: 12px 18px;
+  min-width: 104px;
+  padding: 14px 20px;
   background: var(--bg-card);
   backdrop-filter: var(--card-glass);
   -webkit-backdrop-filter: var(--card-glass);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 14px;
   box-shadow: var(--shadow);
 }
 
 .hero-num {
   display: block;
   font-family: 'SF Mono', Menlo, Consolas, monospace;
-  font-size: 24px;
+  font-size: 30px;
   font-weight: 700;
-  line-height: 1.2;
+  line-height: 1.15;
   background: var(--grad);
   -webkit-background-clip: text;
   background-clip: text;
@@ -307,23 +548,24 @@ onMounted(() => {
 }
 
 .hero-label {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--text-soft);
 }
 
 /* Hero 右侧：AI 搜索入口面板 */
 .hero-search {
-  width: 340px;
+  width: 360px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 22px;
+  justify-content: center;
+  gap: 14px;
+  padding: 28px;
   background: var(--bg-card);
   backdrop-filter: var(--card-glass);
   -webkit-backdrop-filter: var(--card-glass);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 20px;
   box-shadow: var(--shadow);
 }
 
@@ -348,6 +590,39 @@ onMounted(() => {
 
 .list-alert {
   margin-bottom: 16px;
+}
+
+/* --- 区块导引行：让文章网格有一个明确的起点 --- */
+.grid-head {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin: 20px 0 22px;
+}
+
+.grid-head-title {
+  position: relative;
+  margin: 0;
+  padding-left: 16px;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+}
+
+.grid-head-title::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.14em;
+  bottom: 0.14em;
+  width: 5px;
+  border-radius: 5px;
+  background: var(--grad);
+}
+
+.grid-head-sub {
+  color: var(--text-soft);
+  font-size: 13.5px;
 }
 
 .tag-banner {
@@ -479,38 +754,6 @@ onMounted(() => {
   margin-top: 28px;
   display: flex;
   justify-content: center;
-}
-
-/* --- 标签云：网格下方的横向浏览区 --- */
-.tag-section {
-  margin-top: 40px;
-  padding-top: 24px;
-  border-top: 1px solid var(--border);
-}
-
-.side-title {
-  margin: 0 0 14px;
-  font-size: 16px;
-}
-
-.tag-cloud {
-  display: flex;
-  flex-wrap: wrap;
-}
-
-.cloud-tag {
-  cursor: pointer;
-  margin-bottom: 8px;
-}
-
-.tag-count {
-  color: var(--text-soft);
-  font-size: 12px;
-}
-
-.side-empty {
-  color: var(--text-soft);
-  font-size: 13px;
 }
 
 @media (max-width: 860px) {

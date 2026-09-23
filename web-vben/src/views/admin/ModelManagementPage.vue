@@ -314,7 +314,7 @@ onMounted(() => {
 <style scoped>
 .model-management-page {
   :deep(.ant-table-thead > tr > th) {
-    background: var(--app-panel-bg, #fafafa);
+    background: var(--app-panel-2);
   }
 }
 </style>

@@ -13,10 +13,12 @@ import {
   CaretDownOutlined,
   HomeOutlined,
   RobotOutlined,
+  TagOutlined,
   VerticalAlignTopOutlined,
 } from '@ant-design/icons-vue';
 import { isDark, toggleTheme } from './composables/useTheme';
 import { categories, loadCategories } from './stores/categories';
+import { tags, loadTags } from './stores/tags';
 
 const route = useRoute();
 const router = useRouter();
@@ -48,6 +50,11 @@ const activeCategorySlug = computed(() =>
   route.name === 'category' && typeof route.params.slug === 'string' ? route.params.slug : '',
 );
 
+// 当前正被顶栏「标签」下拉选中的标签名（高亮下拉入口用）
+const activeTagName = computed(() =>
+  route.name === 'tag' && typeof route.params.tag === 'string' ? route.params.tag : '',
+);
+
 // 分类下拉：走 #overlay + a-menu 的写法（与 ThemeToggle/MainLayout 一致）；
 // antd-vue 的 Dropdown 对 :menu prop 对象里的 onClick 支持不可靠，点了不触发跳转
 function goCategory(slug: string): void {
@@ -56,6 +63,15 @@ function goCategory(slug: string): void {
 
 function onCatMenuClick({ key }: { key: string | number }): void {
   goCategory(String(key));
+}
+
+// 标签下拉：与分类同一套写法，key 即标签名，跳 /tag/:tag
+function goTag(tag: string): void {
+  router.push({ name: 'tag', params: { tag } });
+}
+
+function onTagMenuClick({ key }: { key: string | number }): void {
+  goTag(String(key));
 }
 
 function onWindowScroll(): void {
@@ -69,6 +85,7 @@ function backToTop(): void {
 onMounted(() => {
   window.addEventListener('scroll', onWindowScroll, { passive: true });
   loadCategories();
+  loadTags();
 });
 onBeforeUnmount(() => window.removeEventListener('scroll', onWindowScroll));
 </script>
@@ -98,6 +115,25 @@ onBeforeUnmount(() => window.removeEventListener('scroll', onWindowScroll));
                 >
                   <a-menu-item v-for="c in categories" :key="c.slug">
                     {{ c.name }}（{{ c.post_count }}）
+                  </a-menu-item>
+                </a-menu>
+              </template>
+            </a-dropdown>
+            <!-- 标签下拉：与分类同样收进顶栏，key 为标签名 -->
+            <a-dropdown :trigger="['hover']" placement="bottomLeft">
+              <span
+                class="nav-link nav-link-dropdown"
+                :class="{ 'nav-link-active': activeTagName }"
+              >
+                <TagOutlined /> 标签 <CaretDownOutlined class="nav-caret" />
+              </span>
+              <template #overlay>
+                <a-menu
+                  :selected-keys="activeTagName ? [activeTagName] : []"
+                  @click="onTagMenuClick"
+                >
+                  <a-menu-item v-for="t in tags" :key="t.name">
+                    {{ t.name }}（{{ t.count }}）
                   </a-menu-item>
                 </a-menu>
               </template>
