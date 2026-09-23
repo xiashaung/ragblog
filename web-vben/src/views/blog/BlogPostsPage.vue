@@ -54,14 +54,16 @@ async function loadCategories() {
   }
 }
 
+// 窄屏（笔记本）兜底：固定列写明宽度 + scroll.x（否则「标题」列被挤到只剩几个字宽），
+// 次要看板列（阅读 / 更新时间）在 lg 以下隐藏，操作列钉右。
 const columns = [
-  { title: '标题', key: 'title' },
-  { title: 'slug', key: 'slug', width: 200 },
-  { title: '分类', key: 'category', width: 120 },
-  { title: '状态', key: 'status', width: 110 },
-  { title: '阅读', key: 'views', width: 80 },
-  { title: '更新时间', key: 'updated_at', width: 170 },
-  { title: '操作', key: 'actions', width: 300 },
+  { title: '标题', key: 'title', width: 280 },
+  { title: 'slug', key: 'slug', width: 200, ellipsis: true },
+  { title: '分类', key: 'category', width: 110 },
+  { title: '状态', key: 'status', width: 100 },
+  { title: '阅读', key: 'views', width: 70, responsive: ['lg'] as const },
+  { title: '更新时间', key: 'updated_at', width: 150, responsive: ['xl'] as const },
+  { title: '操作', key: 'actions', width: 300, fixed: 'right' as const },
 ];
 
 function fmt(ts?: number | null) {
@@ -228,9 +230,9 @@ async function onRemove(row: BlogPostItem) {
   }
 }
 
-/** 前台预览：博客 SPA 挂在 /blog 下（构建产物存在时才可访问） */
+/** 前台预览：博客前台挂在站点根路径 /，新标签页打开对应文章 */
 function onPreview(row: BlogPostItem) {
-  window.open(`/blog/post/${row.slug}`, '_blank');
+  window.open(`/post/${row.slug}`, '_blank');
 }
 
 onMounted(() => {
@@ -250,39 +252,44 @@ onMounted(() => {
       description="当前账号只有查看博客的权限（blog:read）。新建 / 编辑 / 发布需 blog:manage。"
     />
 
-    <a-card title="文章" :bordered="false">
+    <a-card :bordered="false">
+      <template #title>文章</template>
       <template #extra>
         <a-space>
-          <a-input
-            v-model:value="query.keyword"
-            placeholder="标题 / 摘要关键字"
-            allow-clear
-            style="width: 200px"
-            @press-enter="onSearch"
-          />
-          <a-select
-            v-model:value="query.status"
-            placeholder="状态"
-            allow-clear
-            style="width: 120px"
-            :options="[
-              { label: '草稿', value: 'draft' },
-              { label: '已发布', value: 'published' },
-            ]"
-            @change="onSearch"
-          />
-          <a-select
-            v-model:value="query.categoryId"
-            placeholder="分类"
-            allow-clear
-            style="width: 160px"
-            :options="categoryOptions"
-            @change="onSearch"
-          />
           <a-button @click="load">刷新</a-button>
           <a-button v-perm="'blog:manage'" type="primary" @click="openCreate">新建文章</a-button>
         </a-space>
       </template>
+
+      <!-- 筛选条放在正文里：窄屏可整行换行，挤在卡片头 #extra 里会把标题推出可视区 -->
+      <a-space wrap style="margin-bottom: 12px">
+        <a-input
+          v-model:value="query.keyword"
+          placeholder="标题 / 摘要关键字"
+          allow-clear
+          style="width: min(200px, 100%)"
+          @press-enter="onSearch"
+        />
+        <a-select
+          v-model:value="query.status"
+          placeholder="状态"
+          allow-clear
+          style="width: 120px"
+          :options="[
+            { label: '草稿', value: 'draft' },
+            { label: '已发布', value: 'published' },
+          ]"
+          @change="onSearch"
+        />
+        <a-select
+          v-model:value="query.categoryId"
+          placeholder="分类"
+          allow-clear
+          style="width: 160px"
+          :options="categoryOptions"
+          @change="onSearch"
+        />
+      </a-space>
 
       <a-table
         :data-source="list"
@@ -290,6 +297,7 @@ onMounted(() => {
         :loading="loading"
         row-key="id"
         size="middle"
+        :scroll="{ x: 1210 }"
         :pagination="{
           current: query.page,
           pageSize: query.pageSize,
@@ -368,27 +376,20 @@ onMounted(() => {
       :body-style="{ paddingBottom: '80px' }"
     >
       <a-form layout="vertical">
+        <!-- 长备注从 label 移到 extra：label 一旦折行，同一行几个输入框顶边就不齐了 -->
         <a-row :gutter="16">
-          <a-col :span="8">
+          <a-col :xs="24" :sm="12" :lg="8">
             <a-form-item label="标题" required>
               <a-input v-model:value="form.title" :maxlength="200" placeholder="文章标题" />
             </a-form-item>
           </a-col>
-          <a-col :span="8">
-            <a-form-item>
-              <template #label>
-                slug
-                <span style="color: var(--text-muted, #999)">（留空自动生成；仅支持小写字母 / 数字 / 连字符）</span>
-              </template>
+          <a-col :xs="24" :sm="12" :lg="8">
+            <a-form-item label="slug" extra="留空自动生成；仅支持小写字母 / 数字 / 连字符">
               <a-input v-model:value="form.slug" :maxlength="150" placeholder="例如 redis-cache-notes" />
             </a-form-item>
           </a-col>
-          <a-col :span="8">
-            <a-form-item>
-              <template #label>
-                分类
-                <span style="color: var(--text-muted, #999)">（去管理页建；清空 = 未分类）</span>
-              </template>
+          <a-col :xs="24" :sm="12" :lg="8">
+            <a-form-item label="分类" extra="去分类管理页新建；清空 = 未分类">
               <a-select
                 v-model:value="form.categoryId"
                 placeholder="未分类"
@@ -399,25 +400,23 @@ onMounted(() => {
           </a-col>
         </a-row>
         <a-row :gutter="16">
-          <a-col :span="12">
-            <a-form-item>
-              <template #label>标签 <span style="color: var(--text-muted, #999)">（回车创建，最多 10 个）</span></template>
+          <a-col :xs="24" :sm="12" :lg="12">
+            <a-form-item label="标签" extra="回车创建，最多 10 个">
               <a-select v-model:value="form.tags" mode="tags" :maxlength="30" placeholder="redis" />
             </a-form-item>
           </a-col>
-          <a-col :span="8">
-            <a-form-item label="封面图 URL">
-              <a-input v-model:value="form.cover_url" placeholder="先在正文里插图，再复制 /media/... 地址" />
+          <a-col :xs="24" :sm="12" :lg="8">
+            <a-form-item label="封面图 URL" extra="先在正文里插图，再复制 /media/... 地址">
+              <a-input v-model:value="form.cover_url" placeholder="/media/uploads/xxx.png" />
             </a-form-item>
           </a-col>
-          <a-col :span="4">
+          <a-col :xs="12" :sm="12" :lg="4">
             <a-form-item label="置顶">
               <a-switch v-model:checked="form.featured" />
             </a-form-item>
           </a-col>
         </a-row>
-        <a-form-item>
-          <template #label>摘要 <span style="color: var(--text-muted, #999)">（留空则从正文自动摘取前 120 字）</span></template>
+        <a-form-item label="摘要" extra="留空则从正文自动摘取前 120 字">
           <a-textarea v-model:value="form.summary" :maxlength="500" :rows="2" show-count />
         </a-form-item>
         <a-form-item label="正文（Markdown）">

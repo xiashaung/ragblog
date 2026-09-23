@@ -247,20 +247,23 @@ onUnmounted(() => {
             />
           </a-tooltip>
 
-          <a-tooltip :title="`生效角色：${auth.roles.join('、') || '无'}`">
-            <a-tag :color="auth.isSuperadmin ? 'gold' : 'purple'">
-              {{ auth.roles[0] || '成员' }}
-            </a-tag>
-          </a-tooltip>
+          <!-- 次要状态项：笔记本宽度下整组收起（见 @media .header-extra） -->
+          <div class="header-extra">
+            <a-tooltip :title="`生效角色：${auth.roles.join('、') || '无'}`">
+              <a-tag :color="auth.isSuperadmin ? 'gold' : 'purple'">
+                {{ auth.roles[0] || '成员' }}
+              </a-tag>
+            </a-tooltip>
 
-          <!-- 会话数本身就是一种只读数据，无权时整块隐藏（摆个「0 会话」只会让人以为真没人在线） -->
-          <a-tooltip v-if="auth.hasPerm('session:read')" title="在线 admin 会话数">
-            <a-badge count="0" :badge-offset="[4, 0]">
-              <a-button type="text" @click="business.loadSessions()">
-                {{ business.sessions.length }} 会话
-              </a-button>
-            </a-badge>
-          </a-tooltip>
+            <!-- 会话数本身就是一种只读数据，无权时整块隐藏（摆个「0 会话」只会让人以为真没人在线） -->
+            <a-tooltip v-if="auth.hasPerm('session:read')" title="在线 admin 会话数">
+              <a-badge count="0" :badge-offset="[4, 0]">
+                <a-button type="text" @click="business.loadSessions()">
+                  {{ business.sessions.length }} 会话
+                </a-button>
+              </a-badge>
+            </a-tooltip>
+          </div>
 
           <a-dropdown>
             <a-button type="text">
@@ -295,9 +298,11 @@ onUnmounted(() => {
   border-right: 1px solid var(--app-border);
 }
 .brand {
-  height: 64px;
-  line-height: 64px;
+  height: var(--header-h);
+  line-height: var(--header-h);
   text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
   color: var(--app-sider-brand-fg);
   font-size: 16px;
   font-weight: 600;
@@ -359,12 +364,45 @@ onUnmounted(() => {
   justify-content: space-between;
   background: var(--app-panel);
   border-bottom: 1px solid var(--app-border);
-  padding: 0 24px;
+  /* 顶栏高度走变量：与侧栏 brand、各双栏页的可视高度同源 */
+  height: var(--header-h);
+  line-height: var(--header-h);
+  padding: 0 var(--content-pad-x);
 }
-.header-left { display: flex; align-items: center; }
-.header-right { display: flex; align-items: center; gap: 16px; }
+/* 面包屑可被压缩（min-width:0 + 省略号），否则窄屏会把右侧身份/登出挤出可视区 */
+.header-left {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.header-left :deep(.ant-breadcrumb) {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.header-right {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 16px;
+}
+/* 笔记本宽度下先让位给主内容：隐藏次要状态项（角色标签、会话计数），
+   保留主题切换、后端健康与用户菜单这些必须可达的入口。 */
+.header-extra {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+}
+@media (max-width: 1440px) {
+  .header-right { gap: 12px; }
+}
+@media (max-width: 1280px) {
+  .header-extra { display: none; }
+}
 .vben-content {
-  padding: 20px 24px;
+  padding: var(--content-pad-y) var(--content-pad-x);
   background: transparent;
   overflow: auto;
 }

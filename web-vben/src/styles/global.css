@@ -10,6 +10,13 @@
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
     'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
 
+  /* 布局尺寸单点管理：内容区留白 = 顶栏高 + 上下内边距，窄屏整体收紧一档，
+     页面高度（对话 / 问数这类双栏页）也靠这几个变量算，不再各页写死像素。 */
+  --header-h: 64px;
+  --content-pad-x: 24px;
+  --content-pad-y: 20px;
+  --page-h: calc(100vh - var(--header-h) - var(--content-pad-y) * 2);
+
   --app-bg: #f0f2f5;
   --app-panel: #fff;
   --app-panel-2: #f6f7f9;
@@ -53,6 +60,21 @@ html[data-theme='dark'] {
   --app-sider-brand-fg: #fff;
 }
 
+/* 笔记本（13~14 寸常见 1280~1440 逻辑宽）：侧栏已经吃掉 240px，
+   内容区再按桌面的留白就会把表格 / 工具条挤变形，这里逐档收紧。 */
+@media (max-width: 1440px) {
+  :root {
+    --content-pad-x: 16px;
+    --content-pad-y: 14px;
+  }
+}
+@media (max-width: 1200px) {
+  :root {
+    --content-pad-x: 12px;
+    --content-pad-y: 10px;
+  }
+}
+
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; margin: 0; }
 body {
@@ -69,7 +91,7 @@ body {
 .section-title {
   font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--app-fg);
 }
-.page-card { padding: 20px 24px; }
+.page-card { padding: var(--content-pad-y) var(--content-pad-x); }
 
 /* 深色下兜底：命令式 message 浮层若未取到主题 token，也不至于白底刺眼 */
 html[data-theme='dark'] .ant-message-notice-content {

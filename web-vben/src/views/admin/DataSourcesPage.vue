@@ -59,14 +59,16 @@ const urlPlaceholder = computed(() => {
   }
 });
 
+// 窄屏（笔记本）兜底：写明各列宽度 + scroll.x，避免「连接串」列被挤成多行、
+// 开关列与操作列挤在一起；操作列钉右方便横向滚动后继续操作。
 const columns = [
-  { title: '名称', dataIndex: 'name', key: 'name' },
-  { title: '类型', key: 'dialect', width: 130 },
+  { title: '名称', dataIndex: 'name', key: 'name', width: 150, ellipsis: true },
+  { title: '类型', key: 'dialect', width: 110 },
   { title: '连接串（已掩码）', key: 'url' },
-  { title: '只读', key: 'readonly', width: 80 },
-  { title: '启用', key: 'enabled', width: 90 },
-  { title: '更新时间', key: 'updated_at', width: 180 },
-  { title: '操作', key: 'actions', width: 220 },
+  { title: '只读', key: 'readonly', width: 70 },
+  { title: '启用', key: 'enabled', width: 70 },
+  { title: '更新时间', key: 'updated_at', width: 165, responsive: ['lg'] as const },
+  { title: '操作', key: 'actions', width: 200, fixed: 'right' as const },
 ];
 
 function dialectLabel(d: string) {
@@ -256,6 +258,7 @@ onMounted(load);
         :loading="loading"
         row-key="id"
         size="middle"
+        :scroll="{ x: 1060 }"
         :pagination="{ pageSize: 10, hideOnSinglePage: true }"
       >
         <!-- ant-design-vue 4 只支持 #bodyCell 这一个单元格插槽，按 column.key 分支渲染 -->

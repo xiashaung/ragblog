@@ -27,13 +27,14 @@ function guardManage() {
 const list = ref<BlogCategoryItem[]>([]);
 const loading = ref(false);
 
+// 窄屏（笔记本）兜底：写明列宽 + scroll.x，固定表头列不再被挤窄到折行
 const columns = [
-  { title: '名称', key: 'name' },
-  { title: 'slug', key: 'slug', width: 180 },
+  { title: '名称', key: 'name', width: 200 },
+  { title: 'slug', key: 'slug', width: 180, ellipsis: true },
   { title: '文章数', key: 'count', width: 90 },
-  { title: '排序', key: 'sort_order', width: 80 },
-  { title: '更新时间', key: 'updated_at', width: 170 },
-  { title: '操作', key: 'actions', width: 170 },
+  { title: '排序', key: 'sort_order', width: 80, responsive: ['lg'] as const },
+  { title: '更新时间', key: 'updated_at', width: 160, responsive: ['xl'] as const },
+  { title: '操作', key: 'actions', width: 170, fixed: 'right' as const },
 ];
 
 function fmt(ts?: number | null) {
@@ -143,6 +144,7 @@ onMounted(load);
         :loading="loading"
         row-key="id"
         size="middle"
+        :scroll="{ x: 880 }"
         :pagination="false"
       >
         <!-- ant-design-vue 4 只支持 #bodyCell 这一个单元格插槽，按 column.key 分支渲染 -->

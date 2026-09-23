@@ -24,7 +24,7 @@
 │   │   ├── analytics.py     # /api/v1/analytics/*（智能问数，analytics:read）
 │   │   ├── datasources.py   # /api/v1/datasources（数据源，datasource:read/manage）
 │   │   ├── system_config.py # /api/v1/system/config/*（模型选择与接入，system:read/manage）
-│   │   └── admin.py         # /admin/*（登录 + 账号 / 角色 / 会话，全部挂权限码）
+│   │   └── admin.py         # /api/v1/admin/*（登录 + 账号 / 角色 / 会话，全部挂权限码）
 │   ├── schemas/             # Pydantic 请求/响应模型
 │   │   ├── user.py
 │   │   ├── item.py
@@ -56,7 +56,7 @@
 │   ├── src/layouts/         # MainLayout.vue：菜单按权限过滤
 │   └── src/views/           # 页面：auth / _core / ai（对话）/ rag / analytics / admin（账号、角色、数据源、模型）
 ├── web/dist/                # 前端构建产物（被 FastAPI 静态托管，由 web-vben 输出）
-├── web-blog/                # 博客前台源码（Vue 3 + Vite + Ant Design Vue 4，独立 pnpm 项目；产物 dist 挂 /blog）
+├── web-blog/                # 博客前台源码（Vue 3 + Vite + Ant Design Vue 4，独立 pnpm 项目；产物 dist 挂站点根路径 /，即首页）
 ├── pyproject.toml
 ├── .env.example
 └── README.md
@@ -114,7 +114,7 @@ pytest
 ### 认证方式
 
 ```text
-POST /admin/login  {username, password}
+POST /api/v1/admin/login  {username, password}
   → {token, admin, roles, permissions}      # 同时写 http-only cookie: admin_token
 后续管理接口带：Authorization: Bearer <token>
 ```
@@ -168,20 +168,20 @@ POST /admin/login  {username, password}
 
 | 方法   | 路径                                | 所需权限          |
 | ------ | ----------------------------------- | ----------------- |
-| POST   | /admin/onboard                      | 公开 + 引导密钥   |
-| POST   | /admin/login /logout /refresh       | 登录 / 会话       |
-| GET    | /admin/me                           | 登录（任何权限）  |
-| GET    | /admin/sessions                     | `session:read`    |
-| DELETE | /admin/sessions/{id}                | `session:revoke`  |
-| GET    | /admin/permissions、/admin/roles    | `role:read`       |
-| POST   | /admin/roles                        | `role:manage`     |
-| PATCH  | /admin/roles/{id}                   | `role:manage`     |
-| DELETE | /admin/roles/{id}                   | `role:manage`     |
-| GET    | /admin/accounts                     | `account:read`    |
-| POST   | /admin/accounts                     | `account:manage`  |
-| PATCH  | /admin/accounts/{id}                | `account:manage`  |
-| PUT    | /admin/accounts/{id}/roles          | `account:manage`  |
-| DELETE | /admin/accounts/{id}                | `account:manage`  |
+| POST   | /api/v1/admin/onboard                      | 公开 + 引导密钥   |
+| POST   | /api/v1/admin/login /logout /refresh       | 登录 / 会话       |
+| GET    | /api/v1/admin/me                           | 登录（任何权限）  |
+| GET    | /api/v1/admin/sessions                     | `session:read`    |
+| DELETE | /api/v1/admin/sessions/{id}                | `session:revoke`  |
+| GET    | /api/v1/admin/permissions、/api/v1/admin/roles    | `role:read`       |
+| POST   | /api/v1/admin/roles                        | `role:manage`     |
+| PATCH  | /api/v1/admin/roles/{id}                   | `role:manage`     |
+| DELETE | /api/v1/admin/roles/{id}                   | `role:manage`     |
+| GET    | /api/v1/admin/accounts                     | `account:read`    |
+| POST   | /api/v1/admin/accounts                     | `account:manage`  |
+| PATCH  | /api/v1/admin/accounts/{id}                | `account:manage`  |
+| PUT    | /api/v1/admin/accounts/{id}/roles          | `account:manage`  |
+| DELETE | /api/v1/admin/accounts/{id}                | `account:manage`  |
 | GET    | /api/v1/ai/knowledge、/stats、/{id}、/search、/answer | `knowledge:read`  |
 | POST   | /api/v1/ai/knowledge/ingest、/ingest-pairs、/fetch-url | `knowledge:manage` |
 | PATCH / DELETE | /api/v1/ai/knowledge/{id}、/batch-delete、/reindex | `knowledge:manage` |
@@ -225,11 +225,11 @@ POST /admin/login  {username, password}
 ### 首次引导
 
 `APP_ADMIN_API_KEY` 现在**只有一个用途**：作为 `X-API-Key` 头证明调用方是运维本人，
-抢注库里第一个超管（`POST /admin/onboard`）。它不再是任何管理接口的旁路，
+抢注库里第一个超管（`POST /api/v1/admin/onboard`）。它不再是任何管理接口的旁路，
 也不再生效于配额豁免。引导完成后建议置空以关闭 HTTP 入口，改用 CLI：
 
 ```bash
-# 方式一（需 APP_ADMIN_API_KEY）：界面 /admin/onboard 或 curl
+# 方式一（需 APP_ADMIN_API_KEY）：控制台页面 /admin/auth/onboard 或 curl
 # 方式二（推荐，不开放 HTTP 入口）：
 python -m app.bootstrap seed --username admin --password 'xxx'
 ```
@@ -305,15 +305,15 @@ python -m app.bootstrap seed --username admin --password 'xxx'
 - `/api/v1/ai/chat` 与 `/ai/providers` 不鉴权（前者要能被外部调用）。
 - 知识库（`/ai/knowledge/*`）与上传（`/upload*`）走控制台会话 + RBAC：
   读要 `knowledge:read`，写要 `knowledge:manage`。
-- 调用时带 `Authorization: Bearer <控制台 token>`（`POST /admin/login` 拿）；
-  `APP_ADMIN_API_KEY` 只能用于首次引导（`/admin/onboard`），不再是接口旁路。
+- 调用时带 `Authorization: Bearer <控制台 token>`（`POST /api/v1/admin/login` 拿）；
+  `APP_ADMIN_API_KEY` 只能用于首次引导（`/api/v1/admin/onboard`），不再是接口旁路。
 - 会话历史（`/ai/chat/sessions*`）只要求登录，且只能读到自己的会话。
 
 ### 示例
 
 ```bash
 # 先登录控制台，后面的 AI / 知识库接口都用这个 Bearer token
-TOKEN=$(curl -s -X POST http://127.0.0.1:8000/admin/login -H 'Content-Type: application/json' \
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/api/v1/admin/login -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"xxx"}' | sed -n 's/.*"token":"\([^"]\+\)".*/\1/p')
 
 # 对话（走默认 provider；此接口本身不鉴权）
@@ -402,7 +402,7 @@ APP_LLM_DEEPSEEK_API_KEY=sk-xxx
   前端不再传 `provider` / `model`。
 - **顶部状态**：后端健康状态横幅 + 当前登录账号的角色标签（`session:read` 才会拉在线会话数）。
 - **RBAC 界面**：登录后拿 `roles/permissions` 渲染菜单（无权限的入口不显示），
-  路由 `meta.permissions` 不满足时跳 `/403`；刷新页面以 `GET /admin/me` 为权威重拉权限。
+  路由 `meta.permissions` 不满足时跳 `/403`；刷新页面以 `GET /api/v1/admin/me` 为权威重拉权限。
   按钮级由 `v-perm` 指令与 `usePerm()` 负责（无权置灰 + 悬停说明 / 干脆不发请求），
   详见上面「前端按钮级权限」。前端过滤只负责渲染，真正的拦截在后端 `require_permission`。
 - **Markdown 录入与展示**：「内容录入」的文本 tab 是自研编辑器 `MarkdownEditor.vue`
@@ -417,13 +417,13 @@ APP_LLM_DEEPSEEK_API_KEY=sk-xxx
 # 1. 后端（:8011，mock 或配置好真实 provider）
 uvicorn app.main:app --reload --port 8011
 
-# 2. 前端（:5173，/api 与 /admin 自动代理到 :8011）
+# 2. 管理控制台（:5173/admin/，/api 与 /media 自动代理到 :8011）
 cd web-vben
 pnpm install
-pnpm dev           # http://127.0.0.1:5173
+pnpm dev           # http://127.0.0.1:5173/admin/
 ```
 
-打开 `http://127.0.0.1:5173`：空库时走「首次部署？创建第一个超级管理员」
+打开 `http://127.0.0.1:5173/admin/`：空库时走「首次部署？创建第一个超级管理员」
 （需填 `APP_ADMIN_API_KEY`），已有账号则直接用户名/密码登录。
 
 > 若 `pnpm install` 报缓存权限问题，加 `--cache-dir /tmp/pnpm-cache`。
@@ -435,11 +435,12 @@ cd web-vben
 pnpm build         # 输出到 ../web/dist/
 cd ..
 uvicorn app.main:app --port 8000
-# 访问 http://127.0.0.1:8000  → FastAPI 自动托管 web/dist（/assets 静态 + SPA 回退）
+# 访问 http://127.0.0.1:8000/admin/  → FastAPI 自动托管 web/dist（/admin/assets 静态 + SPA 回退）
 ```
 
-`/api/*` 与 `/admin/*` 路由优先匹配，剩余路径回退到 `index.html`，
-支持 history 模式的客户端路由。
+`/api/*`（含管理 API `/api/v1/admin/*`）与 `/media/*` 优先匹配；`/admin/*` 回退到控制台
+`index.html`（支持 history 模式的客户端路由，如 `/admin/roles` 刷新不 404）；
+其余路径回退到博客前台 `web-blog/dist/index.html`。
 
 ## 个人博客前台（web-blog/）
 
@@ -453,14 +454,14 @@ uvicorn app.main:app --port 8000
 ```bash
 # 开发（:5174，/api 与 /media 代理到 :8011；与后台 :5173 并行）
 uvicorn app.main:app --reload --port 8011
-cd web-blog && pnpm install && pnpm dev   # http://127.0.0.1:5174/blog/
+cd web-blog && pnpm install && pnpm dev   # http://127.0.0.1:5174/
 
 # 生产：构建后后端自动托管，无需额外配置
 pnpm build                                 # 输出 web-blog/dist/
-# 启动后端后访问 http://127.0.0.1:8000/blog/
+# 启动后端后访问 http://127.0.0.1:8000/（站点首页即博客）
 ```
 
-> 挂载约定：`web-blog/dist` 存在时，后端在 `/blog` 提供静态资源与 SPA 回退
-> （`vite base` 与 `createWebHistory` 都是 `/blog/`，两者必须保持一致）；
-> 博客公开接口在 FastAPI 层优先于管理台 SPA 通配回退，互不影响。
+> 挂载约定：`web-blog/dist` 存在时，后端在根路径 `/` 提供静态资源与 SPA 回退
+> （`vite base` 与 `createWebHistory` 都是 `/`，两者必须保持一致）；旧 `/blog/*`
+> 链接 302 重定向到对应新地址；博客公开接口在 FastAPI 层先于 SPA 回退匹配，互不影响。
 > 发布/问答依赖「系统配置」里的 embedding_provider 与 rag_provider，与知识库同一套要求。

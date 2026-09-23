@@ -679,6 +679,8 @@ onMounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  /* 窄屏：右侧「已选 N 个」标签换到下一行，不把标题挤成一列字 */
+  flex-wrap: wrap;
   gap: 12px;
   padding: 14px 18px;
   border-bottom: 1px solid var(--app-border);
@@ -816,6 +818,8 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* 窄屏：分片长度与「重置 / 开始入库」不同一排时换行，不整条撑出工作区 */
+  flex-wrap: wrap;
   gap: 12px;
   padding: 10px 18px;
   border-top: 1px solid var(--app-border);
@@ -872,7 +876,9 @@ onMounted(() => {
 .result-meta { flex: 1 1 auto; font-size: 12px; color: var(--app-muted); word-break: break-all; }
 
 /* ---------------- 窄屏：导航横过来，工作区在下 ---------------- */
-@media (max-width: 1080px) {
+/* 侧栏已经占掉 240px，媒体查询按视口宽算会把真实可用宽算大；
+   笔记本宽度（≤1280）工作区只剩不到 750px，直接改为上下堆叠更舒展。 */
+@media (max-width: 1280px) {
   .ingest-shell { flex-direction: column; }
   .ingest-nav {
     position: static;

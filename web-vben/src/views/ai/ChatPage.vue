@@ -862,8 +862,10 @@ onUnmounted(() => {
 .chat-page {
   display: flex;
   gap: 16px;
-  height: calc(100vh - 128px);
-  min-height: 560px;
+  /* 高度单点：顶栏 + 内容区上下内边距由 global.css 的变量推导，
+     窄屏收紧留白时本页跟着变高，不再出现“页内滚动 + 外层滚动”双滚动条 */
+  height: var(--page-h);
+  min-height: 480px;
 }
 
 /* ---------- 左侧栏 ---------- */
@@ -877,6 +879,10 @@ onUnmounted(() => {
   border-radius: 8px;
   padding: 14px;
   overflow: hidden;
+}
+/* 笔记本：侧栏让位于对话区，压窄到 232（会话标题本就要靠 ellipsis + title 提示） */
+@media (max-width: 1440px) {
+  .side { width: 232px; padding: 12px; }
 }
 .side-block {
   display: flex;
@@ -999,12 +1005,14 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 8px;
 }
 .top-title {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   font-weight: 600;
   font-size: 15px;
@@ -1209,6 +1217,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   margin-top: 8px;
 }
@@ -1253,12 +1262,14 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   margin-top: 8px;
   gap: 12px;
 }
 .attach-area {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   min-width: 0;
 }

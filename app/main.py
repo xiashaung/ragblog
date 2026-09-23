@@ -10,8 +10,10 @@
     → 各 router（app/routers/*，依赖注入见 app/deps.py）
     → 异常处理器（app/responses.py，错误体也同一格式）
 
-前端：构建 ``web/dist``（``pnpm --dir web-vben run build``）后自动挂在 ``/``，
-单进程即可部署；开发期用 Vite dev server（:5173，把 /api 代理到后端）。
+前端：两个独立 Vite 项目，构建后由本进程一并托管，单进程即可部署：
+    - 博客前台 ``web-blog/dist`` 挂根路径 /（入口即首页，见 web-blog vite base=/）
+    - 管理控制台 ``web/dist`` 挂 /admin（vite base=/admin/，管理 API 在 /api/v1/admin）
+开发期各自用 Vite dev server（:5174 / :5173，把 /api 代理到后端）。
 """
 
 import json
@@ -23,7 +25,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, RedirectResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import db, services
@@ -163,7 +165,8 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     """装配应用：异常处理器 → 中间件 → 路由 → 静态资源，顺带 SPA 兜底。
 
-    路由前缀约定：除 ``admin``（自己带 /admin）外都挂在 ``/api/v1`` 下；
+    路由前缀约定：所有后端 API 都在 ``/api/v1`` 下（admin 体系是 /api/v1/admin）；
+    ``/admin`` 路径留给管理控制台 SPA 页面，两者不能再互相串门。
     新加路由时别在 router 里重复写 prefix，否则会拼出双层路径。
     """
     settings = get_settings()
@@ -187,7 +190,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     # 把每个成功的 2xx **对象** 响应体统一包成 {code, data, message} 信封。
-    # JSON 数组与标量保持原样（所以 ``GET /admin/roles`` 等仍返裸列表），非 JSON 体
+    # JSON 数组与标量保持原样（所以 ``GET /api/v1/admin/roles`` 等仍返裸列表），非 JSON 体
     # （SPA 的 HTML、流式对话）不动。错误响应体已由 app.responses 的异常处理器拼好，
     # 因此本中间件只碰 2xx。
     application.add_middleware(_EnvelopeMiddleware)
@@ -199,8 +202,9 @@ def create_app() -> FastAPI:
     application.include_router(
         analytics.router, prefix="/api/v1/analytics", tags=["analytics"]
     )
+    # 管理 API 自带 /api/v1/admin 前缀（/admin 留给控制台 SPA）
     application.include_router(admin.router, tags=["admin"])
-    # 博客：后台管理（自带 /admin/blogs 前缀）与前台公开 API（自带 /api/v1/blog）
+    # 博客：后台管理（/api/v1/admin/blogs）与前台公开 API（/api/v1/blog）
     application.include_router(blog.admin_router)
     application.include_router(blog.public_router)
     application.include_router(system_config.router, prefix="/api/v1")
@@ -220,72 +224,73 @@ def create_app() -> FastAPI:
         name="media",
     )
 
-    # --- 博客前台（web-blog/dist 挂在 /blog 下）---
-    # 独立前端项目 ``web-blog/`` 的产物（``pnpm --dir web-blog run build``，
-    # 它的 vite base 就是 /blog/）：与下面管理台 SPA 同一单进程托管思路。
-    # 注意要在管理台兜底路由 ``/{full_path:path}`` **之前**注册：
-    # FastAPI 按注册顺序匹配，具体的 /blog/... 得跑在通配前面。
-    blog_dist = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "web-blog",
-        "dist",
-    )
+    # --- 前端托管：博客前台挂 /，管理控制台挂 /admin ---
+    # 两个 Vite 产物与 API 同进程托管。注册顺序即匹配顺序：API 路由与 /media
+    # 已全部注册在上面，下面的 SPA 兜底是最后才轮到的兼容项。
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    blog_dist = os.path.join(root_dir, "web-blog", "dist")
+    admin_dist = os.path.join(root_dir, "web", "dist")
+
+    # 管理控制台（web-vben 产物，vite base=/admin/，资源在 /admin/assets 下）。
+    # 页面路由（/admin/roles 等）与 API 不再冲突的前提：管理 API 全部收进了
+    # /api/v1/admin（见 app/routers/admin.py），这里只接住页面与静态文件。
+    if os.path.isdir(admin_dist):
+        admin_assets = os.path.join(admin_dist, "assets")
+        if os.path.isdir(admin_assets):
+            application.mount(
+                "/admin/assets",
+                StaticFiles(directory=admin_assets),
+                name="admin-assets",
+            )
+
+        @application.get("/admin", include_in_schema=False)
+        @application.get("/admin/", include_in_schema=False)
+        async def admin_index():
+            """控制台入口：/admin 与 /admin/ 都回管理台 index.html。"""
+            return FileResponse(os.path.join(admin_dist, "index.html"))
+
+        @application.get("/admin/{full_path:path}", include_in_schema=False)
+        async def admin_spa(full_path: str):
+            """控制台 SPA 兜底：命中真实文件（favicon 等）直接给，否则回客户端路由。"""
+            candidate = os.path.join(admin_dist, full_path)
+            if full_path and os.path.isfile(candidate):
+                return FileResponse(candidate)
+            return FileResponse(os.path.join(admin_dist, "index.html"))
+
+    # 旧 /blog 链接重定向：博客入口已改挂根路径，历史分享链 302 到对应新地址。
+    @application.get("/blog", include_in_schema=False)
+    @application.get("/blog/", include_in_schema=False)
+    async def blog_redirect_root():
+        return RedirectResponse("/", status_code=302)
+
+    @application.get("/blog/{full_path:path}", include_in_schema=False)
+    async def blog_redirect(full_path: str):
+        return RedirectResponse(f"/{full_path}", status_code=302)
+
+    # 博客前台（web-blog 产物，vite base=/，资源在 /assets 下）。
     if os.path.isdir(blog_dist):
         blog_assets = os.path.join(blog_dist, "assets")
         if os.path.isdir(blog_assets):
             application.mount(
-                "/blog/assets",
+                "/assets",
                 StaticFiles(directory=blog_assets),
                 name="blog-assets",
             )
 
-        @application.get("/blog", include_in_schema=False)
-        @application.get("/blog/", include_in_schema=False)
+        @application.get("/", include_in_schema=False)
         async def blog_index():
-            """博客入口：/blog 与 /blog/ 都回博客自己的 index.html。"""
+            """站点根路径即博客首页；API 文档在 /docs（注册更早，不会被这里吃掉）。"""
             return FileResponse(os.path.join(blog_dist, "index.html"))
 
-        @application.get("/blog/{full_path:path}", include_in_schema=False)
+        @application.get("/{full_path:path}", include_in_schema=False)
         async def blog_spa(full_path: str):
-            """博客 SPA 兜底：命中真实文件（favicon 等）直接给，否则回客户端路由。"""
+            """博客 SPA 兜底：未命中的 api/health 路径返 404，其余回博客首页。"""
+            if full_path.startswith(("api/", "health")):
+                raise HTTPException(status_code=404)
             candidate = os.path.join(blog_dist, full_path)
             if full_path and os.path.isfile(candidate):
                 return FileResponse(candidate)
             return FileResponse(os.path.join(blog_dist, "index.html"))
-
-    # --- 静态前端（web/dist）---
-    # dist 目录是可选的：开发时用 Vite dev server（:5173，它会把 /api 代理到本后端）；
-    # 目录存在时，FastAPI 就把构建好的 SPA 挂在 / 上，单进程部署。
-    dist = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web", "dist"
-    )
-    if os.path.isdir(dist):
-        # /assets/* -> web/dist/assets/*
-        application.mount(
-            "/assets",
-            StaticFiles(directory=os.path.join(dist, "assets")),
-            name="assets",
-        )
-
-        # SPA 兜底：任何非 /api 路径都回 index.html，客户端路由刷新后也能工作。
-
-        # 根路径必须显式匹配：FastAPI 的 {full_path:path} 通配只绑 path 段，
-        # 不单独写 "/" 就会落到别的 GET 路由上、返 JSON 而不是 SPA。
-        @application.get("/", include_in_schema=False)
-        async def root_index():
-            """根路径单独接：通配路由只绑 path 段，不显式写「/」会落到其他 GET 上。"""
-            return FileResponse(os.path.join(dist, "index.html"))
-
-        @application.get("/{full_path:path}", include_in_schema=False)
-        async def spa_fallback(full_path: str):
-            """SPA 前端路由兜底：刷新页面时也要能回到 index.html。"""
-            backend_prefixes = ("api/", "admin/", "health")
-            if full_path.startswith(backend_prefixes):
-                raise HTTPException(status_code=404)
-            candidate = os.path.join(dist, full_path)
-            if full_path and os.path.isfile(candidate):
-                return FileResponse(candidate)
-            return FileResponse(os.path.join(dist, "index.html"))
 
     return application
 

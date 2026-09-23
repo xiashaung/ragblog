@@ -119,8 +119,10 @@ async function doOnboard() {
   align-items: center;
   justify-content: center;
   background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+  padding: 24px;
 }
-.login-card { width: 420px; border-radius: 12px; box-shadow: 0 8px 40px rgba(0, 0, 0, 0.3); }
+/* 窄屏（笔记本小分辨率 / 缩放模式）下卡片不超出视口宽 */
+.login-card { width: min(420px, 100%); border-radius: 12px; box-shadow: 0 8px 40px rgba(0, 0, 0, 0.3); }
 .login-title { font-size: 22px; font-weight: 700; color: var(--app-fg); text-align: center; }
 .login-title .logo { margin-right: 8px; }
 .login-alert { margin-bottom: 16px; }

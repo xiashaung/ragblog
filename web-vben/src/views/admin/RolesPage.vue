@@ -68,13 +68,15 @@ const grouped = computed(() => {
   return groups;
 });
 
+// 窄屏（笔记本）兜底：固定列写明宽度 + scroll.x，避开「权限」标签列被挤成多行、
+// 整行高度失控；操作列钉右，横向滚动时仍可直接点。
 const columns = [
-  { title: '角色', key: 'name' },
-  { title: '标识', dataIndex: 'code', key: 'code', width: 140 },
+  { title: '角色', key: 'name', width: 190 },
+  { title: '标识', dataIndex: 'code', key: 'code', width: 130, ellipsis: true },
   { title: '权限', key: 'permissions' },
-  { title: '成员', dataIndex: 'members', key: 'members', width: 80 },
-  { title: '类型', key: 'builtin', width: 100 },
-  { title: '操作', key: 'actions', width: 160 },
+  { title: '成员', dataIndex: 'members', key: 'members', width: 70 },
+  { title: '类型', key: 'builtin', width: 90, responsive: ['lg'] as const },
+  { title: '操作', key: 'actions', width: 160, fixed: 'right' as const },
 ];
 
 function permissionTexts(row: RoleItem): string[] {
@@ -202,6 +204,7 @@ onMounted(load);
         :loading="loading"
         row-key="id"
         size="middle"
+        :scroll="{ x: 1000 }"
         :pagination="false"
       >
         <!-- ant-design-vue 4 只支持 #bodyCell 这一个单元格插槽，按 column.key 分支渲染 -->

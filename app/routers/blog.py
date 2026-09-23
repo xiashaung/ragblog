@@ -50,7 +50,7 @@ from ..schemas.blog import (
 from ..services.llm import get_llm
 from ..services.rbac_service import Principal
 
-admin_router = APIRouter(prefix="/admin/blogs", tags=["blog-admin"])
+admin_router = APIRouter(prefix="/api/v1/admin/blogs", tags=["blog-admin"])
 public_router = APIRouter(prefix="/api/v1/blog", tags=["blog"])
 
 logger = logging.getLogger(__name__)

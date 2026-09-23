@@ -39,7 +39,9 @@ from ..schemas.admin import (
 )
 from ..services.rbac_service import Principal
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+# 管理 API 统一收进 /api/v1/admin：/admin 路径留给控制台 SPA 页面（见 main.py 静态托管），
+# 否则刷新 /admin/roles 这类页面会先命中 API 路由、浏览器里看到一屏 JSON。
+router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
 
 def _extract_token(request) -> str:

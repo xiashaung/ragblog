@@ -21,7 +21,7 @@ from ..schemas.datasource import (
 )
 from ..services.rbac_service import Principal
 
-router = APIRouter(prefix="/admin/data-sources", tags=["admin-datasource"])
+router = APIRouter(prefix="/api/v1/admin/data-sources", tags=["admin-datasource"])
 
 
 @router.get("", response_model=list[DataSourceOut])

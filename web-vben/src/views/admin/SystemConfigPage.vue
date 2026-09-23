@@ -150,7 +150,7 @@ onMounted(() => {
                 :disabled="!canManage"
                 :loading="saving"
                 placeholder="请选择已配置的模型"
-                style="width: 240px"
+                style="width: min(240px, 100%)"
                 @change="(v: string) => updateConfig('chat_provider', v)"
               />
             </a-tooltip>
@@ -170,7 +170,7 @@ onMounted(() => {
                 :disabled="!canManage"
                 :loading="saving"
                 placeholder="请选择已配置的模型"
-                style="width: 240px"
+                style="width: min(240px, 100%)"
                 @change="(v: string) => updateConfig('rag_provider', v)"
               />
             </a-tooltip>
@@ -190,7 +190,7 @@ onMounted(() => {
                 :disabled="!canManage"
                 :loading="saving"
                 placeholder="请选择已配置的模型"
-                style="width: 240px"
+                style="width: min(240px, 100%)"
                 @change="(v: string) => updateConfig('embedding_provider', v)"
               />
             </a-tooltip>
@@ -231,7 +231,7 @@ onMounted(() => {
                 :disabled="!canManage"
                 :loading="saving"
                 placeholder="请选择已配置的模型"
-                style="width: 240px"
+                style="width: min(240px, 100%)"
                 @change="(v: string) => updateConfig('rerank_provider', v)"
               />
             </a-tooltip>
@@ -284,11 +284,13 @@ onMounted(() => {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: 16px;
+    /* 窄屏：说明文字先换行，下拉框不再被顶出卡片右边 */
+    flex-wrap: wrap;
+    gap: 12px;
   }
 
   .config-info {
-    flex: 1;
+    flex: 1 1 200px;
     min-width: 0;
   }
 

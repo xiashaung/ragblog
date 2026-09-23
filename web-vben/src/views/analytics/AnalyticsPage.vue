@@ -437,8 +437,9 @@ onMounted(() => {
 .analytics-page {
   display: flex;
   gap: 16px;
-  height: calc(100vh - 128px);
-  min-height: 560px;
+  /* 高度单点：同对话页，跟随全局留白变量，避免窄屏高度下出现双滚动条 */
+  height: var(--page-h);
+  min-height: 480px;
 }
 
 /* ---------- 左侧栏 ---------- */
@@ -452,6 +453,10 @@ onMounted(() => {
   border-radius: 8px;
   padding: 14px;
   overflow: hidden;
+}
+/* 笔记本：表结构列表靠 ellipsis 展示，压窄到 244 把宽度让给右侧结果区 */
+@media (max-width: 1440px) {
+  .side { width: 244px; padding: 12px; }
 }
 .side-schema {
   flex: 1;
@@ -546,6 +551,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 8px;
 }
@@ -553,6 +559,7 @@ onMounted(() => {
   font-weight: 600;
   font-size: 15px;
   color: var(--app-fg);
+  min-width: 0;
 }
 .muted {
   color: var(--app-muted);
@@ -680,6 +687,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   margin-top: 8px;
 }
@@ -699,7 +707,9 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   margin-top: 8px;
+  gap: 8px;
 }
 
 /* 窄屏：隐藏侧栏，专注问答 */

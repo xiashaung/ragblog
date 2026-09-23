@@ -99,7 +99,7 @@ function onChatClick(e: MouseEvent): void {
   const turnIdx = Number(turnEl?.getAttribute('data-turn'));
   // 后端角标从 1 开始，按 citations[].index 精确匹配
   const cite = turns.value[turnIdx]?.citations?.find((c) => c.index === Number(el.getAttribute('data-cite')));
-  if (cite) window.open(`/blog/post/${encodeURIComponent(cite.slug)}`, '_blank');
+  if (cite) window.open(`/post/${encodeURIComponent(cite.slug)}`, '_blank');
 }
 
 /** 相关度展示：RRF 融合分绝对值很小，按本次最高分归一化成百分比更直观 */

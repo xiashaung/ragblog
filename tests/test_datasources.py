@@ -57,23 +57,23 @@ def test_mask_url_garbage_is_safe():
 
 
 async def test_datasource_requires_login(client):
-    resp = await client.get("/admin/data-sources")
+    resp = await client.get("/api/v1/admin/data-sources")
     assert resp.status_code == 401
 
 
 async def test_viewer_cannot_read_datasources(client, account_factory):
     acct = await account_factory("ds-viewer", ["viewer"])
-    resp = await client.get("/admin/data-sources", headers=acct["headers"])
+    resp = await client.get("/api/v1/admin/data-sources", headers=acct["headers"])
     assert resp.status_code == 403
 
 
 async def test_admin_can_read_but_not_manage(client, account_factory):
     # admin 角色有 datasource:read 无 datasource:manage
     acct = await account_factory("ds-admin", ["admin"])
-    ok = await client.get("/admin/data-sources", headers=acct["headers"])
+    ok = await client.get("/api/v1/admin/data-sources", headers=acct["headers"])
     assert ok.status_code == 200
     created = await client.post(
-        "/admin/data-sources",
+        "/api/v1/admin/data-sources",
         json={"name": "x", "dialect": "sqlite", "url": "sqlite:///x.db"},
         headers=acct["headers"],
     )
@@ -88,7 +88,7 @@ async def test_datasource_crud_and_masking(client, console):
         "description": "只读数仓",
     }
     res = await client.post(
-        "/admin/data-sources", json=payload, headers=console["headers"]
+        "/api/v1/admin/data-sources", json=payload, headers=console["headers"]
     )
     assert res.status_code == 201, res.text
     body = _data(res)
@@ -98,20 +98,20 @@ async def test_datasource_crud_and_masking(client, console):
 
     # 重名 → 400
     dup = await client.post(
-        "/admin/data-sources", json=payload, headers=console["headers"]
+        "/api/v1/admin/data-sources", json=payload, headers=console["headers"]
     )
     assert dup.status_code == 400
 
     # 非法方言 → 400
     bad = await client.post(
-        "/admin/data-sources",
+        "/api/v1/admin/data-sources",
         json={"name": "oracle1", "dialect": "oracle", "url": "x"},
         headers=console["headers"],
     )
     assert bad.status_code == 400
 
     # 列表含掩码串、不含明文口令
-    lst = await client.get("/admin/data-sources", headers=console["headers"])
+    lst = await client.get("/api/v1/admin/data-sources", headers=console["headers"])
     assert lst.status_code == 200
     items = _data(lst)
     assert any(it["name"] == "warehouse" for it in items)
@@ -119,7 +119,7 @@ async def test_datasource_crud_and_masking(client, console):
 
     # 更新：改名 + url 留空应沿用旧连接串（掩码里仍能看出 host 未被清掉）
     upd = await client.patch(
-        f"/admin/data-sources/{body['id']}",
+        f"/api/v1/admin/data-sources/{body['id']}",
         json={"name": "warehouse2", "url": ""},
         headers=console["headers"],
     )
@@ -129,10 +129,10 @@ async def test_datasource_crud_and_masking(client, console):
 
     # 删除
     dele = await client.delete(
-        f"/admin/data-sources/{body['id']}", headers=console["headers"]
+        f"/api/v1/admin/data-sources/{body['id']}", headers=console["headers"]
     )
     assert dele.status_code == 200
-    after = await client.get("/admin/data-sources", headers=console["headers"])
+    after = await client.get("/api/v1/admin/data-sources", headers=console["headers"])
     assert all(it["id"] != body["id"] for it in _data(after))
 
 
@@ -163,7 +163,7 @@ async def test_query_external_sqlite_source_end_to_end(
     conn.close()
 
     created = await client.post(
-        "/admin/data-sources",
+        "/api/v1/admin/data-sources",
         json={
             "name": "ext-sqlite",
             "dialect": "sqlite",

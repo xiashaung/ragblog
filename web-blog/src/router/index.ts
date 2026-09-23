@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router';
 
-// history base 与 vite base 一致（/blog/）：后端把产物挂在同一路径下
+// 博客前台挂站点根路径 /（vite base=/），history base 取 BASE_URL 与之保持一致
 const routes: RouteRecordRaw[] = [
   { path: '/', name: 'home', component: () => import('@/views/HomePage.vue'), meta: { title: '文章' } },
   { path: '/tag/:tag', name: 'tag', component: () => import('@/views/HomePage.vue'), meta: { title: '标签' } },
@@ -11,7 +11,7 @@ const routes: RouteRecordRaw[] = [
 ];
 
 const router = createRouter({
-  history: createWebHistory('/blog/'),
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes,
 });
 

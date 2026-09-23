@@ -4,7 +4,10 @@ import vue from '@vitejs/plugin-vue';
 import vueJsx from '@vitejs/plugin-vue-jsx';
 
 // Vben 规范化: @ -> src, 统一别名; 后端 /api 经 proxy 转发 8011
+// base=/admin/：控制台挂站点 /admin 路径下（与后端 app/main.py 的 SPA 托管对应），
+// 管理 API 已收进 /api/v1/admin，dev 代理只需转发 /api 与 /media。
 export default defineConfig({
+  base: '/admin/',
   plugins: [vue(), vueJsx()],
   resolve: {
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
@@ -13,13 +16,8 @@ export default defineConfig({
     port: 5173,
     host: '127.0.0.1',
     proxy: {
-      // 把 /api 经 proxy 转发到 FastAPI 后端(7000)
+      // 把 /api 经 proxy 转发到 FastAPI 后端(8011)，含 /api/v1/admin 管理 API
       '/api': {
-        target: 'http://127.0.0.1:8011',
-        changeOrigin: true,
-      },
-      // 把 /admin 经 proxy 转发到 FastAPI 后端(7000)
-      '/admin': {
         target: 'http://127.0.0.1:8011',
         changeOrigin: true,
       },

@@ -2,7 +2,7 @@
 
 约定：
 - 后台管理接口 = 登录会话（``Authorization: Bearer``）+ 权限码；
-- 引导密钥（``APP_ADMIN_API_KEY``）只能用于 ``POST /admin/onboard``；
+- 引导密钥（``APP_ADMIN_API_KEY``）只能用于 ``POST /api/v1/admin/onboard``；
 - 知识库与模型配置接口同样按权限码拦截（``knowledge:*`` / ``system:*``）。
 """
 
@@ -26,7 +26,7 @@ def _data(resp):
 async def test_onboard_requires_bootstrap_key(client, console):
     # 引导密钥不对 → 403（第二个超管不能靠这个端点抢注）
     resp = await client.post(
-        "/admin/onboard",
+        "/api/v1/admin/onboard",
         json={"username": "hacker", "password": "hunter2hunter2", "name": "x"},
         headers={"X-API-Key": "wrong-bootstrap-key"},
     )
@@ -35,7 +35,7 @@ async def test_onboard_requires_bootstrap_key(client, console):
 
     # 已经引导过一次：再拿正确密钥来也会被服务层拒绝
     resp = await client.post(
-        "/admin/onboard",
+        "/api/v1/admin/onboard",
         json={"username": "hacker", "password": "hunter2hunter2", "name": "x"},
         headers={"X-API-Key": "admin-test-key"},
     )
@@ -46,10 +46,10 @@ async def test_admin_api_key_no_longer_grants_anything(client, console):
     """核心变化：那串 admin key 不再能管理任何东西。"""
     # 先清掉登录写入的 cookie，否则 cookie 旁路会让请求合法
     client.cookies.clear()
-    resp = await client.get("/admin/accounts", headers={"X-API-Key": "admin-test-key"})
+    resp = await client.get("/api/v1/admin/accounts", headers={"X-API-Key": "admin-test-key"})
     assert resp.status_code == HTTPStatus.UNAUTHORIZED
     resp = await client.post(
-        "/admin/accounts",
+        "/api/v1/admin/accounts",
         json={"username": "x", "password": "pass-word-123", "roles": []},
         headers={"X-API-Key": "admin-test-key"},
     )
@@ -60,7 +60,7 @@ async def test_login_returns_effective_permissions(client, console):
     assert console["roles"] == [SUPERADMIN_ROLE]
     assert console["permissions"] == ["*"]  # 超管走通配，不必逐条列举
 
-    resp = await client.get("/admin/me", headers=console["headers"])
+    resp = await client.get("/api/v1/admin/me", headers=console["headers"])
     assert resp.status_code == HTTPStatus.OK
     body = _data(resp)
     assert body["username"] == "root"
@@ -69,7 +69,7 @@ async def test_login_returns_effective_permissions(client, console):
 
 
 async def test_builtin_roles_are_seeded_with_catalog_permissions(client, console):
-    resp = await client.get("/admin/roles", headers=console["headers"])
+    resp = await client.get("/api/v1/admin/roles", headers=console["headers"])
     assert resp.status_code == HTTPStatus.OK
     roles = {item["code"]: item for item in _data(resp)}
     assert set(roles) >= {SUPERADMIN_ROLE, "admin", "operator", "viewer"}
@@ -84,7 +84,7 @@ async def test_builtin_roles_are_seeded_with_catalog_permissions(client, console
         Permission.BLOG_READ,
     }
 
-    resp = await client.get("/admin/permissions", headers=console["headers"])
+    resp = await client.get("/api/v1/admin/permissions", headers=console["headers"])
     assert resp.status_code == HTTPStatus.OK
     assert {item["code"] for item in _data(resp)} == set(ALL_PERMISSIONS)
 
@@ -109,12 +109,12 @@ async def test_viewer_can_read_but_writes_are_denied(client, console, account_fa
     viewer = await account_factory("viewer1", ["viewer"])
     headers = viewer["headers"]
 
-    assert (await client.get("/admin/accounts", headers=headers)).status_code == HTTPStatus.OK
-    assert (await client.get("/admin/roles", headers=headers)).status_code == HTTPStatus.OK
-    assert (await client.get("/admin/sessions", headers=headers)).status_code == HTTPStatus.OK
+    assert (await client.get("/api/v1/admin/accounts", headers=headers)).status_code == HTTPStatus.OK
+    assert (await client.get("/api/v1/admin/roles", headers=headers)).status_code == HTTPStatus.OK
+    assert (await client.get("/api/v1/admin/sessions", headers=headers)).status_code == HTTPStatus.OK
 
     denied = await client.post(
-        "/admin/accounts",
+        "/api/v1/admin/accounts",
         json={"username": "x", "password": "pass-word-123", "roles": []},
         headers=headers,
     )
@@ -124,7 +124,7 @@ async def test_viewer_can_read_but_writes_are_denied(client, console, account_fa
     assert "管理账号" in message and Permission.ACCOUNT_MANAGE in message
 
     assert (
-        await client.delete("/admin/sessions/whatever", headers=headers)
+        await client.delete("/api/v1/admin/sessions/whatever", headers=headers)
     ).status_code == HTTPStatus.FORBIDDEN
 
 
@@ -138,7 +138,7 @@ async def test_role_manage_cannot_be_granted_by_non_superadmin(
 
     # 能建账号
     resp = await client.post(
-        "/admin/accounts",
+        "/api/v1/admin/accounts",
         json={"username": "peer", "password": "pass-word-123", "roles": ["viewer"]},
         headers=admin["headers"],
     )
@@ -146,7 +146,7 @@ async def test_role_manage_cannot_be_granted_by_non_superadmin(
 
     # 不能建角色（连 role:read 都有，但 role:manage 没有）
     resp = await client.post(
-        "/admin/roles",
+        "/api/v1/admin/roles",
         json={"code": "sneaky", "name": "越权", "permissions": [Permission.ROLE_MANAGE]},
         headers=admin["headers"],
     )
@@ -156,7 +156,7 @@ async def test_role_manage_cannot_be_granted_by_non_superadmin(
 async def test_superadmin_cannot_share_escalated_role(client, console, account_factory):
     """超管也不能把带 role:manage 的自定义角色分给他人 —— 除超管本人。"""
     resp = await client.post(
-        "/admin/roles",
+        "/api/v1/admin/roles",
         json={"code": "godlike", "name": "全权", "permissions": ["*"]},
         headers=console["headers"],
     )
@@ -165,7 +165,7 @@ async def test_superadmin_cannot_share_escalated_role(client, console, account_f
 
     # 只读角色可以正常创建并分配
     resp = await client.post(
-        "/admin/roles",
+        "/api/v1/admin/roles",
         json={
             "code": "auditor",
             "name": "审计",
@@ -182,25 +182,25 @@ async def test_superadmin_cannot_share_escalated_role(client, console, account_f
 
     # 授权生效：它能看会话/账号，仍然不能建账号（缺 account:manage）
     assert (
-        await client.get("/admin/sessions", headers=member["headers"])
+        await client.get("/api/v1/admin/sessions", headers=member["headers"])
     ).status_code == HTTPStatus.OK
     assert (
         await client.post(
-            "/admin/accounts",
+            "/api/v1/admin/accounts",
             json={"username": "x", "password": "pass-word-123", "roles": []},
             headers=member["headers"],
         )
     ).status_code == HTTPStatus.FORBIDDEN
 
     # 有成员在用 → 不允许删角色
-    resp = await client.delete(f"/admin/roles/{role['id']}", headers=console["headers"])
+    resp = await client.delete(f"/api/v1/admin/roles/{role['id']}", headers=console["headers"])
     assert resp.status_code == HTTPStatus.BAD_REQUEST
     assert "使用" in resp.json()["message"]
 
 
 async def test_permission_codes_are_validated_against_catalog(client, console):
     resp = await client.post(
-        "/admin/roles",
+        "/api/v1/admin/roles",
         json={"code": "odd", "name": "脏数据", "permissions": ["kb:delete", "role:read"]},
         headers=console["headers"],
     )
@@ -212,25 +212,25 @@ async def test_permission_codes_are_validated_against_catalog(client, console):
 async def test_superadmin_role_is_locked(client, console):
     roles = {
         item["code"]: item
-        for item in _data(await client.get("/admin/roles", headers=console["headers"]))
+        for item in _data(await client.get("/api/v1/admin/roles", headers=console["headers"]))
     }
     superadmin = roles[SUPERADMIN_ROLE]
 
     resp = await client.patch(
-        f"/admin/roles/{superadmin['id']}",
+        f"/api/v1/admin/roles/{superadmin['id']}",
         json={"permissions": [Permission.ACCOUNT_READ]},
         headers=console["headers"],
     )
     assert resp.status_code == HTTPStatus.BAD_REQUEST
     assert "全部权限" in resp.json()["message"]
 
-    resp = await client.delete(f"/admin/roles/{superadmin['id']}", headers=console["headers"])
+    resp = await client.delete(f"/api/v1/admin/roles/{superadmin['id']}", headers=console["headers"])
     assert resp.status_code == HTTPStatus.BAD_REQUEST
     assert "内置角色" in resp.json()["message"]
 
     # 名称/描述可以改（不影响权限），方便本地化
     resp = await client.patch(
-        f"/admin/roles/{superadmin['id']}", json={"name": "首席管理员"}, headers=console["headers"]
+        f"/api/v1/admin/roles/{superadmin['id']}", json={"name": "首席管理员"}, headers=console["headers"]
     )
     assert resp.status_code == HTTPStatus.OK
     assert _data(resp)["name"] == "首席管理员"
@@ -238,21 +238,21 @@ async def test_superadmin_role_is_locked(client, console):
 
 
 async def test_last_superadmin_cannot_lock_itself_out(client, console, account_factory):
-    me = _data(await client.get("/admin/me", headers=console["headers"]))
+    me = _data(await client.get("/api/v1/admin/me", headers=console["headers"]))
 
     resp = await client.patch(
-        f"/admin/accounts/{me['id']}", json={"is_active": False}, headers=console["headers"]
+        f"/api/v1/admin/accounts/{me['id']}", json={"is_active": False}, headers=console["headers"]
     )
     assert resp.status_code == HTTPStatus.BAD_REQUEST
     assert "自己" in resp.json()["message"]
 
-    resp = await client.delete(f"/admin/accounts/{me['id']}", headers=console["headers"])
+    resp = await client.delete(f"/api/v1/admin/accounts/{me['id']}", headers=console["headers"])
     assert resp.status_code == HTTPStatus.BAD_REQUEST
     assert "自己" in resp.json()["message"]
 
     # 只剩一个超管时，不能把自己的超管角色收回去
     resp = await client.put(
-        f"/admin/accounts/{me['id']}/roles",
+        f"/api/v1/admin/accounts/{me['id']}/roles",
         json={"roles": ["admin"]},
         headers=console["headers"],
     )
@@ -262,7 +262,7 @@ async def test_last_superadmin_cannot_lock_itself_out(client, console, account_f
     # 有第二个超管接手后，就可以退下来了
     await account_factory("root2", [SUPERADMIN_ROLE])
     resp = await client.put(
-        f"/admin/accounts/{me['id']}/roles",
+        f"/api/v1/admin/accounts/{me['id']}/roles",
         json={"roles": ["admin"]},
         headers=console["headers"],
     )
@@ -274,46 +274,46 @@ async def test_disabling_account_revokes_its_sessions(
     client, console, account_factory
 ):
     member = await account_factory("ops", ["operator"])
-    assert (await client.get("/admin/sessions", headers=member["headers"])).status_code == (
+    assert (await client.get("/api/v1/admin/sessions", headers=member["headers"])).status_code == (
         HTTPStatus.OK
     )
 
     resp = await client.patch(
-        f"/admin/accounts/{member['id']}", json={"is_active": False}, headers=console["headers"]
+        f"/api/v1/admin/accounts/{member['id']}", json={"is_active": False}, headers=console["headers"]
     )
     assert resp.status_code == HTTPStatus.OK
     assert _data(resp)["is_active"] is False
 
-    blocked = await client.get("/admin/sessions", headers=member["headers"])
+    blocked = await client.get("/api/v1/admin/sessions", headers=member["headers"])
     assert blocked.status_code == HTTPStatus.UNAUTHORIZED
 
     # 停用后也无法登录
     login = await client.post(
-        "/admin/login", json={"username": "ops", "password": "member-pass-123"}
+        "/api/v1/admin/login", json={"username": "ops", "password": "member-pass-123"}
     )
     assert login.status_code == HTTPStatus.UNAUTHORIZED
 
     # 重新启用后要显式登录才能再用
     await client.patch(
-        f"/admin/accounts/{member['id']}", json={"is_active": True}, headers=console["headers"]
+        f"/api/v1/admin/accounts/{member['id']}", json={"is_active": True}, headers=console["headers"]
     )
     login = await client.post(
-        "/admin/login", json={"username": "ops", "password": "member-pass-123"}
+        "/api/v1/admin/login", json={"username": "ops", "password": "member-pass-123"}
     )
     assert login.status_code == HTTPStatus.OK
 
 
 async def test_revoke_single_session(client, console, account_factory):
     member = await account_factory("temp", ["viewer"])
-    sessions = _data(await client.get("/admin/sessions", headers=console["headers"]))
+    sessions = _data(await client.get("/api/v1/admin/sessions", headers=console["headers"]))
     target = next(item for item in sessions if item["admin_id"] == member["id"])
 
     resp = await client.delete(
-        f"/admin/sessions/{target['id']}", headers=console["headers"]
+        f"/api/v1/admin/sessions/{target['id']}", headers=console["headers"]
     )
     assert resp.status_code == HTTPStatus.OK
     assert (
-        await client.get("/admin/accounts", headers=member["headers"])
+        await client.get("/api/v1/admin/accounts", headers=member["headers"])
     ).status_code == HTTPStatus.UNAUTHORIZED
 
 
@@ -323,7 +323,7 @@ async def test_role_membership_is_overwritten_not_merged(client, console, accoun
     assert Permission.ACCOUNT_READ in member["permissions"]  # 来自 viewer
 
     resp = await client.put(
-        f"/admin/accounts/{member['id']}/roles",
+        f"/api/v1/admin/accounts/{member['id']}/roles",
         json={"roles": ["viewer"]},
         headers=console["headers"],
     )
@@ -332,12 +332,12 @@ async def test_role_membership_is_overwritten_not_merged(client, console, accoun
 
     # 收回 operator 后失去 session:revoke
     assert (
-        await client.delete("/admin/sessions/whatever", headers=member["headers"])
+        await client.delete("/api/v1/admin/sessions/whatever", headers=member["headers"])
     ).status_code == HTTPStatus.FORBIDDEN
 
     # 未知角色名会被明确拒绝，避免拼错导致少授权
     resp = await client.put(
-        f"/admin/accounts/{member['id']}/roles",
+        f"/api/v1/admin/accounts/{member['id']}/roles",
         json={"roles": ["superadminn"]},
         headers=console["headers"],
     )
@@ -348,7 +348,7 @@ async def test_role_membership_is_overwritten_not_merged(client, console, accoun
 async def test_only_superadmin_can_assign_superadmin(client, console, account_factory):
     admin = await account_factory("boss2", ["admin"])
     resp = await client.post(
-        "/admin/accounts",
+        "/api/v1/admin/accounts",
         json={"username": "sneak", "password": "pass-word-123", "roles": [SUPERADMIN_ROLE]},
         headers=admin["headers"],
     )
@@ -358,7 +358,7 @@ async def test_only_superadmin_can_assign_superadmin(client, console, account_fa
     # 超管可以，但收回最后一个超管的角色会被拦住（见 test_superadmin_role_is_locked 同源保护）
     target = await account_factory("candidate", ["viewer"])
     resp = await client.put(
-        f"/admin/accounts/{target['id']}/roles",
+        f"/api/v1/admin/accounts/{target['id']}/roles",
         json={"roles": [SUPERADMIN_ROLE]},
         headers=console["headers"],
     )
@@ -367,7 +367,7 @@ async def test_only_superadmin_can_assign_superadmin(client, console, account_fa
 
     # 现在有两个超管，可以收回其中一个
     resp = await client.put(
-        f"/admin/accounts/{target['id']}/roles",
+        f"/api/v1/admin/accounts/{target['id']}/roles",
         json={"roles": ["admin"]},
         headers=console["headers"],
     )
@@ -377,14 +377,14 @@ async def test_only_superadmin_can_assign_superadmin(client, console, account_fa
 
 async def test_deleting_account_with_other_superadmin_online(client, console, account_factory):
     target = await account_factory("gone", ["viewer"])
-    resp = await client.delete(f"/admin/accounts/{target['id']}", headers=console["headers"])
+    resp = await client.delete(f"/api/v1/admin/accounts/{target['id']}", headers=console["headers"])
     assert resp.status_code == HTTPStatus.OK
     assert (
-        await client.get("/admin/accounts", headers=target["headers"])
+        await client.get("/api/v1/admin/accounts", headers=target["headers"])
     ).status_code == HTTPStatus.UNAUTHORIZED
     usernames = {
         item["username"]
-        for item in _data(await client.get("/admin/accounts", headers=console["headers"]))
+        for item in _data(await client.get("/api/v1/admin/accounts", headers=console["headers"]))
     }
     assert "gone" not in usernames
 
@@ -399,7 +399,7 @@ async def _grant_role(
 ) -> dict:
     """建一个只含指定权限的自定义角色，并装好一个成员账号，返它的凭据。"""
     resp = await client.post(
-        "/admin/roles",
+        "/api/v1/admin/roles",
         json={"code": code, "name": code, "permissions": permissions},
         headers=console["headers"],
     )

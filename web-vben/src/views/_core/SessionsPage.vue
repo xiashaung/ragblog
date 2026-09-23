@@ -20,11 +20,13 @@ const { can, need } = usePerm();
 const canRevoke = computed(() => can('session:revoke'));
 const isSelf = (row: SessionItem) => row.admin_id === auth.userInfo?.id;
 
+// 窄屏（笔记本）兜底：会话 ID 是一长串随机字符，不给宽度会把整行撑爆，
+// 这里固定宽度 + 省略号，并写明 scroll.x。
 const columns = [
-  { title: '会话 ID', dataIndex: 'id', key: 'id', ellipsis: true },
-  { title: '账号', key: 'username' },
-  { title: '过期时间', key: 'expires_at', width: 200 },
-  { title: '操作', key: 'actions', width: 140 },
+  { title: '会话 ID', dataIndex: 'id', key: 'id', width: 260, ellipsis: true },
+  { title: '账号', key: 'username', width: 180 },
+  { title: '过期时间', key: 'expires_at', width: 200, responsive: ['lg'] as const },
+  { title: '操作', key: 'actions', width: 120, fixed: 'right' as const },
 ];
 
 async function refresh() {
@@ -74,6 +76,7 @@ onMounted(refresh);
         :loading="loading"
         row-key="id"
         size="middle"
+        :scroll="{ x: 760 }"
         :pagination="{ pageSize: 15, hideOnSinglePage: true }"
       >
         <!-- ant-design-vue 4 只支持 #bodyCell 这一个单元格插槽，按 column.key 分支渲染 -->

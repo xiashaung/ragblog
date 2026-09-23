@@ -50,13 +50,15 @@ const filters = reactive({
 const selectedKeys = ref<string[]>([]);
 const reindexing = ref('');
 
+// 窄屏（笔记本）兜底：「标题」列里带标签与预览摘要，不给最小宽度会被挤成一堆折行，
+// 因此写明列宽 + scroll.x（横向滚动代替列内容变形），操作列钉右。
 const columns = [
-  { title: '标题', dataIndex: 'title', key: 'title', ellipsis: true },
+  { title: '标题', dataIndex: 'title', key: 'title', width: 320 },
   { title: 'Provider', dataIndex: 'provider', key: 'provider', width: 150 },
   { title: '分片', dataIndex: 'chunks', key: 'chunks', width: 70 },
   { title: '字符', dataIndex: 'chars', key: 'chars', width: 90 },
-  { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 165 },
-  { title: '操作', key: 'actions', width: 250 },
+  { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 160, responsive: ['lg'] as const },
+  { title: '操作', key: 'actions', width: 300, fixed: 'right' as const },
 ];
 
 // provider 过滤项来自后端实际入库情况，而非硬编码枚举
@@ -351,6 +353,7 @@ onMounted(async () => {
           showTotal: (t: number) => `共 ${t} 条`,
         }"
         size="middle"
+        :scroll="{ x: 1120 }"
         @change="onTableChange"
       >
         <template #bodyCell="{ column, record, text }">
@@ -431,11 +434,11 @@ onMounted(async () => {
       <div class="sub" style="margin-top: 8px">改名会同步更新检索结果的来源名称，不会重新向量化</div>
     </a-modal>
 
-    <!-- 详情抽屉 -->
+    <!-- 详情抽屉：窄屏（笔记本）下不让它固定 860 把整页遮完，取容器宽与 92vw 的较小值 -->
     <a-drawer
       :open="detailVisible"
       :title="detail?.doc?.title || '文档详情'"
-      :width="860"
+      width="min(860px, 94vw)"
       @close="detailVisible = false"
     >
       <a-spin :spinning="detailLoading">

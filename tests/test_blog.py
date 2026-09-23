@@ -20,7 +20,7 @@ async def _create_post(client, headers, **overrides) -> dict:
         "tags": ["redis", "后端"],
         **overrides,
     }
-    resp = await client.post("/admin/blogs", json=body, headers=headers)
+    resp = await client.post("/api/v1/admin/blogs", json=body, headers=headers)
     assert resp.status_code == HTTPStatus.CREATED, resp.text
     return payload(resp)
 
@@ -38,7 +38,7 @@ async def test_blog_crud_and_publish_roundtrip(client, console):
     resp = await client.get("/api/v1/blog/posts")
     assert payload(resp)["total"] == 0
 
-    resp = await client.post(f"/admin/blogs/{pid}/publish", headers=h)
+    resp = await client.post(f"/api/v1/admin/blogs/{pid}/publish", headers=h)
     assert resp.status_code == HTTPStatus.OK, resp.text
     published = payload(resp)
     assert published["status"] == "published"
@@ -61,22 +61,22 @@ async def test_blog_crud_and_publish_roundtrip(client, console):
     assert names == {"redis", "后端"}
 
     # 下线后前台与检索都应当清空
-    resp = await client.post(f"/admin/blogs/{pid}/unpublish", headers=h)
+    resp = await client.post(f"/api/v1/admin/blogs/{pid}/unpublish", headers=h)
     assert payload(resp)["status"] == "draft"
     assert payload(await client.get("/api/v1/blog/posts"))["total"] == 0
     resp = await client.post("/api/v1/blog/search", json={"query": "过期策略"})
     assert payload(resp)["items"] == []
 
-    resp = await client.delete(f"/admin/blogs/{pid}", headers=h)
+    resp = await client.delete(f"/api/v1/admin/blogs/{pid}", headers=h)
     assert resp.status_code == HTTPStatus.NO_CONTENT
-    assert payload(await client.get("/admin/blogs", headers=h))["total"] == 0
+    assert payload(await client.get("/api/v1/admin/blogs", headers=h))["total"] == 0
 
 
 async def test_publish_rejects_empty_content(client, console):
     """空正文发布 → 400（服务层 ValueError 由全局处理器翻译）。"""
     h = console["headers"]
     post = await _create_post(client, h, content="")
-    resp = await client.post(f"/admin/blogs/{post['id']}/publish", headers=h)
+    resp = await client.post(f"/api/v1/admin/blogs/{post['id']}/publish", headers=h)
     assert resp.status_code == HTTPStatus.BAD_REQUEST
     assert "正文为空" in resp.json()["message"]
 
@@ -84,15 +84,15 @@ async def test_publish_rejects_empty_content(client, console):
 async def test_blog_rbac_gating(client, console, account_factory):
     """RBAC：operator 无权（403）；viewer 可读列表但不能建文章。"""
     operator = await account_factory("op1", ["operator"])
-    resp = await client.get("/admin/blogs", headers=operator["headers"])
+    resp = await client.get("/api/v1/admin/blogs", headers=operator["headers"])
     assert resp.status_code == HTTPStatus.FORBIDDEN
     assert "blog:read" in resp.json()["message"] or "查看博客" in resp.json()["message"]
 
     viewer = await account_factory("view1", ["viewer"])
-    resp = await client.get("/admin/blogs", headers=viewer["headers"])
+    resp = await client.get("/api/v1/admin/blogs", headers=viewer["headers"])
     assert resp.status_code == HTTPStatus.OK, resp.text  # blog:read 已随内置角色预发
     resp = await client.post(
-        "/admin/blogs", json={"title": "x", "content": "y"}, headers=viewer["headers"]
+        "/api/v1/admin/blogs", json={"title": "x", "content": "y"}, headers=viewer["headers"]
     )
     assert resp.status_code == HTTPStatus.FORBIDDEN
     # 注：不在这里断言「不带 header 应 401」——本 client 的登录响应往 cookie 里
@@ -114,7 +114,7 @@ async def test_blog_search_scoped_to_published_posts(client, console, admin_head
     post = await _create_post(client, h)
     pid = post["id"]
     published = payload(
-        await client.post(f"/admin/blogs/{pid}/publish", headers=h)
+        await client.post(f"/api/v1/admin/blogs/{pid}/publish", headers=h)
     )
     old_doc = published["knowledge_id"]
 
@@ -126,7 +126,7 @@ async def test_blog_search_scoped_to_published_posts(client, console, admin_head
 
     # 改标题再发布：标题派生的旧文档要被删掉，不残留
     resp = await client.patch(
-        f"/admin/blogs/{pid}", json={"title": "缓存实践手册"}, headers=h
+        f"/api/v1/admin/blogs/{pid}", json={"title": "缓存实践手册"}, headers=h
     )
     assert resp.status_code == HTTPStatus.OK  # 已发布文章改标题会自动重同步
     new_doc = payload(resp)["knowledge_id"]
@@ -142,7 +142,7 @@ async def test_blog_search_scoped_to_published_posts(client, console, admin_head
     assert all(i["slug"] == published["slug"] for i in payload(resp)["items"])
 
     # 删除博客文章连带删掉同步出的知识文档
-    resp = await client.delete(f"/admin/blogs/{pid}", headers=h)
+    resp = await client.delete(f"/api/v1/admin/blogs/{pid}", headers=h)
     assert resp.status_code == HTTPStatus.NO_CONTENT
     resp = await client.get(f"/api/v1/ai/knowledge/{new_doc}", headers=admin_headers)
     assert resp.status_code == HTTPStatus.NOT_FOUND
@@ -161,7 +161,7 @@ async def test_blog_chat_streams_citations_then_chunks(client, console):
     h = console["headers"]
     post = await _create_post(client, h)
     published = payload(
-        await client.post(f"/admin/blogs/{post['id']}/publish", headers=h)
+        await client.post(f"/api/v1/admin/blogs/{post['id']}/publish", headers=h)
     )
 
     resp = await client.post(
@@ -198,7 +198,7 @@ async def test_blog_chat_rejects_bad_requests(client, console):
 async def _create_category(client, h, **overrides) -> dict:
     """建一个默认名为「Tech」的分类，返回响应体。"""
     body = {"name": "Tech", "sort_order": 1, **overrides}
-    resp = await client.post("/admin/blogs/categories", json=body, headers=h)
+    resp = await client.post("/api/v1/admin/blogs/categories", json=body, headers=h)
     assert resp.status_code == HTTPStatus.CREATED, resp.text
     return payload(resp)
 
@@ -212,7 +212,7 @@ async def test_blog_category_crud(client, console):
 
     # 重名 → 400
     resp = await client.post(
-        "/admin/blogs/categories", json={"name": "Tech"}, headers=h
+        "/api/v1/admin/blogs/categories", json={"name": "Tech"}, headers=h
     )
     assert resp.status_code == HTTPStatus.BAD_REQUEST
     assert "已被占用" in resp.json()["message"]
@@ -223,7 +223,7 @@ async def test_blog_category_crud(client, console):
 
     # 改名 + 改排序
     resp = await client.patch(
-        f"/admin/blogs/categories/{cat['id']}",
+        f"/api/v1/admin/blogs/categories/{cat['id']}",
         json={"name": "Backend", "sort_order": 5},
         headers=h,
     )
@@ -233,12 +233,12 @@ async def test_blog_category_crud(client, console):
     assert body["sort_order"] == 5
 
     # 列表按 sort_order 排：Backend(5) 在 技术 之后还是之前？默认 0 < 5
-    items = payload(await client.get("/admin/blogs/categories", headers=h))["items"]
+    items = payload(await client.get("/api/v1/admin/blogs/categories", headers=h))["items"]
     assert [c["name"] for c in items] == ["技术", "Backend"]
 
-    resp = await client.delete(f"/admin/blogs/categories/{zh['id']}", headers=h)
+    resp = await client.delete(f"/api/v1/admin/blogs/categories/{zh['id']}", headers=h)
     assert resp.status_code == HTTPStatus.NO_CONTENT
-    resp = await client.delete(f"/admin/blogs/categories/{zh['id']}", headers=h)
+    resp = await client.delete(f"/api/v1/admin/blogs/categories/{zh['id']}", headers=h)
     assert resp.status_code == HTTPStatus.NOT_FOUND
 
 
@@ -249,7 +249,7 @@ async def test_post_category_assignment_and_public_filter(client, console):
 
     # 挂不存在的分类 → 400
     resp = await client.post(
-        "/admin/blogs",
+        "/api/v1/admin/blogs",
         json={"title": "x", "content": "y", "category_id": "bc-nope"},
         headers=h,
     )
@@ -261,19 +261,19 @@ async def test_post_category_assignment_and_public_filter(client, console):
 
     # 后台按分类 ID 筛选
     listing = payload(
-        await client.get(f"/admin/blogs?category_id={cat['id']}", headers=h)
+        await client.get(f"/api/v1/admin/blogs?category_id={cat['id']}", headers=h)
     )
     assert listing["total"] == 1
     other = await _create_category(client, h, name="Life")
     assert (
-        payload(await client.get(f"/admin/blogs?category_id={other['id']}", headers=h))[
+        payload(await client.get(f"/api/v1/admin/blogs?category_id={other['id']}", headers=h))[
             "total"
         ]
         == 0
     )
 
     # 草稿不进分类计数；发布后才出现在前台分类导航
-    resp = await client.post(f"/admin/blogs/{post['id']}/publish", headers=h)
+    resp = await client.post(f"/api/v1/admin/blogs/{post['id']}/publish", headers=h)
     published = payload(resp)
     assert published["category"]["slug"] == "tech"
     cats = payload(await client.get("/api/v1/blog/categories"))["items"]
@@ -292,14 +292,14 @@ async def test_post_category_assignment_and_public_filter(client, console):
     assert detail["category"]["slug"] == "tech"
 
     # 分类下有文章时删除被拦；移出文章后可以删掉
-    resp = await client.delete(f"/admin/blogs/categories/{cat['id']}", headers=h)
+    resp = await client.delete(f"/api/v1/admin/blogs/categories/{cat['id']}", headers=h)
     assert resp.status_code == HTTPStatus.BAD_REQUEST
     assert "请先重新归类" in resp.json()["message"]
     resp = await client.patch(
-        f"/admin/blogs/{post['id']}", json={"category_id": None}, headers=h
+        f"/api/v1/admin/blogs/{post['id']}", json={"category_id": None}, headers=h
     )
     assert payload(resp)["category"] is None
-    resp = await client.delete(f"/admin/blogs/categories/{cat['id']}", headers=h)
+    resp = await client.delete(f"/api/v1/admin/blogs/categories/{cat['id']}", headers=h)
     assert resp.status_code == HTTPStatus.NO_CONTENT
 
 
@@ -309,7 +309,7 @@ async def test_post_neighbors_navigation(client, console):
     slugs = []
     for title in [("初识协程"), ("进阶 asyncio"), ("实战调优")]:
         post = await _create_post(client, h, title=title, content=f"# {title}\n正文内容。")
-        resp = await client.post(f"/admin/blogs/{post['id']}/publish", headers=h)
+        resp = await client.post(f"/api/v1/admin/blogs/{post['id']}/publish", headers=h)
         assert resp.status_code == HTTPStatus.OK, resp.text
         slugs.append(payload(resp)["slug"])
 
@@ -338,12 +338,12 @@ async def test_post_related_recommendations(client, console):
     """相关推荐：同分类优先、共同标签加权；草稿与自身不进候选。"""
     h = console["headers"]
     cat = payload(
-        await client.post("/admin/blogs/categories", json={"name": "Backend"}, headers=h)
+        await client.post("/api/v1/admin/blogs/categories", json={"name": "Backend"}, headers=h)
     )
 
     async def _publish(**body) -> dict:
         post = await _create_post(client, h, **body)
-        resp = await client.post(f"/admin/blogs/{post['id']}/publish", headers=h)
+        resp = await client.post(f"/api/v1/admin/blogs/{post['id']}/publish", headers=h)
         assert resp.status_code == HTTPStatus.OK, resp.text
         return payload(resp)
 

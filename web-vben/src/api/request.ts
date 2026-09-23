@@ -10,8 +10,9 @@
 import axios, { type AxiosInstance, type AxiosRequestConfig, type AxiosResponse } from 'axios';
 
 /**
- * admin 体系走独立前缀 /admin（无 /api/v1，见后端 app/main.py 的 include_router(admin.router)）。
- * 其余接口（health/ai/keys/knowledge）统一走 /api/v1。
+ * admin 体系接口已收进 /api/v1/admin（见后端 app/routers/admin.py），/admin 路径
+ * 纯留给控制台 SPA 页面。两个实例的 baseURL 都是 /api/v1，页面调用时只需再拼
+ * 各自子路径（如 /admin/login → /api/v1/admin/login）。
  */
 /**
  * 这些接口的 401 属于「凭据本身不对」，不是控制台会话失效，不该清 token + 弹窗：
@@ -61,7 +62,7 @@ export function applyBaseInterceptors(instance: AxiosInstance, base: string): vo
         modal.error({
           title: '登录已失效',
           content: (error as any).detail || '请重新登录',
-          onOk: () => { location.href = '/auth/login'; },
+          onOk: () => { location.href = `${import.meta.env.BASE_URL}auth/login`; },
         });
       }
     }
@@ -69,9 +70,9 @@ export function applyBaseInterceptors(instance: AxiosInstance, base: string): vo
   });
 }
 
-// admin 实例：baseURL 留空，路径写完整 `/admin/...`，避免二次拼接成 `/admin/admin/...`
-export const httpAdmin = axios.create({ baseURL: '', timeout: 60_000, withCredentials: true });
-applyBaseInterceptors(httpAdmin, '');
+// admin 实例：baseURL /api/v1 + 路径 `/admin/...` → 最终 /api/v1/admin/...
+export const httpAdmin = axios.create({ baseURL: '/api/v1', timeout: 60_000, withCredentials: true });
+applyBaseInterceptors(httpAdmin, '/api/v1');
 
 // 其余接口实例：前缀 /api/v1
 export const http = axios.create({ baseURL: '/api/v1', timeout: 60_000, withCredentials: true });

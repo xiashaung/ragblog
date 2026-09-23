@@ -65,13 +65,15 @@ const roleOptions = computed(() =>
   roles.value.map((item) => ({ label: `${item.name}（${item.code}）`, value: item.code })),
 );
 
+// 窄屏（笔记本）兜底：给固定列写明宽度 + 整表 scroll.x，列宽不够时横向滚动，
+// 而不是把「角色」列挤成一堆换行的标签；操作列钉右，滚多远都能点得到。
 const columns = [
-  { title: '用户名', dataIndex: 'username', key: 'username' },
-  { title: '姓名', dataIndex: 'name', key: 'name' },
+  { title: '用户名', dataIndex: 'username', key: 'username', width: 160, ellipsis: true },
+  { title: '姓名', dataIndex: 'name', key: 'name', width: 160, ellipsis: true },
   { title: '角色', key: 'roles' },
-  { title: '状态', key: 'status', width: 120 },
-  { title: '创建时间', key: 'created_at', width: 180 },
-  { title: '操作', key: 'actions', width: 260 },
+  { title: '状态', key: 'status', width: 110 },
+  { title: '创建时间', key: 'created_at', width: 170, responsive: ['lg'] as const },
+  { title: '操作', key: 'actions', width: 260, fixed: 'right' as const },
 ];
 
 function roleName(code: string) {
@@ -218,6 +220,7 @@ onMounted(load);
         :loading="loading"
         row-key="id"
         size="middle"
+        :scroll="{ x: 1080 }"
         :pagination="{ pageSize: 10, hideOnSinglePage: true }"
       >
         <!-- ant-design-vue 4 只支持 #bodyCell 这一个单元格插槽，按 column.key 分支渲染 -->

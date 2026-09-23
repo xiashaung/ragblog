@@ -482,7 +482,7 @@ onMounted(() => {
           <a-input-search
             v-model:value="query"
             placeholder="输入查询，查看命中的相似片段"
-            style="width: 320px"
+            style="width: min(320px, 100%)"
             enter-button="检索"
             :loading="searching"
             @search="runSearch"
@@ -526,7 +526,7 @@ onMounted(() => {
     <a-drawer
       :open="docDrawer.visible"
       :title="docDrawer.data?.doc?.title || '文档详情'"
-      :width="720"
+      width="min(720px, 94vw)"
       @close="docDrawer.visible = false"
     >
       <a-spin :spinning="docDrawer.loading">
@@ -602,7 +602,7 @@ onMounted(() => {
   flex: 1;
   overflow-y: auto;
   height: 56vh;
-  min-height: 320px;
+  min-height: 280px;
   padding: 16px 18px;
   display: flex;
   flex-direction: column;
@@ -702,8 +702,8 @@ onMounted(() => {
   padding: 12px 18px; border-top: 1px solid var(--app-border); background: var(--app-panel);
 }
 .chat-composer :deep(.ant-input) { font-size: 14px; }
-.composer-top { display: flex; align-items: center; gap: 10px; }
-.composer-input { display: flex; align-items: flex-end; gap: 8px; }
+.composer-top { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.composer-input { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 8px; }
 .attach-btn {
   display: inline-flex; align-items: center; gap: 4px;
   font-size: 13px; color: #2563eb; cursor: pointer;
@@ -711,7 +711,7 @@ onMounted(() => {
 }
 .attach-btn:hover { background: var(--app-hover); }
 .attach-btn.disabled { opacity: 0.5; cursor: not-allowed; }
-.attach-hint { font-size: 12px; color: var(--app-muted); }
+.attach-hint { font-size: 12px; color: var(--app-muted); min-width: 120px; }
 .attach-preview { display: flex; flex-wrap: wrap; gap: 8px; }
 .attach-thumb { position: relative; }
 .attach-thumb img {

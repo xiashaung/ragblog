@@ -123,7 +123,7 @@ async def client(
 async def admin_headers(client, console) -> dict[str, str]:
     """AI / 知识库类接口的通用凭据：引导 Key + 超管会话，两个都带上。
 
-    引导 Key（``X-API-Key``）只对 ``/admin/onboard`` 有意义；知识库与模型配置接口
+    引导 Key（``X-API-Key``）只对 ``/api/v1/admin/onboard`` 有意义；知识库与模型配置接口
     已按 RBAC 真拦截（``knowledge:*`` / ``system:*``），光有引导 Key 会 401，
     所以这里复用 ``console`` 的超管 token（持有 ``*`` 通配，全量放行）。
     需要验证「无权限被拒」的用例请改用 ``account_factory`` 建普通账号。
@@ -148,17 +148,17 @@ def payload(resp) -> dict:
 async def console(client) -> dict:
     """Seed the first super-admin and return its console credentials.
 
-    ``/admin/onboard`` 需要引导密钥（与 ``APP_ADMIN_API_KEY`` 一致），
+    ``/api/v1/admin/onboard`` 需要引导密钥（与 ``APP_ADMIN_API_KEY`` 一致），
     之后所有管理接口靠 ``Authorization: Bearer <token>`` + 角色权限。
     """
     res = await client.post(
-        "/admin/onboard",
+        "/api/v1/admin/onboard",
         json={"username": "root", "password": ROOT_PASSWORD, "name": "Root"},
         headers=BOOTSTRAP_KEY_HEADERS,
     )
     assert res.status_code == 200, res.text
     res = await client.post(
-        "/admin/login", json={"username": "root", "password": ROOT_PASSWORD}
+        "/api/v1/admin/login", json={"username": "root", "password": ROOT_PASSWORD}
     )
     assert res.status_code == 200, res.text
     body = payload(res)
@@ -177,7 +177,7 @@ def account_factory(client, console):
     Usage::
 
         acct = await account_factory("viewer1", ["viewer"])
-        await client.get("/admin/accounts", headers=acct["headers"])
+        await client.get("/api/v1/admin/accounts", headers=acct["headers"])
     """
 
     async def make(
@@ -186,13 +186,13 @@ def account_factory(client, console):
         password: str = "member-pass-123",
     ) -> dict:
         res = await client.post(
-            "/admin/accounts",
+            "/api/v1/admin/accounts",
             json={"username": username, "password": password, "name": username, "roles": roles},
             headers=console["headers"],
         )
         assert res.status_code == 201, res.text
         account_id = payload(res)["id"]
-        res = await client.post("/admin/login", json={"username": username, "password": password})
+        res = await client.post("/api/v1/admin/login", json={"username": username, "password": password})
         assert res.status_code == 200, res.text
         body = payload(res)
         token = body["token"]
