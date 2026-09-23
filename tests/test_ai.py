@@ -108,6 +108,92 @@ def test_chunk_text_bounds_every_chunk():
     assert rag.chunk_text("hello\nworld", chunk_size=500) == ["hello\nworld"]
 
 
+def test_chunk_text_hard_split_prefers_sentence_boundaries():
+    """无换行的超长段落切在句末，而不是固定字符宽度截断。"""
+    from app.services import rag
+
+    para = "第一步是安装依赖并确认环境变量已配置。" * 60
+    chunks = rag.chunk_text(para, chunk_size=300)
+    assert len(chunks) > 1
+    assert all(0 < len(c) <= 300 for c in chunks)
+    # 除最后一块外都停在句末标点上（不再切在半句中间）
+    assert all(c.rstrip().endswith("。") for c in chunks[:-1])
+    # 拼接后内容不丢：所有片段拼回去能覆盖原文
+    assert para.startswith(chunks[0].lstrip())
+    assert para.endswith(chunks[-1][-20:])
+
+
+def test_chunk_text_overlap_scales_with_chunk_size():
+    """默认重叠窗口随 chunk_size 缩放，不再固定 80。"""
+    from app.services import rag
+
+    text = "".join(f"S{i:05d}" for i in range(800))
+    small = rag.chunk_text(text, chunk_size=200)
+    large = rag.chunk_text(text, chunk_size=2000)
+    assert all(len(c) <= 200 for c in small)
+    assert all(len(c) <= 2000 for c in large)
+    # 两份都能从第一块头覆盖到最后一块尾
+    assert text[-20:] in small[-1] and text[-20:] in large[-1]
+
+
+def test_split_markdown_sections_tracks_heading_path():
+    """标题栈维护层级，代码围栏里的 # 不算标题。"""
+    from app.services import rag
+
+    md = (
+        "引言正文。\n\n"
+        "# 部署指南\n\n概述。\n\n"
+        "## Nginx\n\n```\n# 这不是标题\n```\n\n监听 80。\n\n"
+        "### 上游配置\n\n后端 8080。\n\n"
+        "## Redis\n\n默认端口 6379。"
+    )
+    sections = rag.split_markdown_sections(md)
+    paths = [p for p, _ in sections]
+    assert paths == [
+        [],
+        ["部署指南"],
+        ["部署指南", "Nginx"],
+        ["部署指南", "Nginx", "上游配置"],
+        ["部署指南", "Redis"],
+    ]
+    # 围栏内的 # 留在了正文里，没被当成标题
+    nginx_body = next(b for p, b in sections if p and p[-1] == "Nginx")
+    assert "# 这不是标题" in nginx_body
+
+
+def test_chunk_document_markdown_prepends_heading_path():
+    """Markdown 分片带标题路径前缀，不同小节不混进同一片。"""
+    from app.services import rag
+
+    md = (
+        "# 部署指南\n\n## Nginx 配置\n\n" + "监听 80 端口，开启 gzip。" * 30 + "\n\n"
+        "## Redis 配置\n\n默认密码为空。"
+    )
+    chunks = rag.chunk_document(md, chunk_size=300, fmt="markdown", title="部署指南")
+    nginx = [c for c in chunks if "监听" in c]
+    redis = [c for c in chunks if "默认密码" in c]
+    assert nginx and redis
+    assert all(c.startswith("部署指南 > Nginx 配置\n") for c in nginx)
+    assert redis[0].startswith("部署指南 > Redis 配置\n")
+    # 两个小节的正文不会混进同一片
+    assert all("默认密码" not in c for c in nginx)
+    # 拼上前缀后仍不超过 chunk_size
+    assert all(0 < len(c) <= 300 for c in chunks)
+
+
+def test_chunk_document_falls_back_for_plain_text_and_headingless():
+    """纯文本、以及没有标题的 Markdown 都退化为普通切分（不加前缀）。"""
+    from app.services import rag
+
+    text = "问：怎么重启？\n答：执行 systemctl restart。"
+    assert rag.chunk_document(text, chunk_size=500, fmt="text", title="FAQ") == [
+        text
+    ]
+    assert rag.chunk_document("没有标题的正文。", chunk_size=500, fmt="markdown", title="X") == [
+        "没有标题的正文。"
+    ]
+
+
 async def test_rag_ingest_and_answer(client, admin_headers):
     resp = await client.post(
         "/api/v1/ai/knowledge/ingest",

@@ -6,7 +6,7 @@ SQLite 上同一列退化成 JSON、打分回到 Python 算，测试与轻量开
 
 一次录入的流程（所有入口共用）：
     取文本（文件/裸文本/问答对/URL）→ :func:`upsert_document`
-    → :func:`chunk_text` 切块 → 批量 embedding → 写 ``knowledge_chunks``
+    → :func:`chunk_document` 切块（Markdown 按标题切节）→ 批量 embedding → 写 ``knowledge_chunks``
 
 检索则是：向量召回（Postgres 上可叠 pg_trgm 词法召回 → RRF 融合）
 →（可选）精排 → 拼上下文交给对话模型。
@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import re
 import time
 from collections.abc import Sequence
 
@@ -49,6 +50,8 @@ from . import llm, reranker, web_page
 from .markdown_text import normalize_content, stored_format, strip_markdown
 
 DEFAULT_CHUNK_SIZE = 500
+# 拼标题前缀后至少给正文留这么多字符，否则前缀太吃掉预算，退回不加前缀的普通切分。
+MIN_PREFIX_BUDGET = 64
 PREVIEW_CHARS = 120
 SNIPPET_CHARS = 500
 # FAQ 标记：把问句放在每块开头，让 embedding 先对齐问题（用户提问的措辞更像问句）。
@@ -68,13 +71,65 @@ def _chunk_size_of(
     return stored if isinstance(stored, int) and stored > 0 else fallback
 
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 80) -> list[str]:
-    """按段落边界切成带重叠的分片。
+# 句末标点：中英混合都认；前引号/括号跟随句子走，后引号并入句尾，
+# 第二个分支兜住没有任何标点的长串（整段交给定长硬切）。
+_SENTENCE_RE = re.compile(r"[^。！？；.!?]+[。！？；.!?]+[""'）)】」』]*|[^。！？；.!?]+")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]")
+# ATX 标题与代码围栏（围栏里的 ``#`` 不是标题）。
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
-    段落 packing 到 ``chunk_size`` 为止；单段超长时先硬切，所以没有换行的文档
-    （CSV、日志、不带空格中文）也能得到定长分片，而不是整块吐出来。
+
+def _join_sentences(current: str, sent: str) -> str:
+    """把句子接回片段：中文句末直接拼，英文之间补一个空格。"""
+    if not current:
+        return sent
+    if current[-1] in "。！？；" or _CJK_RE.match(sent[0]):
+        return current + sent
+    return f"{current} {sent}"
+
+
+def _split_long_paragraph(para: str, width: int, overlap: int) -> list[str]:
+    """把超长段落按句子边界打包成不超过 ``width`` 的 piece。
+
+    先按中英句末标点切句再 packing；只有单个句子仍超宽（整段没标点，
+    比如一长串数字/日志）才退回原来的定长硬切，保证一定有产出。
+    """
+    pieces: list[str] = []
+    current = ""
+    for sent in (s.strip() for s in _SENTENCE_RE.findall(para)):
+        if not sent:
+            continue
+        if len(sent) > width:
+            if current:
+                pieces.append(current)
+                current = ""
+            step = max(1, width - overlap)
+            pieces.extend(
+                sent[start : start + width] for start in range(0, len(sent), step)
+            )
+            continue
+        if current and len(current) + len(sent) > width:
+            pieces.append(current)
+            current = sent
+        else:
+            current = _join_sentences(current, sent)
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def chunk_text(text: str, chunk_size: int = 500, overlap: int | None = None) -> list[str]:
+    """按段落/句子边界切成带重叠的分片。
+
+    段落 packing 到 ``chunk_size`` 为止；单段超长时先按句末标点切句再打包
+    （见 :func:`_split_long_paragraph`），完全没有标点的长串才定长硬切，
+    所以 CSV、日志、无空格中文也都能得到不超过定长的分片。
+    重叠窗口默认按 ``chunk_size`` 的 1/10 取（太小则语义断裂，太大则稀释），
     每个返回分片都不超过 ``chunk_size`` 字符（含开头的 overlap 尾巴）。
     """
+    if overlap is None:
+        overlap = max(16, chunk_size // 10)
     overlap = max(0, min(overlap, chunk_size // 2))
     # 硬切宽度：留出位置给下一次 flush 时拼在前面的 overlap 尾巴，拼完仍不超 chunk_size。
     width = max(1, chunk_size - overlap - 1)
@@ -86,8 +141,7 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 80) -> list[str]
         if len(para) <= width:
             pieces.append(para)
             continue
-        step = max(1, width - overlap)
-        pieces.extend(para[start : start + width] for start in range(0, len(para), step))
+        pieces.extend(_split_long_paragraph(para, width, overlap))
 
     chunks: list[str] = []
     buffer = ""
@@ -101,6 +155,77 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 80) -> list[str]
     if buffer:
         chunks.append(buffer)
     return chunks or [text[:chunk_size]]
+
+
+def split_markdown_sections(text: str) -> list[tuple[list[str], str]]:
+    """按 ATX 标题把 Markdown 切成节，返 ``(标题路径, 该节正文)`` 列表。
+
+    标题用栈维护层级：``###`` 前面有 ``##`` 时路径是两层而不是拼在一起。
+    代码围栏（``` / ~~~）里的 ``#`` 不算标题；标题行本身不进正文，
+    由调用方拼回前缀。首个标题之前的正文单独成一节（路径为空）。
+    """
+    sections: list[tuple[list[str], str]] = []
+    stack: list[tuple[int, str]] = []  # (层级, 标题文本)
+    body_lines: list[str] = []
+    in_fence = False
+
+    def flush() -> None:
+        body = "\n".join(body_lines).strip()
+        if body:
+            sections.append(([t for _, t in stack], body))
+        body_lines.clear()
+
+    for line in text.split("\n"):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            body_lines.append(line)
+            continue
+        match = None if in_fence else _HEADING_RE.match(line)
+        if match:
+            flush()
+            level = len(match.group(1))
+            # 弹出层级更深的标题，再把本级接上：路径始终是「祖先链 + 本级」。
+            stack = [s for s in stack if s[0] < level] + [(level, match.group(2).strip())]
+        else:
+            body_lines.append(line)
+    flush()
+    return sections
+
+
+def chunk_document(
+    text: str,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    *,
+    fmt: str = "text",
+    title: str = "",
+) -> list[str]:
+    """结构感知的分片入口（录入与重建索引都走这里）。
+
+    Markdown 先按标题切节，每节单独走 :func:`chunk_text`，并在每片开头
+    拼上「文档标题 > 节 > 小节」的路径前缀——分片被单独 embedding 时不再
+    丢失「这段在讲什么」的上下文。非 Markdown、或全文找不到任何标题时，
+    退化为纯段落打包（FAQ 那条路径依赖「问：」领头，不另加前缀）。
+    """
+    if fmt != "markdown":
+        return chunk_text(text, chunk_size=chunk_size)
+    sections = split_markdown_sections(text)
+    if not any(path for path, _ in sections):
+        return chunk_text(text, chunk_size=chunk_size)
+
+    chunks: list[str] = []
+    for path, body in sections:
+        # 正文顶格用「# 同文档标题」开头很常见，去重避免前缀里写两遍。
+        parts = path if not title or (path and path[0] == title) else [title] + path
+        prefix = " > ".join(parts)
+        # 前缀占的字符从预算里扣掉，保证拼完仍不超过 chunk_size；
+        # 预算剩得太少就不如不加前缀，否则正文被切得稀碎。
+        budget = chunk_size - (len(prefix) + 1 if prefix else 0)
+        if prefix and budget >= MIN_PREFIX_BUDGET:
+            pieces = chunk_text(body, chunk_size=budget)
+            chunks.extend(f"{prefix}\n{p}" for p in pieces)
+        else:
+            chunks.extend(chunk_text(body, chunk_size=chunk_size))
+    return chunks
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -248,8 +373,14 @@ async def replace_vectors(
     重建索引也走这里：不同 provider/模型的 embedding 不可比，换了嵌入模型
     就只能重写向量，没有「兼容共存」这条路。返值即分片数，给录入接口回体用。
     """
-    chunk_size = _chunk_size_of(None, doc.meta)
-    chunks = chunk_text(content, chunk_size=chunk_size)
+    meta = doc.meta or {}
+    chunk_size = _chunk_size_of(None, meta)
+    chunks = chunk_document(
+        content,
+        chunk_size=chunk_size,
+        fmt=_doc_format(meta),
+        title=doc.title,
+    )
     emb_resp = await backend.embeddings(
         EmbeddingRequest(provider=backend.provider, input=chunks)
     )
