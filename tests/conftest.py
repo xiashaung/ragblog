@@ -192,7 +192,9 @@ def account_factory(client, console):
         )
         assert res.status_code == 201, res.text
         account_id = payload(res)["id"]
-        res = await client.post("/api/v1/admin/login", json={"username": username, "password": password})
+        res = await client.post(
+            "/api/v1/admin/login", json={"username": username, "password": password}
+        )
         assert res.status_code == 200, res.text
         body = payload(res)
         token = body["token"]

@@ -109,9 +109,10 @@ async def test_viewer_can_read_but_writes_are_denied(client, console, account_fa
     viewer = await account_factory("viewer1", ["viewer"])
     headers = viewer["headers"]
 
-    assert (await client.get("/api/v1/admin/accounts", headers=headers)).status_code == HTTPStatus.OK
-    assert (await client.get("/api/v1/admin/roles", headers=headers)).status_code == HTTPStatus.OK
-    assert (await client.get("/api/v1/admin/sessions", headers=headers)).status_code == HTTPStatus.OK
+    for path in ("accounts", "roles", "sessions"):
+        assert (
+            await client.get(f"/api/v1/admin/{path}", headers=headers)
+        ).status_code == HTTPStatus.OK
 
     denied = await client.post(
         "/api/v1/admin/accounts",
@@ -224,13 +225,17 @@ async def test_superadmin_role_is_locked(client, console):
     assert resp.status_code == HTTPStatus.BAD_REQUEST
     assert "全部权限" in resp.json()["message"]
 
-    resp = await client.delete(f"/api/v1/admin/roles/{superadmin['id']}", headers=console["headers"])
+    resp = await client.delete(
+        f"/api/v1/admin/roles/{superadmin['id']}", headers=console["headers"]
+    )
     assert resp.status_code == HTTPStatus.BAD_REQUEST
     assert "内置角色" in resp.json()["message"]
 
     # 名称/描述可以改（不影响权限），方便本地化
     resp = await client.patch(
-        f"/api/v1/admin/roles/{superadmin['id']}", json={"name": "首席管理员"}, headers=console["headers"]
+        f"/api/v1/admin/roles/{superadmin['id']}",
+        json={"name": "首席管理员"},
+        headers=console["headers"],
     )
     assert resp.status_code == HTTPStatus.OK
     assert _data(resp)["name"] == "首席管理员"
@@ -279,7 +284,9 @@ async def test_disabling_account_revokes_its_sessions(
     )
 
     resp = await client.patch(
-        f"/api/v1/admin/accounts/{member['id']}", json={"is_active": False}, headers=console["headers"]
+        f"/api/v1/admin/accounts/{member['id']}",
+        json={"is_active": False},
+        headers=console["headers"],
     )
     assert resp.status_code == HTTPStatus.OK
     assert _data(resp)["is_active"] is False
@@ -295,7 +302,9 @@ async def test_disabling_account_revokes_its_sessions(
 
     # 重新启用后要显式登录才能再用
     await client.patch(
-        f"/api/v1/admin/accounts/{member['id']}", json={"is_active": True}, headers=console["headers"]
+        f"/api/v1/admin/accounts/{member['id']}",
+        json={"is_active": True},
+        headers=console["headers"],
     )
     login = await client.post(
         "/api/v1/admin/login", json={"username": "ops", "password": "member-pass-123"}

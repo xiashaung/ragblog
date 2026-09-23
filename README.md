@@ -1,115 +1,178 @@
-# FastAPI 标准工程
+# FastAPI 全栈博客 · AI 知识库平台
 
-一个分层清晰、开箱即用的 FastAPI 项目模板。
+一个前后端一体、单进程即可部署的完整项目：公开博客前台 + 管理控制台 +
+AI 对话 / RAG 知识库 / 智能问数，后台管理面走一套 RBAC。
+两个前端是独立 Vite 工程，构建产物由 FastAPI 一并静态托管。
+
+## 功能一览
+
+| 块 | 说明 |
+| --- | --- |
+| 博客前台（web-blog） | 文章 / 标签 / 分类 / AI 搜索（语义检索 + 带 `[n]` 引用的流式对话），挂站点根路径 `/`，即首页 |
+| 管理控制台（web-vben） | 概览、AI 对话、知识库、博客管理、数据分析、系统管理（账号 / 角色 / 会话 / 模型），挂 `/admin` |
+| AI 与 RAG | 多 provider 对话（OpenAI / DeepSeek / 通义 / Ollama / MLX / mock）、知识库三段式混合检索 + 精排、智能问数（Text-to-SQL） |
+| RBAC | 权限码由代码定义（`app/rbac.py`），角色由数据库承载；菜单 / 按钮 / 弹窗 / 请求四层前端门控 + 后端 `require_permission` 真拦截 |
+
+## 访问路径（生产单进程）
+
+| 路径 | 内容 |
+| --- | --- |
+| `/` | 博客前台（`web-blog/dist`，vite base=`/`）；旧 `/blog/*` 链接 302 到对应新地址 |
+| `/admin` | 管理控制台（`web/dist`，vite base=`/admin/`），客户端路由如 `/admin/roles` 刷新不 404 |
+| `/api/v1/*` | 全部业务 API；管理 API 统一在 `/api/v1/admin/*`（`/admin` 路径只留给控制台页面，两者不串门） |
+| `/api/v1/blog/*` | 博客公开接口（无鉴权，只出已发布文章） |
+| `/media/uploads/*` | 上传图片等媒体文件（磁盘直出） |
+| `/docs` | Swagger 交互式文档 |
+
+## 技术栈
+
+- 后端：FastAPI + SQLAlchemy 2（asyncio）+ Alembic + pydantic-settings；SQLite 默认，可切 PostgreSQL（pgvector + HNSW）
+- 前端：Vue 3 + Vite + TypeScript + Ant Design Vue 4 + Pinia（pnpm 管理）
+- 鉴权：Bearer token（http-only cookie 同步写），引导密钥 `APP_ADMIN_API_KEY` 仅用于首次建超管
 
 ## 目录结构
 
 ```
 .
 ├── app/
-│   ├── __init__.py
-│   ├── main.py              # 应用入口，组装 FastAPI 实例（lifespan 中初始化 DB；可选挂载 web/dist）
-│   ├── config.py            # 基于 pydantic-settings 的配置（读取 .env）
-│   ├── db.py                # 异步引擎 + Session 工厂（get_db 依赖）
-│   ├── models.py            # SQLAlchemy ORM 模型（后台账号 / 角色 / 会话 / 商品 / RAG / 分析记录）
+│   ├── main.py              # 应用入口：中间件（envelope/CORS）→ 路由 → 静态托管（/、/admin、/media）
+│   ├── config.py            # pydantic-settings 配置（.env，前缀 APP_）
+│   ├── db.py                # 异步引擎 + Session 工厂
+│   ├── models.py            # ORM 模型（账号/角色/会话/商品/RAG/分析/博客等记录）
 │   ├── rbac.py              # 权限码目录 + 内置角色种子（权限的唯一来源）
 │   ├── deps.py              # 鉴权依赖：require_admin_principal / require_admin_session / require_permission
 │   ├── bootstrap.py         # CLI：python -m app.bootstrap seed（建首个超管）
 │   ├── routers/             # 路由层（只处理 HTTP 细节）
-│   │   ├── health.py        # /health 健康检查
-│   │   ├── users.py         # /api/v1/users CRUD
-│   │   ├── items.py         # /api/v1/items CRUD
+│   │   ├── health.py        # /api/v1/health 健康检查
+│   │   ├── users.py         # /api/v1/users CRUD（示例接口，不鉴权）
+│   │   ├── items.py         # /api/v1/items CRUD（示例接口，不鉴权）
 │   │   ├── ai.py            # /api/v1/ai/*（对话 + 知识库，知识库挂 knowledge:*）
-│   │   ├── upload.py        # /api/v1/upload*（文件入库，属 knowledge:manage）
+│   │   ├── upload.py        # /api/v1/upload*（文件入库，knowledge:manage）
 │   │   ├── analytics.py     # /api/v1/analytics/*（智能问数，analytics:read）
-│   │   ├── datasources.py   # /api/v1/datasources（数据源，datasource:read/manage）
+│   │   ├── blog.py          # 前台 /api/v1/blog（公开）+ 后台 /api/v1/admin/blogs（blog:*）
+│   │   ├── datasources.py   # /api/v1/admin/data-sources（datasource:read/manage）
 │   │   ├── system_config.py # /api/v1/system/config/*（模型选择与接入，system:read/manage）
 │   │   └── admin.py         # /api/v1/admin/*（登录 + 账号 / 角色 / 会话，全部挂权限码）
-│   ├── schemas/             # Pydantic 请求/响应模型
-│   │   ├── user.py
-│   │   ├── item.py
-│   │   ├── ai.py
-│   │   └── admin.py         # 登录 / Principal / Role / Account / Permission 模型
+│   ├── schemas/             # Pydantic 请求/响应模型（admin/ai/analytics/blog/datasource/envelope/item/upload/user）
 │   └── services/            # 业务逻辑层（异步 DB 实现）
-│       ├── user_service.py
-│       ├── item_service.py
-│       ├── admin_service.py  # 登录 / 会话 token / 首次引导
-│       ├── rbac_service.py   # 权限解析 + 角色/账号 CRUD + 防提权守卫
-│       ├── llm.py           # LLM 网关（多 provider 注册表：openai/deepseek/qwen/ollama/mlx/mock）
-│       ├── system_config.py # 库里存的系统配置（各功能选哪个 provider）
-│       └── rag.py           # RAG：分块 + 向量检索（pgvector / JSON 双路径，多 provider 感知）
+│       ├── admin_service.py / rbac_service.py  # 登录会话 / 权限解析 + 防提权守卫
+│       ├── user_service.py / item_service.py   # 示例 CRUD
+│       ├── llm.py / provider_store.py          # LLM 网关（多 provider 注册表）与接入配置内存态
+│       ├── system_config.py                    # 库里存的系统配置（各功能选哪个 provider）
+│       ├── rag.py / rag_queue.py / reranker.py # 分块 + 向量检索（pgvector/JSON 双路径）+ 异步索引队列 + 精排
+│       ├── chat_history.py / chat_tools.py     # 会话持久化 + 联网检索 tools 循环
+│       ├── web_search.py / web_page.py         # 联网搜索与网页抓取
+│       ├── reasoning.py / markdown_text.py     # 思考链解析 / HTML→Markdown
+│       ├── document_parser.py                  # pdf/docx 上传解析
+│       └── blog.py / analytics.py / datasource.py  # 博客 / 问数 / 外部数据源
 ├── alembic/                 # 数据库迁移（异步）
-│   ├── env.py
-│   └── versions/
-├── alembic.ini
-├── tests/
-│   ├── conftest.py          # 异步 TestClient（httpx ASGI transport）+ console/account fixture
-│   ├── test_api.py          # 基础 CRUD 测试
-│   ├── test_ai.py           # AI / RAG 测试
-│   └── test_rbac.py         # RBAC：引导、权限矩阵、提权与锁死守卫
-├── web-vben/                # 前端源码（Vue 3 + Vite + Ant Design Vue 4 + Pinia）
-│   ├── src/api/             # request.ts（envelope + Bearer 拦截器）、index.ts
-│   ├── src/directives/      # perm.ts：v-perm / v-perm-any 按钮级权限指令
-│   ├── src/composables/     # usePerm.ts：脚本里判权限 + 无权提示文案
-│   ├── src/store/modules/   # auth.ts（token + roles/permissions）、business.ts
-│   ├── src/router/          # 路由 + meta.permissions 守卫（不足跳 /403）
-│   ├── src/layouts/         # MainLayout.vue：菜单按权限过滤
-│   └── src/views/           # 页面：auth / _core / ai（对话）/ rag / analytics / admin（账号、角色、数据源、模型）
-├── web/dist/                # 前端构建产物（被 FastAPI 静态托管，由 web-vben 输出）
-├── web-blog/                # 博客前台源码（Vue 3 + Vite + Ant Design Vue 4，独立 pnpm 项目；产物 dist 挂站点根路径 /，即首页）
-├── pyproject.toml
-├── .env.example
+├── tests/                   # pytest（httpx ASGI transport，mock LLM + 临时 SQLite）
+│   ├── conftest.py          # client / console / account_factory fixture
+│   ├── test_api.py          # 基础 CRUD
+│   ├── test_ai.py           # AI / RAG（含分片策略测试）
+│   ├── test_analytics.py / test_datasources.py
+│   ├── test_blog.py / test_chat_sessions.py
+│   ├── test_rbac.py         # 引导、权限矩阵、提权与锁死守卫
+│   └── test_web_search_tools.py
+├── web-vben/                # 管理控制台源码（vite base=/admin/，产物输出 ../web/dist）
+├── web-blog/                # 博客前台源码（vite base=/，产物 web-blog/dist 挂站点根路径）
+├── web/dist/                # 管理控制台构建产物（被 FastAPI 静态托管）
+├── media/uploads/           # 上传的文件（经 /media 对外服务）
+├── docs/                    # 文档（RAG 技术方案等）
+├── run.py                   # 本地开发入口（uvicorn --reload :8011）
+├── pyproject.toml           # 依赖与 ruff/mypy/pytest 配置
+├── .env.example             # 配置模板
 └── README.md
 ```
 
 ## 快速开始
 
-```bash
-# 创建虚拟环境（推荐 uv 或 python -m venv）
-python -m venv .venv
-source .venv/bin/activate
+### 后端
 
-# 安装依赖
+```bash
+# 创建虚拟环境并安装依赖（含 dev 组：pytest/ruff/mypy）
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 复制配置模板
+# 复制配置模板并按需修改
 cp .env.example .env
 
-# 启动开发服务器（http://127.0.0.1:8000）
-uvicorn app.main:app --reload
+# 启动开发服务器（run.py 固定 :8011 + reload）
+python run.py
 ```
 
-交互式文档: http://127.0.0.1:8000/docs
+交互式文档: http://127.0.0.1:8011/docs 。默认 SQLite（`./app.db`），
+启动时自动建表；生产用 PostgreSQL 时跑 `alembic upgrade head`。
 
-## 运行测试
+### 管理控制台（开发模式）
 
 ```bash
-pytest
+# 后端保持 :8011 运行
+cd web-vben
+pnpm install
+pnpm dev           # http://127.0.0.1:5173/admin/ （/api 与 /media 代理到 :8011）
 ```
 
-## 常用端点
+打开后空库时走「首次部署？创建第一个超级管理员」（需填 `APP_ADMIN_API_KEY`），
+已有账号则直接用户名 / 密码登录。
 
-| 方法   | 路径                  | 说明         |
-| ------ | --------------------- | ------------ |
-| GET    | /health               | 健康检查     |
-| GET    | /health/live          | 存活探针     |
-| GET    | /health/ready         | 就绪探针     |
-| POST   | /api/v1/users         | 创建用户     |
-| GET    | /api/v1/users         | 用户列表     |
-| GET    | /api/v1/users/{id}    | 查询用户     |
-| PATCH  | /api/v1/users/{id}    | 更新用户     |
-| DELETE | /api/v1/users/{id}    | 删除用户     |
-| POST   | /api/v1/items         | 创建条目     |
-| GET    | /api/v1/items         | 条目列表     |
-| GET    | /api/v1/items/{id}    | 查询条目     |
-| DELETE | /api/v1/items/{id}    | 删除条目     |
+> 若 `pnpm install` 报缓存权限问题，加 `--cache-dir /tmp/pnpm-cache`。
+
+### 博客前台（开发模式）
+
+```bash
+cd web-blog
+pnpm install
+pnpm dev           # http://127.0.0.1:5174/ （/api 与 /media 代理到 :8011，与后台 5173 并行）
+```
+
+### 生产模式（单进程托管）
+
+```bash
+cd web-vben && pnpm build        # 输出 ../web/dist/
+cd ../web-blog && pnpm build     # 输出 web-blog/dist/
+cd .. && uvicorn app.main:app --port 8000
+```
+
+访问 `http://127.0.0.1:8000/`（博客首页）与 `http://127.0.0.1:8000/admin/`（控制台）。
+匹配顺序：`/api/*`（含管理 API `/api/v1/admin/*`）与 `/media/*` 优先；`/admin/*`
+回退到控制台 `index.html`；旧 `/blog/*` 302 到新地址；其余路径回退到博客前台
+`index.html`——两个 SPA 的 history 路由刷新都不会 404。
+
+## 配置
+
+全部配置在 `app/config.py`（pydantic-settings），环境变量前缀 `APP_`，完整模板见 `.env.example`。要点：
+
+```ini
+APP_DATABASE_URL=sqlite+aiosqlite:///./app.db   # 可切 postgresql+asyncpg://...
+APP_DEBUG=true
+APP_ADMIN_API_KEY=                              # 仅首次引导用，引导完成建议置空
+APP_LLM_DEFAULT_PROVIDER=qwen                   # 请求不传 provider 时的兜底
+
+# 千问 / 通义（DashScope OpenAI 兼容网关；其余 provider 同构）
+APP_LLM_QWEN_API_KEY=sk-xxx
+# APP_LLM_QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+# APP_LLM_QWEN_CHAT_MODEL=qwen-plus
+# APP_LLM_QWEN_EMBEDDING_MODEL=text-embedding-v3
+
+# Ollama / MLX（本地，无需 Key，按需调 base_url）
+# APP_LLM_OLLAMA_BASE_URL=http://localhost:11434/v1
+# APP_LLM_MLX_BASE_URL=http://localhost:8080/v1
+
+# RAG：混合检索与精排开关（详见 docs/RAG技术方案.md）
+# APP_RAG_HYBRID_ENABLED=true
+# APP_RAG_RERANK_ENABLED=true
+```
+
+> 配置 `@lru_cache` 缓存，改 `.env` 后需重启进程；且「模型接入 / 系统配置」在
+> 数据库里有运行时选择（后台改完即生效，不需要重启），`.env` 只是没配置时的兜底。
 
 ## 管理后台与 RBAC 权限
 
-后台管理面（账号 / 角色 / 会话 / 知识库 / 数据源 / 智能问数 / 模型配置）走一套 RBAC：
-**权限码由代码定义，角色由数据库承载**。
-权限码是唯一来源（`app/rbac.py` 的 `Permission` 枚举 + `PERMISSION_CATALOG`，带中文名与分组），
-角色则是运营数据，可在「角色权限」页自由增删改。新增权限码只改代码，不需要迁移。
+后台管理面（账号 / 角色 / 会话 / 知识库 / 博客 / 数据源 / 智能问数 / 模型配置）
+走一套 RBAC：**权限码由代码定义，角色由数据库承载**。权限码唯一来源是
+`app/rbac.py`（`Permission` 枚举 + `PERMISSION_CATALOG`，带中文名与分组），
+角色是运营数据，可在「角色权限」页自由增删改。新增权限码只改代码，不需要迁移。
 
 ### 认证方式
 
@@ -124,33 +187,31 @@ POST /api/v1/admin/login  {username, password}
 
 ### 权限码与内置角色
 
-| 分组     | 权限码            | 含义                         |
-| -------- | ----------------- | ---------------------------- |
-| 账号管理 | `account:read`    | 查看后台账号与角色           |
-| 账号管理 | `account:manage`  | 新建 / 停用 / 删除账号、重置密码、分配角色 |
-| 角色权限 | `role:read`       | 查看角色与权限目录           |
-| 角色权限 | `role:manage`     | 新建 / 修改 / 删除角色（提权敏感，仅超管可授予） |
-| 会话     | `session:read`    | 查看在线会话                 |
-| 会话     | `session:revoke`  | 强制下线某个会话             |
-| 数据分析 | `analytics:read`  | 智能问数（只读 Text-to-SQL） |
-| 数据分析 | `datasource:read` | 查看外部数据源（连接串只回掩码） |
-| 数据分析 | `datasource:manage` | 增删改数据源（含连接凭证，高敏感） |
-| 模型接入 | `system:read`     | 查看各功能选用的 provider 与模型接入列表 |
-| 模型接入 | `system:manage`   | 切换 provider、增删改模型接入 |
-| 知识库   | `knowledge:read`  | 浏览文档、向量检索、知识库问答 |
-| 知识库   | `knowledge:manage`| 录入 / 上传 / 编辑 / 重建 / 删除文档 |
+| 分组 | 权限码 | 含义 |
+| --- | --- | --- |
+| 账号管理 | `account:read` | 查看后台账号与角色 |
+| 账号管理 | `account:manage` | 新建 / 停用 / 删除账号、重置密码、分配角色 |
+| 角色权限 | `role:read` | 查看角色与权限目录 |
+| 角色权限 | `role:manage` | 新建 / 修改 / 删除角色（提权敏感，仅超管可授予） |
+| 会话 | `session:read` | 查看在线会话 |
+| 会话 | `session:revoke` | 强制下线某个会话 |
+| 博客 | `blog:read` / `blog:manage` | 文章 / 分类的读与写（发布自动同步进知识库） |
+| 数据分析 | `analytics:read` | 智能问数（只读 Text-to-SQL） |
+| 数据分析 | `datasource:read` / `datasource:manage` | 外部数据源查看（连接串只回掩码）/ 增删改（含凭证，高敏感） |
+| 模型接入 | `system:read` / `system:manage` | 查看 / 切换各功能 provider 与模型接入 |
+| 知识库 | `knowledge:read` / `knowledge:manage` | 浏览与问答 / 录入、上传、重建、删除 |
 
 **写权限隐含同一资源的读权限**：规则集中在 `rbac.py::MANAGE_IMPLIES_READ`，由
 `grants()` 统一生效（所以只勾 `xxx:manage` 也能看得懂列表），前端
 `store/modules/auth.ts` 里有同表副本，保证菜单 / 路由 / 按钮三处口径一致。
 `session:revoke` 不算 `session:read` 的写档（它不是同一资源的写操作），运维角色本就同时持有两个。
 
-| 内置角色        | 权限                                             |
-| --------------- | ------------------------------------------------ |
-| `superadmin`    | `*`（全部权限，恒不可改，只有这一个角色能持有 `*`） |
-| `admin`         | 账号读写 + `role:read` + 会话读写 + `analytics:read` + `datasource:read` + 知识库读写 |
-| `operator`      | `session:read` + `session:revoke`                |
-| `viewer`        | `account:read` + `role:read` + `session:read` + `knowledge:read`（只读） |
+| 内置角色 | 权限 |
+| --- | --- |
+| `superadmin` | `*`（全部权限，恒不可改，只有这一个角色能持有 `*`） |
+| `admin` | 账号读写 + `role:read` + 会话读写 + `analytics:read` + `datasource:read` + 知识库读写 |
+| `operator` | `session:read` + `session:revoke` |
+| `viewer` | `account:read` + `role:read` + `session:read` + `knowledge:read`（只读） |
 
 模型接入（`system:*`）两个码**不预发给任何内置角色**：`GET /system/config/providers`
 目前会把接入里的 API Key 明文回显，接口做好掩码前不该交给只读角色；
@@ -166,33 +227,32 @@ POST /api/v1/admin/login  {username, password}
 
 ### 端点与所需权限
 
-| 方法   | 路径                                | 所需权限          |
-| ------ | ----------------------------------- | ----------------- |
-| POST   | /api/v1/admin/onboard                      | 公开 + 引导密钥   |
-| POST   | /api/v1/admin/login /logout /refresh       | 登录 / 会话       |
-| GET    | /api/v1/admin/me                           | 登录（任何权限）  |
-| GET    | /api/v1/admin/sessions                     | `session:read`    |
-| DELETE | /api/v1/admin/sessions/{id}                | `session:revoke`  |
-| GET    | /api/v1/admin/permissions、/api/v1/admin/roles    | `role:read`       |
-| POST   | /api/v1/admin/roles                        | `role:manage`     |
-| PATCH  | /api/v1/admin/roles/{id}                   | `role:manage`     |
-| DELETE | /api/v1/admin/roles/{id}                   | `role:manage`     |
-| GET    | /api/v1/admin/accounts                     | `account:read`    |
-| POST   | /api/v1/admin/accounts                     | `account:manage`  |
-| PATCH  | /api/v1/admin/accounts/{id}                | `account:manage`  |
-| PUT    | /api/v1/admin/accounts/{id}/roles          | `account:manage`  |
-| DELETE | /api/v1/admin/accounts/{id}                | `account:manage`  |
-| GET    | /api/v1/ai/knowledge、/stats、/{id}、/search、/answer | `knowledge:read`  |
-| POST   | /api/v1/ai/knowledge/ingest、/ingest-pairs、/fetch-url | `knowledge:manage` |
+| 方法 | 路径 | 所需权限 |
+| --- | --- | --- |
+| POST | /api/v1/admin/onboard | 公开 + 引导密钥 |
+| POST | /api/v1/admin/login /logout /refresh | 登录 / 会话 |
+| GET | /api/v1/admin/me | 登录（任何权限） |
+| GET | /api/v1/admin/sessions | `session:read` |
+| DELETE | /api/v1/admin/sessions/{id} | `session:revoke` |
+| GET | /api/v1/admin/permissions、/api/v1/admin/roles | `role:read` |
+| POST / PATCH / DELETE | /api/v1/admin/roles/{id} | `role:manage` |
+| GET | /api/v1/admin/accounts | `account:read` |
+| POST / PATCH / DELETE | /api/v1/admin/accounts/{id} | `account:manage` |
+| PUT | /api/v1/admin/accounts/{id}/roles | `account:manage` |
+| GET | /api/v1/admin/blogs/*（文章 / 分类列表与详情） | `blog:read` |
+| POST / PATCH / DELETE | /api/v1/admin/blogs/* | `blog:manage` |
+| GET | /api/v1/ai/knowledge、/stats、/{id}、/search、/answer | `knowledge:read` |
+| POST | /api/v1/ai/knowledge/ingest、/ingest-pairs、/fetch-url | `knowledge:manage` |
 | PATCH / DELETE | /api/v1/ai/knowledge/{id}、/batch-delete、/reindex | `knowledge:manage` |
-| POST   | /api/v1/upload、/upload/batch、/upload/image | `knowledge:manage` |
-| GET    | /api/v1/system/config/*（各类 GET） | `system:read`     |
-| PATCH / POST / DELETE | /api/v1/system/config/*（写） | `system:manage`   |
-| GET    | /api/v1/datasources                 | `datasource:read` |
-| POST / PATCH / DELETE / POST /test | /api/v1/datasources | `datasource:manage` |
-| ALL    | /api/v1/analytics/*                 | `analytics:read`  |
-| ALL    | /api/v1/ai/chat                     | 公开（无鉴权）    |
-| ALL    | /api/v1/ai/chat/sessions*           | 登录（只要会话本身属于自己） |
+| POST | /api/v1/upload、/upload/batch、/upload/image | `knowledge:manage` |
+| GET | /api/v1/system/config/*（各类 GET） | `system:read` |
+| PATCH / POST / DELETE | /api/v1/system/config/*（写） | `system:manage` |
+| GET | /api/v1/admin/data-sources | `datasource:read` |
+| POST / PATCH / DELETE / POST /test | /api/v1/admin/data-sources | `datasource:manage` |
+| ALL | /api/v1/analytics/* | `analytics:read` |
+| ALL | /api/v1/ai/chat | 公开（无鉴权，供外部调用） |
+| ALL | /api/v1/ai/chat/sessions* | 登录（只作用于自己的会话） |
+| GET | /api/v1/blog/* | 公开（只出已发布文章） |
 
 ### 前端按钮级权限
 
@@ -242,226 +302,161 @@ python -m app.bootstrap seed --username admin --password 'xxx'
 > 不鉴权（供外部调用）；「对话会话」那组接口只要求后台登录态
 > （`require_admin_session`），因为它们只作用于调用者自己。
 
-## AI 接口
+## AI 接口（对话 + 知识库 RAG）
 
-封装了一套面向 AI 调用的接口，**支持在请求级别切换多家模型平台**
-（OpenAI / DeepSeek / 通义千问 / Ollama / MLX / 内置 mock），
-每家平台有独立的 `api_key` / `base_url` / 模型名配置。
-请求体里传 `provider` 字段即可切换；不传则回退到
-`APP_LLM_DEFAULT_PROVIDER`。
-
-### 端点
-
-| 方法   | 路径                            | 说明                                   |
-| ------ | ------------------------------- | -------------------------------------- |
-| POST   | /api/v1/ai/chat                 | 对话补全，支持流式/结构化 JSON 输出    |
-| POST   | /api/v1/ai/knowledge/ingest     | RAG：录入文本（`format`: text/markdown/html，自动分块 + 向量化） |
-| POST   | /api/v1/ai/knowledge/ingest-pairs | RAG：录入一批问答对（合为一篇 FAQ）   |
-| POST   | /api/v1/ai/knowledge/fetch-url  | RAG：抓取网页正文后入库                |
-| POST   | /api/v1/upload                  | RAG：单文件入库（pdf/docx/txt/md/csv/log） |
-| POST   | /api/v1/upload/batch            | RAG：批量文件入库（≤20 个，逐文件返回成败） |
-| POST   | /api/v1/upload/image            | 编辑器插图：只落盘拿 `/media/uploads/...` 地址，不建文档 |
-| GET    | /api/v1/ai/knowledge            | RAG：文档列表（关键字 / provider / 仅待重建 / 分页） |
-| GET    | /api/v1/ai/knowledge/stats      | RAG：文档·分片·字符统计与 provider 明细 |
-| GET    | /api/v1/ai/knowledge/{id}       | RAG：文档详情（原文 + 分片）           |
-| PATCH  | /api/v1/ai/knowledge/{id}       | RAG：改名 / 换正文（换正文会重新向量化） |
-| POST   | /api/v1/ai/knowledge/{id}/reindex | RAG：用当前默认 provider 重建向量     |
-| DELETE | /api/v1/ai/knowledge/{id}       | RAG：删除文档                          |
-| POST   | /api/v1/ai/knowledge/batch-delete | RAG：批量删除，返回 deleted / failed  |
-| POST   | /api/v1/ai/knowledge/search     | RAG：向量检索，返回引用片段            |
-| POST   | /api/v1/ai/knowledge/answer     | RAG：检索 + 带引用的回答               |
-| GET    | /api/v1/ai/providers            | 各 provider 的默认配置（供前端展示）    |
-
-> 不同 provider 的向量不可比：换 `APP_LLM_DEFAULT_PROVIDER` 后，旧文档会被
-> 标记为 `stale`（列表接口 `only_stale=true` 可单独筛出），需调 `reindex` 重建。
-
-> 正文只存一种格式（Markdown 源码或纯文本）：录入时的 `format=html` 会先由
-> `app/services/markdown_text.py`（stdlib `html.parser`，无新依赖）转成 Markdown 再入库，
-> 文档 meta 里只记 `text` / `markdown`；PATCH 不传 `format` 则沿用文档原格式。
-
-> 向量存储：Postgres 下 `knowledge_chunks.vector` 是 pgvector 的
-> `vector(<APP_RAG_VECTOR_DIM>)` 定长列，相似度由库内余弦距离 `<=>` 计算并走 HNSW
-> 索引；SQLite 下同一列退化为 JSON，改由 Python 算余弦（测试与轻量开发无需扩展）。
-> 换 embedding 模型导致维度变化时，改 `APP_RAG_VECTOR_DIM` 并重跑
-> `alembic upgrade head`：维度不符的旧向量会先备份进 `knowledge_chunks_vector_backup`
-> 再置空（统计接口的 `vectorless_chunks` 会报出来），之后对文档重建索引。
+封装了一套面向 AI 调用的接口，**支持在请求级别切换多家模型平台**，每家平台有独立的
+`api_key` / `base_url` / 模型名配置。请求体里传 `provider` 字段即可切换；不传则回退到
+`APP_LLM_DEFAULT_PROVIDER`。实际用哪个端点与模型名以「系统配置」页（数据库）为准，`.env` 兜底。
 
 ### 可选 Provider
 
-| 名称       | 说明                                       | 需要 Key | 默认 base_url                              | 默认 chat_model                          | 默认 embedding_model               |
-| ---------- | ------------------------------------------ | -------- | ------------------------------------------ | ---------------------------------------- | ---------------------------------- |
-| `openai`   | OpenAI 官方（及任意 OpenAI 兼容网关）      | 是       | `https://api.openai.com/v1`                | `gpt-4o-mini`                            | `text-embedding-3-small`           |
-| `deepseek` | DeepSeek（OpenAI 兼容）                    | 是       | `https://api.deepseek.com/v1`              | `deepseek-chat`                          | `deepseek-embed`                   |
-| `qwen`     | 阿里通义 / DashScope（OpenAI 兼容）        | 是       | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus`                    | `text-embedding-v3`                |
-| `ollama`   | 本地 Ollama 服务器                         | 否       | `http://localhost:11434/v1`                | `llama3.1`                               | `nomic-embed-text`                 |
-| `mlx`      | 本地 MLX-LM 服务器                         | 否       | `http://localhost:8080/v1`                 | `mlx-community/llama-3.1-8b-instruct`    | `mlx-community/bge-small-en-v1.5`  |
-| `mock`     | 内置离线后端（回显 + 哈希向量，无网络）    | 否       | —                                          | `mock-chat`                              | `mock-embed`                       |
+| 名称 | 说明 | 需要 Key | 默认 base_url | 默认 chat_model | 默认 embedding_model |
+| --- | --- | --- | --- | --- | --- |
+| `openai` | OpenAI 官方（及任意 OpenAI 兼容网关） | 是 | `https://api.openai.com/v1` | `gpt-4o-mini` | `text-embedding-3-small` |
+| `deepseek` | DeepSeek（OpenAI 兼容） | 是 | `https://api.deepseek.com/v1` | `deepseek-chat` | `deepseek-embed` |
+| `qwen` | 阿里通义 / DashScope（OpenAI 兼容） | 是 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` | `text-embedding-v3` |
+| `ollama` | 本地 Ollama 服务器 | 否 | `http://localhost:11434/v1` | `llama3.1` | `nomic-embed-text` |
+| `mlx` | 本地 MLX-LM 服务器 | 否 | `http://localhost:8080/v1` | `mlx-community/llama-3.1-8b-instruct` | `mlx-community/bge-small-en-v1.5` |
+| `mock` | 内置离线后端（回显 + 哈希向量，无网络） | 否 | — | `mock-chat` | `mock-embed` |
 
 前 5 家共用同一个 OpenAI 兼容客户端，只有 `api_key` / `base_url` / 模型名不同；
 `mock` 是确定性的离线后端，供开发 / 测试使用。
 
-### 鉴权
+### 端点
 
-- `/api/v1/ai/chat` 与 `/ai/providers` 不鉴权（前者要能被外部调用）。
-- 知识库（`/ai/knowledge/*`）与上传（`/upload*`）走控制台会话 + RBAC：
-  读要 `knowledge:read`，写要 `knowledge:manage`。
-- 调用时带 `Authorization: Bearer <控制台 token>`（`POST /api/v1/admin/login` 拿）；
-  `APP_ADMIN_API_KEY` 只能用于首次引导（`/api/v1/admin/onboard`），不再是接口旁路。
-- 会话历史（`/ai/chat/sessions*`）只要求登录，且只能读到自己的会话。
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | /api/v1/ai/chat | 对话补全，支持流式（NDJSON）/结构化 JSON 输出，可挂联网检索 tools |
+| POST | /api/v1/ai/knowledge/ingest | RAG：录入文本（`format`: text/markdown/html，自动分块 + 向量化） |
+| POST | /api/v1/ai/knowledge/ingest-pairs | RAG：录入一批问答对（合为一篇 FAQ） |
+| POST | /api/v1/ai/knowledge/fetch-url | RAG：抓取网页正文后入库 |
+| POST | /api/v1/upload | RAG：单文件入库（pdf/docx/txt/md/csv/log） |
+| POST | /api/v1/upload/batch | RAG：批量文件入库（≤20 个，逐文件返回成败） |
+| POST | /api/v1/upload/image | 编辑器插图：只落盘拿 `/media/uploads/...` 地址，不建文档 |
+| GET | /api/v1/ai/knowledge | RAG：文档列表（关键字 / provider / 仅待重建 / 分页） |
+| GET | /api/v1/ai/knowledge/stats | RAG：文档·分片·字符统计与 provider 明细 |
+| GET | /api/v1/ai/knowledge/{id} | RAG：文档详情（原文 + 分片） |
+| PATCH | /api/v1/ai/knowledge/{id} | RAG：改名 / 换正文（换正文会重新向量化） |
+| POST | /api/v1/ai/knowledge/{id}/reindex | RAG：用当前默认 provider 重建向量 |
+| DELETE | /api/v1/ai/knowledge/{id} | RAG：删除文档 |
+| POST | /api/v1/ai/knowledge/batch-delete | RAG：批量删除，返回 deleted / failed |
+| POST | /api/v1/ai/knowledge/search | RAG：向量检索，返回引用片段 |
+| POST | /api/v1/ai/knowledge/answer | RAG：检索 + 带引用的回答 |
+| GET | /api/v1/ai/providers | 各 provider 的默认配置（供前端展示） |
+| GET | /api/v1/analytics/* | 智能问数（Text-to-SQL，只读） |
+
+### 约定与坑
+
+- 不同 provider 的向量不可比：换 `APP_LLM_DEFAULT_PROVIDER` 后，旧文档会被标记为
+  `stale`（列表接口 `only_stale=true` 可单独筛出），需调 `reindex` 重建。
+- 正文只存一种格式（Markdown 源码或纯文本）：录入时的 `format=html` 会先由
+  `app/services/markdown_text.py`（stdlib `html.parser`，无新依赖）转成 Markdown 再入库，
+  文档 meta 里只记 `text` / `markdown`；PATCH 不传 `format` 则沿用文档原格式。
+- 向量存储双路径：Postgres 下 `knowledge_chunks.vector` 是 pgvector 的
+  `vector(<APP_RAG_VECTOR_DIM>)` 定长列，相似度由库内余弦距离 `<=>` 计算并走 HNSW
+  索引；SQLite 下同一列退化为 JSON，改由 Python 算余弦（测试与轻量开发无需扩展）。
+  换 embedding 模型导致维度变化时，改 `APP_RAG_VECTOR_DIM` 并重跑
+  `alembic upgrade head`：维度不符的旧向量会先备份进 `knowledge_chunks_vector_backup`
+  再置空（统计接口的 `vectorless_chunks` 会报出来），之后对文档重建索引。
+- 分片策略：Markdown 按标题结构感知切分（每片自带「文档标题 > 节 > 小节」前缀），
+  超长段落按句子边界切，overlap 随 chunk_size 比例缩放；详见 `docs/RAG技术方案.md`。
 
 ### 示例
 
 ```bash
 # 先登录控制台，后面的 AI / 知识库接口都用这个 Bearer token
-TOKEN=$(curl -s -X POST http://127.0.0.1:8000/api/v1/admin/login -H 'Content-Type: application/json' \
+TOKEN=$(curl -s -X POST http://127.0.0.1:8011/api/v1/admin/login -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"xxx"}' | sed -n 's/.*"token":"\([^"]\+\)".*/\1/p')
 
 # 对话（走默认 provider；此接口本身不鉴权）
-curl -X POST http://127.0.0.1:8000/api/v1/ai/chat \
+curl -X POST http://127.0.0.1:8011/api/v1/ai/chat \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"你好"}]}'
 
-# 指定 provider（千问）
-curl -X POST http://127.0.0.1:8000/api/v1/ai/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"provider":"qwen","messages":[{"role":"user","content":"你好"}]}'
-
 # 指定 provider + 覆盖模型
-curl -X POST http://127.0.0.1:8000/api/v1/ai/chat \
+curl -X POST http://127.0.0.1:8011/api/v1/ai/chat \
   -H 'Content-Type: application/json' \
   -d '{"provider":"deepseek","model":"deepseek-reasoner","messages":[{"role":"user","content":"1+1?"}]}'
 
-# 结构化 JSON 输出
-curl -X POST http://127.0.0.1:8000/api/v1/ai/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"user","content":"总结"}],"response_format":{"type":"json_object"}}'
-
 # 流式（NDJSON）
-curl -N -X POST http://127.0.0.1:8000/api/v1/ai/chat \
+curl -N -X POST http://127.0.0.1:8011/api/v1/ai/chat \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"讲个故事"}],"stream":true}'
 
 # RAG：入库需 knowledge:manage，问答需 knowledge:read（不同 provider 的向量不互通）
-curl -X POST http://127.0.0.1:8000/api/v1/ai/knowledge/ingest \
+curl -X POST http://127.0.0.1:8011/api/v1/ai/knowledge/ingest \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"provider":"qwen","title":"手册","content":"FastAPI 是一个高性能的 Python Web 框架…"}'
-curl -X POST http://127.0.0.1:8000/api/v1/ai/knowledge/answer \
+curl -X POST http://127.0.0.1:8011/api/v1/ai/knowledge/answer \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"provider":"qwen","query":"FastAPI 是什么？"}'
 ```
 
-### 配置真实模型
+## 个人博客
 
-编辑 `.env`（完整模板见 `.env.example`）：
+### 前台（web-blog/）
 
-```ini
-# 默认 provider（请求不传 provider 时使用）
-APP_LLM_DEFAULT_PROVIDER=qwen
+独立的 Vue 3 + Vite SPA，走公开接口 `/api/v1/blog/*`（无鉴权，只出已发布文章），
+挂站点根路径 `/`。页面：首页（横向 Hero + 封面卡片网格，分类/标签收进顶栏下拉）、
+文章页、标签页、分类页（`/category/:slug`）与 AI 搜索页（单输入框：提问即并行完成
+语义检索 + 带 `[n]` 引用的多轮流式对话，会话管理持久化在浏览器 localStorage）。
+文章页自带阅读体验件：章节目录（TOC）、预计阅读时长、代码块一键复制、
+上/下篇与相关文章推荐（`GET /posts/{slug}/neighbors`、`GET /posts/{slug}/related`，均不计阅读数）。
 
-# 千问 / 通义（DashScope OpenAI 兼容网关）
-APP_LLM_QWEN_API_KEY=sk-xxx
-# APP_LLM_QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-# APP_LLM_QWEN_CHAT_MODEL=qwen-plus
-# APP_LLM_QWEN_EMBEDDING_MODEL=text-embedding-v3
+### 后台创作（控制台 → 博客管理）
 
-# OpenAI
-APP_LLM_OPENAI_API_KEY=sk-xxx
+「文章管理 / 分类管理」读写需 `blog:read` / `blog:manage`；每篇最多归属一个分类
+（也可不归类），删分类前需先重新归类其下文章。**发布 = 同步进知识库**
+（`kind: "blog"` 文档，复用三段式混合检索），下线/删除会连带删掉索引。
+发布/问答依赖「系统配置」里的 embedding_provider 与 rag_provider，与知识库同一套要求。
 
-# DeepSeek
-APP_LLM_DEEPSEEK_API_KEY=sk-xxx
+> 挂载约定：`web-blog/dist` 存在时，后端在根路径 `/` 提供静态资源与 SPA 回退
+> （`vite base` 与 `createWebHistory` 都是 `/`，两者必须保持一致）；旧 `/blog/*`
+> 链接 302 重定向到对应新地址；博客公开接口在 FastAPI 层先于 SPA 回退匹配，互不影响。
 
-# Ollama / MLX（本地，无需 Key，按需调 base_url）
-# APP_LLM_OLLAMA_BASE_URL=http://localhost:11434/v1
-# APP_LLM_MLX_BASE_URL=http://localhost:8080/v1
-```
+## 控制台界面能力（web-vben）
 
-## 说明
-
-- 配置统一放在 `app/config.py`，环境变量前缀为 `APP_`（如 `APP_DEBUG=true`）。
-- 数据库：默认 SQLite（`sqlite+aiosqlite:///./app.db`），可用 `APP_DATABASE_URL` 切换到 PostgreSQL 等；迁移用 Alembic（异步）。
-- 向量检索：Postgres 需 pgvector 扩展（`create extension if not exists vector`）；启动与迁移都会自动执行这句 IF NOT EXISTS，无权限时降级并记日志。
-- 持久化：后台账号 / 角色 / 会话 / items / RAG 知识库（Postgres 存 pgvector 列 + HNSW
-  索引，SQLite 存 JSON）/ 对话历史 / 问数记录全部落库，进程重启不丢数据。
-- 管理面鉴权：权限码定义在 `app/rbac.py`，路由只声明 `Depends(deps.require_permission(Permission.XXX))`；
-  新增接口只需选权限码，无需改鉴权中间件（详见「管理后台与 RBAC 权限」）。
-- 代码风格由 `ruff` 检查（`ruff check .`），类型由 `mypy` 检查（`mypy app`）。
-
-## 前端（Vue 3 + Ant Design Vue）
-
-工程内附 `web-vben/`，用 **Vue 3 + Vite + Ant Design Vue 4** 实现控制台，
 菜单按「两个顶级页 + 三个分组」排（项仍按权限码过滤，无权不显示）：
 `概览`、`AI 对话` 为顶级；分组 `知识库`（文档列表 / 内容录入 / 检索问答）、
-`数据分析`（智能问数 / 数据源管理）、`系统管理`（账号管理 / 角色权限 / 会话 / 模型选择 / 模型接入），
-构建产物直出到 `web/dist` 由后端单进程托管。
+`数据分析`（智能问数 / 数据源管理）、`系统管理`（账号管理 / 角色权限 / 会话 / 模型选择 / 模型接入）。
 
-**当前前端能力**：
-
-- **多轮对话**：聊天气泡、自动滚动、上下文记忆、手动停止、用量统计（prompt/completion/总 token）；
-  支持「流式输出」与「非流式」切换，可选「结构化 JSON 输出」（mock 输出 JSON、真实 provider 返回结构化内容）。
-- **Provider 感知**：provider 与模型名完全由后端 `.env` 决定（`GET /ai/providers` 只用于展示），
-  前端不再传 `provider` / `model`。
-- **顶部状态**：后端健康状态横幅 + 当前登录账号的角色标签（`session:read` 才会拉在线会话数）。
+- **多轮对话**：聊天气泡、自动滚动、上下文记忆、手动停止、用量统计
+  （prompt/completion/总 token）；「流式 / 非流式」可切，可选「结构化 JSON 输出」。
+- **Provider 感知**：provider 与模型名完全由后端「系统配置」决定
+  （`GET /ai/providers` 只用于展示），前端不再传 `provider` / `model`。
+- **顶部状态**：后端健康状态横幅 + 当前登录账号的角色标签
+  （`session:read` 才会拉在线会话数）。
 - **RBAC 界面**：登录后拿 `roles/permissions` 渲染菜单（无权限的入口不显示），
-  路由 `meta.permissions` 不满足时跳 `/403`；刷新页面以 `GET /api/v1/admin/me` 为权威重拉权限。
-  按钮级由 `v-perm` 指令与 `usePerm()` 负责（无权置灰 + 悬停说明 / 干脆不发请求），
-  详见上面「前端按钮级权限」。前端过滤只负责渲染，真正的拦截在后端 `require_permission`。
+  路由 `meta.permissions` 不满足时跳 `/403`；刷新页面以 `GET /api/v1/admin/me`
+  为权威重拉权限。按钮级详见上面「前端按钮级权限」。
 - **Markdown 录入与展示**：「内容录入」的文本 tab 是自研编辑器 `MarkdownEditor.vue`
   （工具栏 + 编辑/分栏/预览三态 + 插图与粘截图上传，零新增依赖）；格式可选
   纯文本 / Markdown / HTML（HTML 由后端转成 Markdown）。文档详情默认按语法渲染
   （`RichText.vue` + `utils/rich.ts`：标题/列表/引用/代码块/表格/删除线，先转义后白名单），
   点「编辑源码」才切回编辑器；列表里 Markdown 文档带 `MD` 标签、摘要剔掉语法符号。
+- **明暗主题**：两套 CSS 变量集中在 `[data-theme]` 单点管理（含侧栏），
+  组件一律 `var(--xxx)`，禁止硬编码明暗色；前台 web-blog 同一套精神。
 
-### 开发模式（推荐）
-
-```bash
-# 1. 后端（:8011，mock 或配置好真实 provider）
-uvicorn app.main:app --reload --port 8011
-
-# 2. 管理控制台（:5173/admin/，/api 与 /media 自动代理到 :8011）
-cd web-vben
-pnpm install
-pnpm dev           # http://127.0.0.1:5173/admin/
-```
-
-打开 `http://127.0.0.1:5173/admin/`：空库时走「首次部署？创建第一个超级管理员」
-（需填 `APP_ADMIN_API_KEY`），已有账号则直接用户名/密码登录。
-
-> 若 `pnpm install` 报缓存权限问题，加 `--cache-dir /tmp/pnpm-cache`。
-
-### 生产模式（单进程托管）
+## 测试与代码质量
 
 ```bash
-cd web-vben
-pnpm build         # 输出到 ../web/dist/
-cd ..
-uvicorn app.main:app --port 8000
-# 访问 http://127.0.0.1:8000/admin/  → FastAPI 自动托管 web/dist（/admin/assets 静态 + SPA 回退）
+pytest                    # 全量测试（mock LLM + 临时 SQLite，无需外部服务）
+ruff check .              # 代码风格（line-length=100）
+mypy app                  # 类型检查（strict）
 ```
 
-`/api/*`（含管理 API `/api/v1/admin/*`）与 `/media/*` 优先匹配；`/admin/*` 回退到控制台
-`index.html`（支持 history 模式的客户端路由，如 `/admin/roles` 刷新不 404）；
-其余路径回退到博客前台 `web-blog/dist/index.html`。
+## 其他说明
 
-## 个人博客前台（web-blog/）
-
-文章在后台「博客管理 → 文章管理 / 分类管理」（`blog:read` / `blog:manage`）创作；
-每篇最多归属一个分类（也可不归类），删分类前需先重新归类其下文章；
-**发布 = 同步进知识库**（`kind: "blog"` 文档，复用三段式混合检索），下线/删除会连带删掉索引。
-前台是独立的 `web-blog/` 项目（Vue 3 + Vite SPA），走公开接口 `/api/v1/blog/*`（无鉴权，只出已发布文章），
-提供首页/文章页/标签页/分类页（`/category/:slug`）与 AI 搜索页（单输入框：提问即并行完成语义检索 + 带 `[n]` 引用的多轮流式对话）。
-文章页自带阅读体验件：章节目录（TOC）、预计阅读时长、代码块一键复制、上/下篇与相关文章推荐（公开接口 `GET /posts/{slug}/neighbors`、`GET /posts/{slug}/related`，两者不计阅读数）。
-
-```bash
-# 开发（:5174，/api 与 /media 代理到 :8011；与后台 :5173 并行）
-uvicorn app.main:app --reload --port 8011
-cd web-blog && pnpm install && pnpm dev   # http://127.0.0.1:5174/
-
-# 生产：构建后后端自动托管，无需额外配置
-pnpm build                                 # 输出 web-blog/dist/
-# 启动后端后访问 http://127.0.0.1:8000/（站点首页即博客）
-```
-
-> 挂载约定：`web-blog/dist` 存在时，后端在根路径 `/` 提供静态资源与 SPA 回退
-> （`vite base` 与 `createWebHistory` 都是 `/`，两者必须保持一致）；旧 `/blog/*`
-> 链接 302 重定向到对应新地址；博客公开接口在 FastAPI 层先于 SPA 回退匹配，互不影响。
-> 发布/问答依赖「系统配置」里的 embedding_provider 与 rag_provider，与知识库同一套要求。
+- 统一响应信封：所有 2xx JSON **对象**响应被 `_EnvelopeMiddleware` 包成
+  `{code, data, message}`（裸数组/标量原样过，流式 NDJSON 与 HTML 透传），
+  错误体由 `app/responses.py` 的异常处理器拼好，格式同一。
+- 持久化：后台账号 / 角色 / 会话 / items / RAG 知识库（Postgres 存 pgvector 列 + HNSW
+  索引，SQLite 存 JSON）/ 对话历史 / 博客文章 / 问数记录全部落库，进程重启不丢数据。
+- 数据库：默认 SQLite（`sqlite+aiosqlite:///./app.db`），可用 `APP_DATABASE_URL`
+  切换到 PostgreSQL 等；迁移用 Alembic（异步）。
+- 向量检索：Postgres 需 pgvector 扩展（`create extension if not exists vector`）；
+  启动与迁移都会自动执行这句 IF NOT EXISTS，无权限时降级并记日志。
+- 管理面鉴权：权限码定义在 `app/rbac.py`，路由只声明
+  `Depends(deps.require_permission(Permission.XXX))`；新增接口只需选权限码，
+  无需改鉴权中间件（详见「管理后台与 RBAC 权限」）。
+- 图片一律落盘 `media/uploads/` 并经 `/media` 静态服务存 URL，数据库不存 base64。
