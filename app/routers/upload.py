@@ -54,6 +54,7 @@ IMAGE_MIME = {
     "bmp": "image/bmp",
 }
 MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 单图 5 MB，兼作 meta 里 JSON 体积的上限
+MAX_DOCUMENT_BYTES = 20 * 1024 * 1024  # 单个文档 20 MB：解析器全量吃进内存，必须封顶
 # 文档内嵌图（PDF/DOCX 里的插图）要一张张调视觉模型，所以限张数、并跳过装饰图
 MAX_EMBEDDED_IMAGES = 6  # 每篇文档最多描述 6 张内嵌图
 MIN_EMBEDDED_PIXELS = 6_400  # 跳过小图标/小 logo（比如 80x80）
@@ -62,6 +63,21 @@ _IMAGE_PROMPT = (
     "请用中文详细描述这张图片的内容，包括主体、文字、图表数据与场景，"
     "以便后续据此检索与问答。只输出描述文本，不要额外解释。"
 )
+
+
+async def _read_capped(file: UploadFile, limit: int, *, label: str = "文件") -> bytes:
+    """分块读到上限为止，超限立即 abort——不是读完整包再查。
+
+    ``await file.read()`` 会把任意大的上传体先全量搬进内存，超限检查放在读
+    完之后等于没防（1 GB 的「PDF」照样打爆 worker）。这里每 1 MB 读一块，
+    一过线就拒，内存占用封顶在 limit + 1MB。
+    """
+    buf = bytearray()
+    while chunk := await file.read(1024 * 1024):
+        buf += chunk
+        if len(buf) > limit:
+            raise ValueError(f"{label}过大，单个上限 {limit // 1024 // 1024} MB，已中止读取")
+    return bytes(buf)
 
 
 def _image_data_url(raw: bytes, filename: str) -> str:
@@ -262,15 +278,9 @@ async def upload_image(
             status_code=400,
             detail=f"不支持的图片格式（.{ext}），仅支持 {' / '.join(IMAGE_MIME)}",
         )
-    raw = await file.read()
+    raw = await _read_capped(file, MAX_IMAGE_BYTES, label="图片")
     if not raw:
         raise HTTPException(status_code=400, detail="图片内容为空")
-    if len(raw) > MAX_IMAGE_BYTES:
-        limit_mb = MAX_IMAGE_BYTES // 1024 // 1024
-        raise HTTPException(
-            status_code=400,
-            detail=f"图片过大（{len(raw) // 1024 // 1024} MB），单张上限 {limit_mb} MB",
-        )
     try:
         url = _save_image_file(raw, ext)
     except OSError as exc:
@@ -297,7 +307,7 @@ async def upload_file(
     try:
         knowledge_id, chunks, chars = await _parse_and_ingest(
             session,
-            raw=await file.read(),
+            raw=await _read_capped(file, MAX_DOCUMENT_BYTES),
             filename=file.filename or f"upload-{uuid.uuid4().hex[:8]}",
             title=title,
             provider=provider,
@@ -344,8 +354,8 @@ async def upload_files_batch(
     results: list[UploadBatchItem] = []
     for file in files:
         filename = file.filename or f"upload-{uuid.uuid4().hex[:8]}"
-        raw = await file.read()
         try:
+            raw = await _read_capped(file, MAX_DOCUMENT_BYTES)
             async with session.begin_nested():
                 knowledge_id, chunks, chars = await _parse_and_ingest(
                     session,
