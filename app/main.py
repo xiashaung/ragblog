@@ -29,7 +29,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import FileResponse, RedirectResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from . import db, services
+from . import db, housekeeping, services
 from .config import get_settings
 from .logging_setup import RequestIdMiddleware, setup_logging
 from .metrics import MetricsMiddleware
@@ -166,8 +166,12 @@ async def lifespan(app: FastAPI):
         await services.provider_store.refresh(session)
     # 启动 RAG 任务队列
     await rag_queue.start_queue()
+    # 启动后台巡检（rag_tasks 终态行 / 过期会话的保留清理）
+    housekeeping_task = await housekeeping.start()
     yield
     # 关闭：先停后台任务，再释放连接池
+    if housekeeping_task is not None:
+        housekeeping_task.cancel()
     await rag_queue.stop_queue()
     await db.dispose_engine()
 

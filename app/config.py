@@ -337,6 +337,14 @@ class Settings(BaseSettings):
     login_lock_threshold: int = 5
     login_lockout_seconds: int = 900
 
+    # --- 后台巡检（增长型表的保留策略，见 app/housekeeping.py）---
+    # rag_tasks 每次写入操作都落一行、admin_sessions 过期行只靠自然淘汰，
+    # 都没兜底清理——长期跑下去只涨不消。启动时跑一次、之后按 interval
+    # 周期跑：删终态（success/failed）超保留天的任务行 + 已过期的会话行。
+    housekeeping_enabled: bool = True
+    housekeeping_interval_seconds: int = 86_400  # 默认 24h 跑一次
+    rag_task_retention_days: int = 30  # 终态任务行保留天数
+
     # --- 数据库（默认 SQLite，生产用 Postgres + pgvector）---
     database_url: str = "sqlite+aiosqlite:///./app.db"
     db_echo: bool = False
