@@ -17,10 +17,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import AsyncIterator
-from typing import Any, Protocol
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any, Protocol, TypeVar
 
+import openai
 from openai import AsyncOpenAI
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from ..config import ProviderConfig, get_settings
 from ..schemas.ai import (
@@ -35,6 +43,10 @@ from ..schemas.ai import (
     Usage,
 )
 from . import provider_store
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 # --- provider → 端点配置 ---
 
@@ -76,6 +88,53 @@ def _provider_cfg(provider: Provider | str) -> ProviderConfig:
     if cfg is not None:
         return cfg
     return get_settings().provider_config(name)
+
+
+# --- 瞬时故障重试 ---
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """该异常是否属于「再试一次可能就好了」的瞬时故障。
+
+    网络层（超时/连接失败）与上游临时错（429 限流、5xx）值得重试；
+    其余 4xx 是参数/鉴权错，重试也是白重，快速失败把真实错因透出。
+    """
+    if isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError)):
+        return True
+    if isinstance(exc, openai.APIStatusError):
+        return exc.status_code == 429 or exc.status_code >= 500
+    return False
+
+
+async def _with_retry(what: str, call: Callable[[], Awaitable[T]]) -> T:
+    """按配置重试一段 OpenAI 调用（耗尽后原样抛出末次异常）。
+
+    每次尝试都在同一层包着，所以客户端建时关掉了 SDK 自带的重试：
+    两层叠加会让次数相乘、退避互不可见，只留这一层才能统一记日志。
+    """
+    settings = get_settings()
+
+    async def attempt() -> T:
+        # 包一层真 async 函数：tenacity 靠「是否协程函数」判断要不要 await 结果，
+        # 直接传「返回协程的 lambda」会把协程对象当成返回值原样交出。
+        return await call()
+
+    retryer = AsyncRetrying(
+        stop=stop_after_attempt(max(1, settings.llm_retry_max_attempts)),
+        wait=wait_exponential(
+            multiplier=settings.llm_retry_backoff_base,
+            max=settings.llm_retry_backoff_max,
+        ),
+        retry=retry_if_exception(_is_retryable),
+        reraise=True,
+        before_sleep=lambda state: logger.warning(
+            "LLM %s 第 %s 次尝试失败，退避后重试：%s",
+            what,
+            state.attempt_number,
+            state.outcome.exception() if state.outcome else None,
+        ),
+    )
+    return await retryer(attempt)
 
 
 # --- Backend protocol ---
@@ -186,9 +245,15 @@ class OpenAIBackend:
         """按当时的配置建客户端；后续变更由 :meth:`_current` 接手。"""
         self.provider = provider
         self._cfg = _provider_cfg(provider)
-        self._client = AsyncOpenAI(
-            api_key=self._auth_key(provider, self._cfg),
-            base_url=self._cfg.base_url,
+        self._client = self._new_client(self._cfg)
+
+    def _new_client(self, cfg: ProviderConfig) -> AsyncOpenAI:
+        """建 SDK 客户端并关掉其内置重试：重试由 :func:`_with_retry` 统一接手，
+        两层叠加会让尝试次数相乘且退避日志互不可见。"""
+        return AsyncOpenAI(
+            api_key=self._auth_key(self.provider, cfg),
+            base_url=cfg.base_url,
+            max_retries=0,
         )
 
     def _current(self) -> ProviderConfig:
@@ -200,9 +265,7 @@ class OpenAIBackend:
         """
         cfg = _provider_cfg(self.provider)
         if (cfg.base_url, cfg.api_key) != (self._cfg.base_url, self._cfg.api_key):
-            self._client = AsyncOpenAI(
-                api_key=self._auth_key(self.provider, cfg), base_url=cfg.base_url
-            )
+            self._client = self._new_client(cfg)
         self._cfg = cfg
         return cfg
 
@@ -248,7 +311,11 @@ class OpenAIBackend:
         if response_format is not None:
             kwargs["response_format"] = response_format
 
-        resp = await self._client.chat.completions.create(**kwargs)
+        # 瞬时故障（超时/429/5xx）按配置退避重试；耗尽后原样抛出，由调用方决定取舍
+        resp = await _with_retry(
+            f"chat({self.provider.value})",
+            lambda: self._client.chat.completions.create(**kwargs),
+        )
         msg = resp.choices[0].message
         usage = Usage(
             prompt_tokens=resp.usage.prompt_tokens if resp.usage else 0,
@@ -302,8 +369,14 @@ class OpenAIBackend:
         # 按 choice 里的 index 聚合：并行多个工具调用时增量是交错回流的
         slots: dict[int, dict[str, str]] = {}
 
-        # 逐块 yield：首字一到就推给客户端，不等整段生成完
-        async for event in await self._client.chat.completions.create(**kwargs):
+        # 逐块 yield：首字一到就推给客户端，不等整段生成完。
+        # 重试只护住「建立流」这一段（一个块都没吐之前换次请求是安全的）；
+        # 一旦开吐就不能中途重试，否则客户端会收到两段对不上的答案。
+        stream = await _with_retry(
+            f"chat_stream({self.provider.value})",
+            lambda: self._client.chat.completions.create(**kwargs),
+        )
+        async for event in stream:
             if getattr(event, "usage", None) is not None:
                 usage = Usage(
                     prompt_tokens=event.usage.prompt_tokens or 0,
@@ -358,8 +431,11 @@ class OpenAIBackend:
         返回项里带 ``index``，上层按它对齐输入顺序（SDK 不保证回得有序）。
         """
         cfg = self._current()
-        resp = await self._client.embeddings.create(
-            model=model or cfg.embedding_model, input=inputs
+        resp = await _with_retry(
+            f"embed({self.provider.value})",
+            lambda: self._client.embeddings.create(
+                model=model or cfg.embedding_model, input=inputs
+            ),
         )
         items = [EmbeddingItem(index=d.index, embedding=list(d.embedding)) for d in resp.data]
         usage = Usage(
@@ -476,6 +552,78 @@ class MockBackend:
         return EmbeddingResponse(provider=self.provider, model=model, items=items, usage=usage)
 
 
+# --- 降级代理（主 + 备胎 provider）---
+
+
+class FallbackBackend:
+    """给真实后端挂一个「备胎 provider」：非流式对话在主端重试耗尽后
+    仍被瞬时故障挡住时，换备胎再问一次。
+
+    只有 chat 参与降级：流式可能已吐出一半答案，中途偷换模型客户端会收到
+    两段对不上的内容；嵌入换模型会打乱向量空间（存查必须同一模型），
+    两者都原样透传主后端。4xx 参数/鉴权错也不触发降级：备胎照样错，
+    应该把真实错因诚实透出，而不是掩盖成备胎的成功。
+    """
+
+    def __init__(self, primary: LLMBackend, fallback: LLMBackend) -> None:
+        self.provider = primary.provider
+        self._primary = primary
+        self._fallback = fallback
+
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        response_format: dict | None = None,
+    ) -> tuple[str, str | None, Usage, str]:
+        try:
+            return await self._primary.chat(
+                messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+            )
+        except Exception as exc:
+            if not _is_retryable(exc):
+                raise
+            logger.warning(
+                "LLM 主端 %s 重试耗尽，降级到 %s：%s",
+                self._primary.provider,
+                self._fallback.provider,
+                exc,
+            )
+            # 备胎的 model 不传主端模型名：两边模型名互不相通，让各端用各自配置
+            return await self._fallback.chat(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+            )
+
+    def chat_stream(
+        self,
+        messages: list[ChatMessage],
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatChunk]:
+        """流式不降级：已吐字后偷换模型会让两段答案对不上。"""
+        return self._primary.chat_stream(messages, **kwargs)
+
+    async def embed(
+        self, inputs: list[str], *, model: str | None = None
+    ) -> tuple[list[EmbeddingItem], Usage, str]:
+        """嵌入不降级：换模型就换了向量空间，存与查互不认。"""
+        return await self._primary.embed(inputs, model=model)
+
+    async def embeddings(self, req: EmbeddingRequest) -> EmbeddingResponse:
+        """沿用协议里的默认实现（把 :meth:`embed` 包成响应体）。"""
+        items, usage, model = await self.embed(req.input, model=req.model)
+        return EmbeddingResponse(provider=self.provider, model=model, items=items, usage=usage)
+
+
 # --- 工厂 + 缓存注册表 ---
 
 
@@ -527,6 +675,16 @@ def get_llm(
     backend = _registry.get(name)
     if backend is None:
         backend = make_backend(Provider(name))
+        # 降级只给对话功能挂：嵌入换模型会打乱向量空间，不能静默兜底；
+        # 备胎没配/配了个不认识的都视同关闭，不把请求打进构造异常。
+        if feature == "chat":
+            fallback_name = get_settings().llm_fallback_provider.strip().lower()
+            if fallback_name and fallback_name != name and fallback_name in known:
+                fallback = _registry.get(fallback_name)
+                if fallback is None:
+                    fallback = make_backend(Provider(fallback_name))
+                    _registry[fallback_name] = fallback
+                backend = FallbackBackend(backend, fallback)
         _registry[name] = backend
     return backend
 

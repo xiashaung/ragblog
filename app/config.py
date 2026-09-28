@@ -130,6 +130,17 @@ class Settings(BaseSettings):
     # 请求没带 provider 时的默认值（数据库配了各功能的选择则以数据库为准）。
     llm_default_provider: str = "openai"  # openai|deepseek|qwen|ollama|mlx|mock
 
+    # --- LLM 调用重试与降级 ---
+    # 包含首次在内的最大尝试次数。只对瞬时故障（超时/连接失败/429/5xx）重试，
+    # 4xx 参数与鉴权错一次即判死——重试不会改变结果，反而拖长响应。
+    llm_retry_max_attempts: int = 3
+    # 重试间隔指数退避：第 n 次失败后等 min(base * 2^n, max) 秒。
+    llm_retry_backoff_base: float = 1.0
+    llm_retry_backoff_max: float = 10.0
+    # 非流式对话在主 provider 重试耗尽后改问的备胎（留空 = 关闭）。
+    # 只影响 chat：流式已吐字不能中途偷换，嵌入换模型会打乱向量空间。
+    llm_fallback_provider: str = ""
+
     # 各 provider 的默认端点与模型名。环境变量按嵌套映射到子字段，
     # 如 APP_LLM_OPENAI_API_KEY、APP_LLM_OPENAI_BASE_URL…
     llm_openai: ProviderConfig = ProviderConfig(
