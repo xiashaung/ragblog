@@ -17,6 +17,7 @@
 """
 
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -49,6 +50,8 @@ from .routers import (
 )
 from .schemas.envelope import ApiResponse
 from .services import rag_queue
+
+logger = logging.getLogger(__name__)
 
 
 class _EnvelopeMiddleware(BaseHTTPMiddleware):
@@ -182,10 +185,22 @@ def create_app() -> FastAPI:
     application.add_exception_handler(
         RequestValidationError, _validation_exception_handler
     )
+    # CORS：``allow_credentials=True`` 与通配符 origin 是不能同时成立的组合——
+    # 浏览器会直接拒收带 Access-Control-Allow-Credentials: * 的响应（开了也白开），
+    # 而通配 + 凭据语义上又等于欢迎任意站带 cookie 来打。因此检测到通配时
+    # 强制关掉凭据模式并留警告：要携 cookie，就把来源一个个列进 APP_CORS_ORIGINS。
+    cors_origins = settings.cors_origins
+    allow_credentials = True
+    if "*" in cors_origins:
+        allow_credentials = False
+        logger.warning(
+            "CORS 配置含通配符 origin，已强制关闭 allow_credentials；"
+            "需要携带凭据的跨域请求请把具体来源写进 APP_CORS_ORIGINS"
+        )
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins,
-        allow_credentials=True,
+        allow_origins=cors_origins,
+        allow_credentials=allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
     )

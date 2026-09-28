@@ -6,6 +6,8 @@ responses carry ``code == <http_status>`` and ``data is None``.
 Helpers here unwrap that envelope so the assertions read naturally.
 """
 
+import httpx
+
 
 def _body(resp) -> dict:
     """Return the inner payload of a (possibly envelope-wrapped) response."""
@@ -125,3 +127,30 @@ async def test_envelope_middleware_streams_ndjson_and_wraps_json():
     sent = await drive(b"application/json", [b"[1,2]"])
     final = [m for m in sent if m["type"] == "http.response.body"][-1]["body"]
     assert final == b"[1,2]"
+
+
+async def test_cors_wildcard_disables_credentials(monkeypatch) -> None:
+    """通配符 origin 与凭据模式互斥：配了 ``*`` 就不许再带 credentials。"""
+    from app.config import Settings
+    from app.main import create_app
+
+    async def _preflight(app, origin: str) -> dict:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
+            resp = await ac.options(
+                "/api/v1/health",
+                headers={"Origin": origin, "Access-Control-Request-Method": "GET"},
+            )
+            return resp.headers
+
+    wildcard = Settings(_env_file=None, cors_origins=["*"])
+    explicit = Settings(_env_file=None, cors_origins=["http://good.example"])
+    monkeypatch.setattr("app.main.get_settings", lambda: wildcard)
+    headers = await _preflight(create_app(), "http://any.example")
+    assert headers.get("access-control-allow-origin") == "*"
+    assert "access-control-allow-credentials" not in headers
+
+    monkeypatch.setattr("app.main.get_settings", lambda: explicit)
+    headers = await _preflight(create_app(), "http://good.example")
+    assert headers.get("access-control-allow-origin") == "http://good.example"
+    assert headers.get("access-control-allow-credentials") == "true"

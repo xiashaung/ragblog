@@ -121,6 +121,9 @@ class Settings(BaseSettings):
     version: str = "0.1.0"
     debug: bool = False
     api_v1_prefix: str = "/api/v1"
+    # 默认通配——此时 main.py 会强制关闭 CORS 凭据模式（浏览器本来也不接受
+    # 通配 + credentials 的组合）。需要 cookie/Authorization 跨域携带时，
+    # 把具体来源逐个列进来。
     cors_origins: list[str] = ["*"]
 
     # --- AI / LLM ---
