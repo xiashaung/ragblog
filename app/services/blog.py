@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import media_gc
 from ..models import BlogCategory, BlogPost
 from ..schemas.ai import ChatMessage, KnowledgeSearchRequest
 from ..schemas.blog import (
@@ -426,10 +427,15 @@ async def get_post(session: AsyncSession, post_id: str) -> dict | None:
 async def update_post(
     session: AsyncSession, post_id: str, payload: BlogPostUpdate
 ) -> dict | None:
-    """局部更新文章。已发布文章改了标题 / 正文会同步重进索引（保持前台一致）。"""
+    """局部更新文章。已发布文章改了标题 / 正文会同步重进索引（保持前台一致）。
+
+    换封面 / 删正文图后旧文件按引用计数回收：新正文还引用的不会被误删，
+    没有任何行再引用的才落刀（release 内部全库复查，不依赖这里的 diff）。
+    """
     row = await _get_row(session, post_id)
     if row is None:
         return None
+    old_media = [*media_gc.extract_markdown_images(row.content), *(row.cover_url or "",)]
     fields = payload.model_dump(exclude_unset=True)
     content_changed = False
     if "title" in fields and (fields["title"] or "").strip():
@@ -465,17 +471,20 @@ async def update_post(
     if row.status == STATUS_PUBLISHED and content_changed:
         await _sync_index(session, row)
     await session.flush()
+    await media_gc.release_urls(session, old_media)
     return await _with_category(session, _clean_row(row))
 
 
 async def delete_post(session: AsyncSession, post_id: str) -> bool:
-    """删文章；连带删它同步出的知识文档。"""
+    """删文章；连带删它同步出的知识文档，正文内嵌图与封面按引用计数回收。"""
     row = await _get_row(session, post_id)
     if row is None:
         return False
+    old_media = [*media_gc.extract_markdown_images(row.content), *(row.cover_url or "",)]
     await _remove_index(session, row)
     await session.delete(row)
     await session.flush()
+    await media_gc.release_urls(session, old_media)
     return True
 
 

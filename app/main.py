@@ -46,6 +46,7 @@ from .routers import (
     datasources,
     health,
     items,
+    media,
     system_config,
     upload,
     users,
@@ -237,6 +238,8 @@ def create_app() -> FastAPI:
     )
     # 管理 API 自带 /api/v1/admin 前缀（/admin 留给控制台 SPA）
     application.include_router(admin.router, tags=["admin"])
+    # 媒体运维（孤儿文件扫描兜底）：挂管理 API 命名空间下
+    application.include_router(media.router, prefix="/api/v1/admin")
     # 博客：后台管理（/api/v1/admin/blogs）与前台公开 API（/api/v1/blog）
     application.include_router(blog.admin_router)
     application.include_router(blog.public_router)

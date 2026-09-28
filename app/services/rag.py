@@ -28,6 +28,7 @@ from collections.abc import Sequence
 from sqlalchemy import delete, desc, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import media_gc
 from ..config import get_settings
 from ..models import KnowledgeChunk, KnowledgeDoc
 from ..schemas.ai import (
@@ -721,15 +722,19 @@ async def delete_knowledge(session: AsyncSession, knowledge_id: str) -> bool:
     """删一份文档及其全部分片，返是否真的删了（不存在不算错）。
 
     先删子表再删主表：两边都没外键级联，反序会留下无法回收的孤儿分片。
+    图片文件走引用计数回收：还有别的文档/文章引用着就只删本行不删字节。
     """
     doc = await session.get(KnowledgeDoc, knowledge_id)
     if doc is None:
         return False
+    image_urls = media_gc.doc_image_urls(doc.meta)
     await session.execute(
         delete(KnowledgeChunk).where(KnowledgeChunk.knowledge_id == knowledge_id)
     )
     await session.delete(doc)
     await session.flush()
+    # 行已删才轮得到文件：此刻 metadata 里的 URL 不会再被本行命中
+    await media_gc.release_urls(session, image_urls)
     return True
 
 
