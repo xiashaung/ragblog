@@ -350,14 +350,6 @@ class Settings(BaseSettings):
         p = Path(self.media_dir)
         return p if p.is_absolute() else _PROJECT_ROOT / p
 
-    # --- 向后兼容的旧字段（测试与老 .env 在用）---
-    # 它们是单 provider 时代的形参，与上面的嵌套配置互不联动；新代码请用嵌套字段。
-    llm_provider: str = "openai"
-    llm_api_key: str = ""
-    llm_base_url: str | None = None
-    llm_chat_model: str = "gpt-4o-mini"
-    llm_embedding_model: str = "text-embedding-3-small"
-
     def provider_config(self, name: str) -> ProviderConfig:
         """取某个 provider 的 ``.env`` 配置（openai/deepseek/…）。
 
