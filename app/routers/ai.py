@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import audit, deps, services
 from ..config import Provider, get_settings
 from ..db import get_db
+from ..rate_limit import admin_ai_limiter, enforce_sliding_limit
 from ..rbac import Permission
 from ..schemas.ai import (
     ChatAppendRequest,
@@ -83,6 +84,25 @@ def _resolve_provider(name: Provider | str | None) -> Provider:
     if name is None:
         return None
     return name if isinstance(name, Provider) else Provider(name)
+
+
+def _enforce_admin_ai_limit(admin_id: str) -> None:
+    """控制台昂贵 AI 端点的成本闸：按登录账号滑窗，超限 429 + Retry-After。
+
+    与公开博客侧按 IP 不同，这里资源已需后台登录态，按 ``admin_id`` 计数能拿准
+    「同一个人无论从哪调都算一份预算」；``/ai/chat``、``/ai/knowledge/answer``、
+    ``/analytics/query`` 共用同一个 ``admin_ai_limiter`` 窗口。流式端点也在进流
+    之前拦（生成器里抛异常已来不及改写响应头）。
+    """
+    settings = get_settings()
+    enforce_sliding_limit(
+        admin_ai_limiter,
+        f"admin|{admin_id}",
+        enabled=settings.admin_ai_rate_limit_enabled,
+        window_seconds=settings.admin_ai_window_seconds,
+        max_requests=settings.admin_ai_max_requests,
+        message="AI 请求过于频繁",
+    )
 
 
 def _sync_mode() -> bool:
@@ -139,7 +159,7 @@ async def list_providers(
 async def chat(
     req: ChatRequest,
     _session: AsyncSession = Depends(get_db),
-    _admin_id: str = Depends(deps.require_admin_session),
+    admin_id: str = Depends(deps.require_admin_session),
 ) -> ChatResponse:
     """对话入口：``stream=true`` 走 NDJSON 流，否则一次返完整响应。
 
@@ -147,6 +167,7 @@ async def chat(
     实际用了哪个从后端对象读回来。两条路径共用 :func:`_turn_stream`，
     所以联网工具等非流式下也一样可用。
     """
+    _enforce_admin_ai_limit(admin_id)
     llm = get_llm(req.provider)
     if req.stream:
         return await _stream_chat(req)
@@ -658,12 +679,14 @@ async def search(
 async def answer(
     req: KnowledgeAnswerRequest,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_READ)),
+    principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_READ)),
 ) -> KnowledgeAnswerResponse:
     """知识库问答（同步）。
     
     如需流式响应，设置 req.stream=true，将返回 StreamingResponse。
     """
+    # 流式与非流式共用的成本闸：放在分叉之前，一次覆盖两条路径。
+    _enforce_admin_ai_limit(principal.admin_id)
     # 测试环境使用同步模式
     sync_mode = _sync_mode()
     

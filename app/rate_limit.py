@@ -23,7 +23,7 @@ from __future__ import annotations
 import time
 from collections import deque
 
-from fastapi import Request
+from fastapi import HTTPException, Request, status
 
 # 内存防护：恶意用海量不同 key 灌记录时，超上限就先清扫过期项
 _MAX_KEYS = 4096
@@ -154,6 +154,39 @@ class SlidingWindowLimiter:
 
 # 公开博客 AI 端点（/blog/search|answer|chat）的成本闸：按访客 IP 计数
 blog_ai_limiter = SlidingWindowLimiter()
+
+# 控制台昂贵 AI 端点（/ai/chat、/ai/knowledge/answer、/analytics/query）的成本闸：
+# 按登录账号 admin_id 计数，三个端点共用这一个窗口。
+admin_ai_limiter = SlidingWindowLimiter()
+
+
+def enforce_sliding_limit(
+    limiter: SlidingWindowLimiter,
+    key: str,
+    *,
+    enabled: bool,
+    window_seconds: int,
+    max_requests: int,
+    message: str,
+) -> None:
+    """通用滑窗闸门：放行则静默返回，越界则抛 429 + ``Retry-After``。
+
+    各路由读自己的 ``get_settings()`` 把阈值传进来（保持 monkeypatch 目标在路由
+    模块上，单测可换小阈值假对象），本函数不碰配置、只做「一次计数 + 一次拦截」。
+    开关关掉（``enabled=False``）时直接放行，供紧急解限流用。
+    """
+    if not enabled:
+        return
+    allowed, retry = limiter.allow(
+        key, window_seconds=window_seconds, max_requests=max_requests
+    )
+    if not allowed:
+        seconds = int(retry) + 1
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"{message}，请 {seconds} 秒后再试",
+            headers={"Retry-After": str(seconds)},
+        )
 
 
 def client_key(request: Request, username: str = "") -> str:

@@ -345,6 +345,14 @@ class Settings(BaseSettings):
     blog_ai_window_seconds: int = 60
     blog_ai_max_requests: int = 20
 
+    # --- 控制台昂贵 AI 端点限流（按登录账号 admin_id，见 app/rate_limit.py）---
+    # /ai/chat、/ai/knowledge/answer（含流式）、/analytics/query 都要后台登录态，按
+    # 「账号」而非 IP 计数更贴合成本归属（一人多设备 / 换 IP 也算同一预算，三端点共用
+    # 同一窗口）。阈值比公开侧宽松——主要拦失控脚本与异常循环，不是正常用法。
+    admin_ai_rate_limit_enabled: bool = True
+    admin_ai_window_seconds: int = 60
+    admin_ai_max_requests: int = 60
+
     # --- 后台巡检（增长型表的保留策略，见 app/housekeeping.py）---
     # rag_tasks 每次写入操作都落一行、admin_sessions 过期行只靠自然淘汰，
     # 都没兜底清理——长期跑下去只涨不消。启动时跑一次、之后按 interval

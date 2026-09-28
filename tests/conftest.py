@@ -218,3 +218,4 @@ def _reset_login_limiter() -> None:
 
     rate_limit.login_limiter.reset()
     rate_limit.blog_ai_limiter.reset()
+    rate_limit.admin_ai_limiter.reset()

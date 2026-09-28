@@ -1,16 +1,23 @@
-"""限流测试：LoginLimiter（登录/引导）+ SlidingWindowLimiter（公开博客 AI 成本闸）。
+"""限流测试：LoginLimiter（登录/引导）+ SlidingWindowLimiter（公开博客 AI 与
+控制台昂贵 AI 两道成本闸）。
 
 登录侧验「尝试窗 + 失败锁定」语义与 login/onboard 入口的 429；博客 AI 侧验通用
-滑窗的计数 / 隔离，以及 /blog/* 端点越界即 429（带 Retry-After）、开关关掉后放行。
+滑窗的计数 / 隔离，以及 /blog/* 端点越界即 429（带 Retry-After）、开关关掉后放行；
+控制台侧验 /ai/chat、/ai/knowledge/answer、/analytics/query 按 admin_id 共用一个窗口。
 """
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from app import rate_limit
+from app.routers import ai as ai_router
+from app.routers import analytics as analytics_router
+from app.schemas.ai import Provider, Usage
+from app.services import analytics as analytics_service
 
 # 与 config 默认值同名的一把假 settings：单测里不依赖真实配置
 _NS = dict(
@@ -177,3 +184,90 @@ async def test_limit_disabled_passes_through(client, monkeypatch: pytest.MonkeyP
     for _ in range(5):
         r = await client.post("/api/v1/blog/answer", json={"query": "x"})
         assert r.status_code == 200, r.text
+
+
+# ---------------- 控制台昂贵 AI 端点：按 admin_id ----------------
+
+_CHAT_BODY = {"provider": "mock", "messages": [{"role": "user", "content": "hi"}]}
+
+
+class _StubSql:
+    """只读 dry_run 够用的一次性 SQL 桩（不真执行、不二次总结）。"""
+
+    provider = Provider.MOCK
+
+    async def chat(self, messages, **_kwargs):
+        content = json.dumps({"sql": "SELECT 1 AS one", "brief": "常量"})
+        usage = Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2)
+        return content, "stop", usage, "stub"
+
+
+def _patch_admin_limit(
+    module,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    enabled: bool = True,
+    max_requests: int = 2,
+    extra: dict | None = None,
+) -> None:
+    """把目标路由模块读到的 settings 换成小阈值的 admin_ai 假对象。"""
+    fields = dict(
+        admin_ai_rate_limit_enabled=enabled,
+        admin_ai_window_seconds=60,
+        admin_ai_max_requests=max_requests,
+    )
+    if extra:
+        fields.update(extra)
+    monkeypatch.setattr(module, "get_settings", lambda: SimpleNamespace(**fields))
+
+
+async def test_admin_chat_rate_limited(client, admin_headers, monkeypatch) -> None:
+    _patch_admin_limit(ai_router, monkeypatch, max_requests=2)
+    for _ in range(2):
+        r = await client.post("/api/v1/ai/chat", json=_CHAT_BODY, headers=admin_headers)
+        assert r.status_code == 200, r.text
+    r = await client.post("/api/v1/ai/chat", json=_CHAT_BODY, headers=admin_headers)
+    assert r.status_code == 429
+    assert "Retry-After" in r.headers
+
+
+async def test_admin_limit_shared_across_ai_endpoints(client, admin_headers, monkeypatch) -> None:
+    """chat 与 knowledge/answer 同账号一个窗口：打满后 answer 进门即 429。"""
+    _patch_admin_limit(ai_router, monkeypatch, max_requests=2)
+    for _ in range(2):
+        r = await client.post("/api/v1/ai/chat", json=_CHAT_BODY, headers=admin_headers)
+        assert r.status_code == 200, r.text
+    r = await client.post(
+        "/api/v1/ai/knowledge/answer", json={"query": "x"}, headers=admin_headers
+    )
+    assert r.status_code == 429
+
+
+async def test_analytics_query_rate_limited(client, console, monkeypatch) -> None:
+    monkeypatch.setattr(analytics_service.llm, "get_llm", lambda provider=None: _StubSql())
+    _patch_admin_limit(
+        analytics_router,
+        monkeypatch,
+        max_requests=1,
+        extra={"analytics_enabled": True},
+    )
+    body = {"question": "随便", "dry_run": True}
+    first = await client.post("/api/v1/analytics/query", json=body, headers=console["headers"])
+    assert first.status_code == 200, first.text
+    r = await client.post("/api/v1/analytics/query", json=body, headers=console["headers"])
+    assert r.status_code == 429
+
+
+async def test_admin_limit_isolated_per_account(
+    client, admin_headers, account_factory, monkeypatch
+) -> None:
+    """限流按账号：换另一个管理员不受 root 打满的影响。"""
+    _patch_admin_limit(ai_router, monkeypatch, max_requests=1)
+    assert (
+        await client.post("/api/v1/ai/chat", json=_CHAT_BODY, headers=admin_headers)
+    ).status_code == 200
+    r = await client.post("/api/v1/ai/chat", json=_CHAT_BODY, headers=admin_headers)
+    assert r.status_code == 429
+    other = await account_factory("analyst-ratelimit", ["admin"])
+    r = await client.post("/api/v1/ai/chat", json=_CHAT_BODY, headers=other["headers"])
+    assert r.status_code == 200, r.text

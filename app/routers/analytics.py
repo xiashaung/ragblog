@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import deps, services
 from ..config import get_settings
 from ..db import get_db
+from ..rate_limit import admin_ai_limiter, enforce_sliding_limit
 from ..rbac import Permission
 from ..schemas.analytics import (
     AnalyticsHistoryResponse,
@@ -65,6 +66,17 @@ async def run_query(
     结果（含失败的友好报错）会落到本人的历史里，支撑对话式回放。
     """
     _ensure_enabled()
+    # 问数是本模块真调模型的昂贵口（与 /ai/chat、/ai/knowledge/answer 共享同一
+    # 个按账号的预算窗）；sources / schema / history 都是廉价 DB 读，不拦。
+    settings = get_settings()
+    enforce_sliding_limit(
+        admin_ai_limiter,
+        f"admin|{principal.admin_id}",
+        enabled=settings.admin_ai_rate_limit_enabled,
+        window_seconds=settings.admin_ai_window_seconds,
+        max_requests=settings.admin_ai_max_requests,
+        message="问数请求过于频繁",
+    )
     resp = await services.analytics.query(session, req)
     await services.analytics.save_chat(session, principal.admin_id, resp)
     return resp
