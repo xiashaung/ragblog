@@ -718,7 +718,8 @@ async def _stream_answer(req: KnowledgeAnswerRequest, sync: bool = False) -> Str
                 "2. 内容较长时用 Markdown 组织：用小标题（### ）分段、用要点列表（- 或 1. ）罗列，"
                 "突出关键结论；\n"
                 "3. 引用了某个片段的结论时在句末标注来源编号 [n]（对应 Context 中的编号）；\n"
-                "4. 只依据 Context 作答，Context 里没有的信息要明确说明「知识库中未找到相关内容」，不要编造。"
+                "4. 只依据 Context 作答，Context 里没有的信息要明确说明"
+                "「知识库中未找到相关内容」，不要编造。"
             )
             
             usage = None
@@ -745,10 +746,10 @@ async def _stream_answer(req: KnowledgeAnswerRequest, sync: bool = False) -> Str
                         ChatMessage(role="user", content=user_content),
                     ]
                 ):
-                    # 收集内容块和引用信息
+                    # 收集内容块和引用信息（done 标志落在最后一块，引用随它一起发）
                     answer_chunk = KnowledgeAnswerChunk(
                         answer=getattr(chunk, 'content', ''),
-                        citations=search_resp.items if hasattr(chunk, 'done') and chunk.done else [],
+                        citations=search_resp.items if getattr(chunk, 'done', False) else [],
                         usage=None,
                     )
                     yield json.dumps(answer_chunk.model_dump(), ensure_ascii=False) + "\n"

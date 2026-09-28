@@ -11,15 +11,15 @@
 
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import deps
-from ..config import get_settings, Provider
+from ..config import Provider, get_settings
 from ..db import get_db
-from ..models import SystemConfigRow, ProviderConfigRow
+from ..models import ProviderConfigRow
 from ..rbac import Permission
 from ..schemas.admin import ConfigItem, ConfigListResponse, ConfigUpdateRequest
 from ..services import provider_store, system_config
@@ -164,8 +164,8 @@ async def toggle_rerank(
 ) -> bool:
     """启用/禁用重排序服务。"""
     enabled = req.value.lower() == "true"
-    
-    row = await system_config.SystemConfig.set(
+
+    await system_config.SystemConfig.set(
         session,
         system_config.SystemConfig.KEY_RERANK_ENABLED,
         str(enabled),
@@ -236,7 +236,9 @@ async def update_config_by_key(
         )
     
     descriptions = {
-        system_config.SystemConfig.KEY_EMBEDDING_PROVIDER: "向量嵌入使用的 embedding provider（用于知识库向量化）",
+        system_config.SystemConfig.KEY_EMBEDDING_PROVIDER: (
+            "向量嵌入使用的 embedding provider（用于知识库向量化）"
+        ),
     }
     
     row = await system_config.SystemConfig.set(
