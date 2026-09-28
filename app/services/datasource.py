@@ -1,22 +1,27 @@
-"""外部数据源管理：CRUD + 连接串掩码 + 连通性测试。
+"""外部数据源管理：CRUD + 连接串加密落盘 + 连通性测试。
 
 连接串含口令，本模块负责：
-- 写入时把用户填的同步串 / 裸路径补成可用的异步连接串；
-- 读出时只给掩码串（口令打码），原文永不进响应；
+- 写入时把用户填的同步串 / 裸路径补成可用的异步连接串，再用 Fernet 加密落库；
+- 读出时只给掩码串（口令打码），原文永不进响应；解密统一走 :func:`decrypt_url`
+  （存量明文原样通过，两种格式共存）；
 - 改 / 删时释放对应的连接池（``db.dispose_source_engine``）。
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import time
 import uuid
 
+from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import db
+from ..config import get_settings
 from ..models import DataSourceRow
 from ..schemas.analytics import AnalyticsSource
 from ..schemas.datasource import (
@@ -54,6 +59,44 @@ def _prepare_url(dialect: str, url: str) -> str:
     return db.normalize_async_url(url, dialect)
 
 
+def _fernet() -> Fernet:
+    """由配置派生 Fernet 密钥（32 字节 URL-safe base64）。
+
+    优先 ``APP_DATASOURCE_SECRET_KEY``；没配则从引导密钥派生确定值，
+    保证开箱即用就加密落盘。用模块属性做缓存：测试里换 settings 时记得
+    一并重置它（或直接走 fixture 的 settings 补丁）。
+    """
+    settings = get_settings()
+    secret = settings.datasource_secret_key or settings.admin_api_key or "datasource-url"
+    key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
+    return Fernet(key)
+
+
+_FERNET_PREFIX = b"gAAAAA"  # Fernet token 的固定开头（version+时间戳的 base64 前缀）
+
+
+def encrypt_url(plain: str) -> str:
+    """连接串 → Fernet 密文（落库形态）。"""
+    return _fernet().encrypt(plain.encode()).decode()
+
+
+def decrypt_url(stored: str) -> str:
+    """库里存的值 → 明文连接串；兼容存量明文（非密文格式直接原样过）。
+
+    看着像密文却解不出（换过密钥/数据损坏）时必须报错而不是静默返回密文——
+    密文当连接串去连库只会得到一个难以定位的「连不上」。
+    """
+    if not stored or not stored.startswith(_FERNET_PREFIX.decode()):
+        return stored  # 存量明文
+    try:
+        return _fernet().decrypt(stored.encode()).decode()
+    except InvalidToken as exc:
+        raise ValueError(
+            "数据源连接串无法解密：检查 APP_DATASOURCE_SECRET_KEY 是否换过，"
+            "否则需重新录入该数据源"
+        ) from exc
+
+
 def mask_url(url: str) -> str:
     """把连接串里的口令打码；解析失败则原样正则兜底，绝不回明文口令。"""
     try:
@@ -68,7 +111,7 @@ def to_out(row: DataSourceRow) -> DataSourceOut:
         id=row.id,
         name=row.name,
         dialect=row.dialect,
-        url_masked=mask_url(row.url),
+        url_masked=mask_url(decrypt_url(row.url)),
         readonly=row.readonly,
         enabled=row.enabled,
         description=row.description,
@@ -140,7 +183,7 @@ async def create(
         id=_new_id(),
         name=name,
         dialect=dialect,
-        url=prepared,
+        url=encrypt_url(prepared),
         readonly=readonly,
         enabled=enabled,
         description=description.strip(),
@@ -177,7 +220,7 @@ async def update(
     if dialect is not None:
         row.dialect = _validate_dialect(dialect)
     if url is not None and url.strip():
-        row.url = _prepare_url(row.dialect, url)
+        row.url = encrypt_url(_prepare_url(row.dialect, url))
     if readonly is not None:
         row.readonly = readonly
     if enabled is not None:
@@ -216,7 +259,7 @@ async def test_connection(
             row = await session.get(DataSourceRow, existing_id)
             if row is None:
                 return DataSourceTestResult(ok=False, detail="数据源不存在")
-            target_url = row.url
+            target_url = decrypt_url(row.url)
             dialect = row.dialect
         if not target_url:
             return DataSourceTestResult(ok=False, detail="请先填写连接串")
@@ -266,7 +309,9 @@ async def _count_tables(url: str, dialect: str) -> int:
 
 __all__ = [
     "create",
+    "decrypt_url",
     "delete",
+    "encrypt_url",
     "list_sources",
     "mask_url",
     "selectable_sources",

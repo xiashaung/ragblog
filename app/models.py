@@ -198,8 +198,9 @@ class AdminSession(Base):
 class DataSourceRow(Base):
     """一条外部数据源配置。
 
-    连接串（``url``）含口令，只在服务内部用于建 engine；任何对外响应都
-    只回掩码串（见 ``datasource.mask_url``），编辑时留空表示不改。
+    连接串（``url``）含口令，落库前用 Fernet 加密（见 ``datasource.encrypt_url``，
+    存量明文仍可直接读）；服务层解密后只用于建 engine，任何对外响应都
+    只回掩码串（``datasource.mask_url``），编辑时留空表示不改。
     """
 
     __tablename__ = "data_sources"
@@ -208,7 +209,7 @@ class DataSourceRow(Base):
     name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     # sqlite | mysql | postgresql
     dialect: Mapped[str] = mapped_column(String(20), nullable=False)
-    # 异步 SQLAlchemy 连接串（含口令，仅内部用）
+    # 异步 SQLAlchemy 连接串（含口令）；Fernet 密文，仅服务层内部解密使用
     url: Mapped[str] = mapped_column(Text, nullable=False)
     # 是否强制只读（PG/MySQL 走只读事务；SQLite 靠不回滚兼底）
     readonly: Mapped[bool] = mapped_column(Boolean, default=True)

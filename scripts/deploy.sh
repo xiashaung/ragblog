@@ -22,7 +22,7 @@ cd "$ROOT"
 # 库里有两个 head，g6h7i8j9k0l1（system_configs）是从 c2a3b4d5e6f7 分出的孤儿分支，
 # 表实际由应用启动的 create_all 建，从未 apply；`upgrade head` 会报歧义，
 # `upgrade heads` 会去重建已存在的表。新增迁移后把这里的版本号推进。
-MIGRATION_REVISION="${MIGRATION_REVISION:-j9k0l1m2n3o4}"
+MIGRATION_REVISION="${MIGRATION_REVISION:-k0l1m2n3o4p5}"
 
 echo "==> 1/5 拉取代码（分支 $(git rev-parse --abbrev-ref HEAD)）"
 git pull --ff-only

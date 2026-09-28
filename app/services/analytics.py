@@ -40,7 +40,7 @@ from ..schemas.analytics import (
     AnalyticsSchemaResponse,
     AnalyticsTable,
 )
-from . import llm
+from . import datasource, llm
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +209,7 @@ async def _resolve_source(
         raise ValueError(f"数据源不存在：{source}")
     if not row.enabled:
         raise ValueError(f"数据源已停用：{row.name}")
-    engine = await db.get_source_engine(row.id, row.url, row.dialect)
+    engine = await db.get_source_engine(row.id, datasource.decrypt_url(row.url), row.dialect)
     return engine, bool(row.readonly)
 
 

@@ -311,6 +311,11 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./app.db"
     db_echo: bool = False
 
+    # --- 外部数据源连接串的落盘加密（Fernet）---
+    # 留空时由 APP_ADMIN_API_KEY 派生确定性密钥（开箱即用，但生产建议显式配）；
+    # 换 key 后存量密文无法解回，需重新录入数据源连接串。
+    datasource_secret_key: str = ""
+
     # --- Uploaded media (images) ---
     # 上传的图片以文件形式落盘、经 StaticFiles 直接对外服务，避免把 base64 blob
     # 塞进数据库。``media_dir`` 可为相对仓库根的路径或绝对路径；``media_url``

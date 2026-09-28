@@ -231,3 +231,60 @@ async def test_query_unknown_source_returns_error(client, console, monkeypatch):
     assert resp.status_code == 200, resp.text
     body = _data(resp)
     assert body["error"] and "数据源" in body["error"]
+
+
+# --------------------------------------------------------------------------- #
+# 连接串落盘加密（Fernet）
+# --------------------------------------------------------------------------- #
+
+
+def test_encrypt_decrypt_url_roundtrip():
+    plain = "mysql+aiomysql://reader:S3cr3t@10.0.0.9:3306/wh"
+    stored = datasource.encrypt_url(plain)
+    assert stored != plain
+    assert "S3cr3t" not in stored
+    assert datasource.decrypt_url(stored) == plain
+
+
+def test_decrypt_url_passes_through_legacy_plaintext():
+    # 存量明文（非 Fernet 前缀）原样通过，两种格式共存
+    assert datasource.decrypt_url("sqlite+aiosqlite:///x.db") == "sqlite+aiosqlite:///x.db"
+
+
+def test_decrypt_url_bad_token_raises_friendly_error():
+    # 看着像密文却解不出（换过密钥/损坏）→ 明确报错，不能把密文当连接串外带
+    broken = "gAAAAAB" + "x" * 80
+    try:
+        datasource.decrypt_url(broken)
+    except ValueError as exc:
+        assert "解密" in str(exc)
+    else:
+        raise AssertionError("无效密文应报错")
+
+
+async def test_created_datasource_is_encrypted_at_rest(client, console):
+    resp = await client.post(
+        "/api/v1/admin/data-sources",
+        json={
+            "name": "encrypted-demo",
+            "dialect": "mysql",
+            "url": "mysql://reader:S3cr3t@10.0.0.9:3306/wh",
+        },
+        headers=console["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+    source_id = _data(resp)["id"]
+    # 掩码仍可用（说明读出侧解密正确），且不泄露口令
+    assert "S3cr3t" not in _data(resp)["url_masked"]
+
+    from sqlalchemy import select
+
+    from app import db
+    from app.models import DataSourceRow
+
+    async with db.session_factory() as session:
+        stored = await session.scalar(
+            select(DataSourceRow.url).where(DataSourceRow.id == source_id)
+        )
+    assert stored.startswith("gAAAAA"), "落库应是 Fernet 密文"
+    assert "S3cr3t" not in stored

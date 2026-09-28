@@ -18,6 +18,8 @@ dependencies = [
     "alembic>=1.13",
     # 后台账号口令哈希（Argon2id）
     "argon2-cffi>=23.1",
+    # 数据源连接串落盘加密（Fernet）
+    "cryptography>=42.0",
     # Postgres 路线：pgvector 列类型 + 驱动（知识库向量检索需要）
     "pgvector>=0.4",
     "asyncpg>=0.29",
