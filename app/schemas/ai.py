@@ -443,6 +443,33 @@ class KnowledgeReplaceVectorsRequest(BaseModel):
     )
 
 
+class RagTaskStatus(BaseModel):
+    """一个 RAG 后台任务的状态快照（录入后拿 task_id 轮询这个）。
+
+    ``status`` 取值：pending / running / success / failed。未完成任务
+    ``result``/``error`` 为空；失败时 ``error`` 带异常摘要。
+    """
+
+    task_id: str
+    task_type: str
+    status: str
+    knowledge_id: str | None = None
+    result: dict | None = None
+    error: str | None = None
+    created_at: float
+    started_at: float | None = None
+    finished_at: float | None = None
+
+
+class RagTaskListResponse(BaseModel):
+    """分页的任务列表（管理页展示最近任务）。"""
+
+    total: int
+    offset: int = 0
+    limit: int = 20
+    items: list[RagTaskStatus]
+
+
 class KnowledgeProviderStat(BaseModel):
     """按向量后端分组的统计；``stale`` 表示这一组已不是当前默认后端。"""
 

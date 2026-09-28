@@ -116,6 +116,36 @@ class KnowledgeChunk(Base):
     )
 
 
+class RagTaskRow(Base):
+    """RAG 后台队列的任务登记（录入 / 更新 / 重建等写入类操作）。
+
+    行由入队时的请求会话落库（与队列无关，先 commit），Worker 只负责推进
+    ``status``：pending → running → success / failed。进程重启会丢掉内存队列，
+    存量 pending 不会自动重新执行（避免半截任务重复跑），由启动日志告警提示。
+    """
+
+    __tablename__ = "rag_tasks"
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=lambda: _uid("rag")
+    )
+    # 任务类型（TaskType 枚举值）；定义在 rag_queue，不在这里重复建模
+    task_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    # 入队时的请求体快照（model_dump），Worker 用它重建请求模型
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)
+    # pending | running | success | failed
+    status: Mapped[str] = mapped_column(String(10), default="pending", index=True)
+    # 执行成功的结果（chunks / knowledge_id 等），失败时为空
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=None)
+    # 失败原因（异常摘要，给前端展示用）
+    error: Mapped[str | None] = mapped_column(Text, default=None)
+    # 任务实际关联到的知识文档 id（ingest 类型执行前是新生成的，事后补写）
+    knowledge_id: Mapped[str | None] = mapped_column(String(64), default=None)
+    created_at: Mapped[float] = mapped_column(Float, default=_now)
+    started_at: Mapped[float | None] = mapped_column(Float, default=None)
+    finished_at: Mapped[float | None] = mapped_column(Float, default=None)
+
+
 # --- 后台账号 / 会话 / RBAC 角色 ---
 
 

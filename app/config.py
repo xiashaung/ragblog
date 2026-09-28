@@ -228,6 +228,10 @@ class Settings(BaseSettings):
     # （迁移会把维度不符的旧向量备份后置空，之后需要重建索引）。
     rag_vector_dim: int = 1024
 
+    # RAG 后台队列的并发 Worker 数。单 Worker 时一个大文档会堵住整条队列；
+    # 也不宜过大——向量化是外部 HTTP/本地模型调用，并行太多会打满下游。
+    rag_queue_workers: int = 2
+
     # --- RAG 精排（cross-encoder rerank）---
     # 启用后检索变成两段式：向量宽召回 → 调 rerank 模型精排取 top_k。
     # 端点采用 OpenAI/Cohere 风格的 ``POST {base}/rerank``（Xinference、

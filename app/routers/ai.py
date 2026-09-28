@@ -63,6 +63,8 @@ from ..schemas.ai import (
     KnowledgeSearchRequest,
     KnowledgeSearchResponse,
     KnowledgeStatsResponse,
+    RagTaskListResponse,
+    RagTaskStatus,
     Usage,
     WebSource,
 )
@@ -338,9 +340,10 @@ async def ingest(
             task_id=None,
         )
     else:
-        # 生产环境异步入队
+        # 生产环境异步入队（任务行随请求会话落库，见 rag_queue.enqueue）
         queue = get_queue()
         task_id = await queue.enqueue(
+            session,
             services.rag_queue.RAGTask(
                 task_type=TaskType.INGEST,
                 payload=req.model_dump(),
@@ -370,11 +373,12 @@ async def ingest_pairs(
 
     queue = get_queue()
     task_id = await queue.enqueue(
+        session,
         services.rag_queue.RAGTask(
             task_type=TaskType.INGEST_PAIRS,
             payload=req.model_dump(),
             created_at=time.time(),
-        )
+        ),
     )
     return KnowledgeIngestResponse(
         knowledge_id=f"pending-{task_id}",
@@ -398,11 +402,12 @@ async def ingest_from_url(
 
     queue = get_queue()
     task_id = await queue.enqueue(
+        session,
         services.rag_queue.RAGTask(
             task_type=TaskType.INGEST_URL,
             payload=req.model_dump(),
             created_at=time.time(),
-        )
+        ),
     )
     # 立即返回接受状态
     return KnowledgeFetchResponse(
@@ -426,6 +431,40 @@ async def knowledge_stats(
 ) -> KnowledgeStatsResponse:
     """文档数 / 分块数总量，另带按 provider 的拆解（看多少文档需要重索引）。"""
     return await services.rag.knowledge_stats(session)
+
+
+# 任务状态查询（异步录入后轮询）。静态段 ``/knowledge/tasks`` 必须排在
+# ``/knowledge/{knowledge_id}`` 之前，否则会被路径参数吞掉（见文件顶部注释）。
+@router.get("/knowledge/tasks", response_model=RagTaskListResponse)
+async def list_rag_tasks(
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_READ)),
+) -> RagTaskListResponse:
+    """分页列最近的 RAG 后台任务（按创建时间倒序）。"""
+    total, rows = await services.rag_queue.list_tasks(
+        session, offset=offset, limit=limit
+    )
+    return RagTaskListResponse(
+        total=total,
+        offset=offset,
+        limit=limit,
+        items=[RagTaskStatus(**services.rag_queue.to_status(r)) for r in rows],
+    )
+
+
+@router.get("/knowledge/tasks/{task_id}", response_model=RagTaskStatus)
+async def get_rag_task(
+    task_id: str,
+    session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_READ)),
+) -> RagTaskStatus:
+    """按 task_id 查一个 RAG 后台任务的状态（pending/running/success/failed）。"""
+    row = await services.rag_queue.get_task(session, task_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return RagTaskStatus(**services.rag_queue.to_status(row))
 
 
 @router.get("/knowledge", response_model=KnowledgeListResponse)
@@ -502,11 +541,12 @@ async def update_knowledge(
         # 生产环境异步入队
         queue = get_queue()
         task_id = await queue.enqueue(
+            session,
             services.rag_queue.RAGTask(
                 task_type=TaskType.UPDATE,
                 payload={"knowledge_id": knowledge_id, **req.model_dump()},
                 created_at=time.time(),
-            )
+            ),
         )
         # 立即返回接受状态
         return KnowledgeDocItem(
@@ -542,11 +582,12 @@ async def reindex_knowledge(
         # 生产环境异步入队
         queue = get_queue()
         task_id = await queue.enqueue(
+            session,
             services.rag_queue.RAGTask(
                 task_type=services.rag_queue.TaskType.REINDEX,
                 payload={"knowledge_id": knowledge_id},
                 created_at=time.time(),
-            )
+            ),
         )
         # 立即返回接受状态
         return KnowledgeReindexResponse(
@@ -571,11 +612,12 @@ async def replace_vectors(
     
     queue = get_queue()
     task_id = await queue.enqueue(
+        session,
         services.rag_queue.RAGTask(
             task_type=services.rag_queue.TaskType.REPLACE_VECTORS,
             payload={"knowledge_id": knowledge_id, "new_provider": new_provider},
             created_at=time.time(),
-        )
+        ),
     )
     # 立即返回接受状态
     return KnowledgeReindexResponse(

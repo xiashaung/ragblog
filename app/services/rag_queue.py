@@ -1,17 +1,34 @@
-"""RAG 任务队列：文档上传、处理、重建、更换向量模型后的重建都放到队列执行，避免阻塞 HTTP 请求。"""
+"""RAG 任务队列：文档上传、处理、重建、更换向量模型后的重建都放到队列执行，避免阻塞 HTTP 请求。
+
+任务生命周期（行由 ``rag_tasks`` 表持久化，见 models.RagTaskRow）：
+
+1. 路由把 payload 交给 :meth:`RAGQueue.enqueue`，用**请求自己的会话**写入
+   ``pending`` 行并随请求 commit——任务登记与进程无关，重启后仍能查到历史；
+2. ``await queue.put(task_id)`` 把 id 投进内存队列，HTTP 立即返回 ``task_id``；
+3. 多个 Worker 并发从队列取 id，各自开会话把行推进到 ``running`` →
+   ``success`` / ``failed``，结果与失败原因都写回同一行。
+
+内存队列丢了（进程重启）不会丢任务登记：存量 ``pending`` 会在启动日志里告警，
+但不自动重跑——半截任务（如已删旧分片未写新分片）重复执行比丢任务更糟，
+交由管理员在后台确认后重新发起。
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import db
 from ..config import get_settings
-from ..models import KnowledgeDoc
+from ..models import KnowledgeDoc, RagTaskRow
 from ..schemas.ai import (
     KnowledgeDocUpdateRequest,
     KnowledgeFetchRequest,
@@ -21,6 +38,12 @@ from ..schemas.ai import (
 from . import rag
 
 logger = logging.getLogger(__name__)
+
+# 状态机：与 RagTaskRow.status 的取值一致
+PENDING = "pending"
+RUNNING = "running"
+SUCCESS = "success"
+FAILED = "failed"
 
 
 class TaskType(str, Enum):
@@ -36,94 +59,164 @@ class TaskType(str, Enum):
 
 @dataclass
 class RAGTask:
-    """RAG 队列任务。"""
+    """RAG 队列任务（内存投递形态；持久化形态见 RagTaskRow）。"""
 
     task_type: TaskType
     payload: dict[str, Any]
     created_at: float
+    id: str = ""
 
 
 class RAGQueue:
-    """RAG 任务队列（单 Worker）。
+    """RAG 任务队列（多 Worker 并发）。
 
-    所有耗时的 RAG 操作（分块、向量化、入库）都在后台队列中顺序执行，
-    HTTP 接口只负责入队并立即返回「接受」状态。
+    所有耗时的 RAG 操作（分块、向量化、入库）都在后台队列执行，
+    HTTP 接口只负责登记任务并入队并立即返回「接受」状态。并发度由
+    ``APP_RAG_QUEUE_WORKERS`` 控制（默认 2）：单 Worker 时一个大文档会堵住
+    整条队列，多 Worker 让不同文档并行处理；同一文档的任务仍按入队顺序
+    串行（Worker 取到即先置 running，重复投递会被状态检查跳过）。
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """只建空队列与占位字段，起 Worker 要显式调 :meth:`start`。"""
-        self._queue: asyncio.Queue[RAGTask | None] = asyncio.Queue()
-        self._worker: asyncio.Task | None = None
+        self._queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._workers: list[asyncio.Task] = []
         self._running = False
 
+    @property
+    def workers_alive(self) -> int:
+        """当前存活的 Worker 数（健康检查用；0 表示队列停摆）。"""
+        return sum(1 for w in self._workers if not w.done())
+
     async def start(self) -> None:
-        """启动队列 Worker。"""
+        """启动全部 Worker，并对重启遗留的 pending 任务告警。"""
         if self._running:
             return
         self._running = True
-        self._worker = asyncio.create_task(self._worker_loop())
-        logger.info("RAG 队列 Worker 已启动")
+        n = max(1, get_settings().rag_queue_workers)
+        self._workers = [
+            asyncio.create_task(self._worker_loop(i)) for i in range(n)
+        ]
+        logger.info("RAG 队列 Worker 已启动（并发 %d）", n)
+        await self._warn_orphans()
+
+    async def _warn_orphans(self) -> None:
+        """登记仍在 pending 的遗留任务（进程重启丢队列），提示人工处理。"""
+        try:
+            async with db.get_session_factory()() as session:
+                rows = (
+                    await session.scalars(
+                        select(RagTaskRow).where(RagTaskRow.status == PENDING)
+                    )
+                ).all()
+            if rows:
+                logger.warning(
+                    "发现 %d 个未执行的遗留 RAG 任务（进程重启丢队列），"
+                    "请在后台确认后重新发起对应操作",
+                    len(rows),
+                )
+        except Exception:  # noqa: BLE001 - 告警失败不影响启动
+            logger.exception("检查遗留 RAG 任务失败")
 
     async def stop(self) -> None:
-        """停止队列 Worker。"""
+        """停止队列：按 Worker 数投退出哨兵，等全部收尾。"""
         self._running = False
-        if self._queue is not None:
-            await self._queue.put(None)  # 触发退出
-        if self._worker is not None:
-            await self._worker
+        for _ in self._workers:
+            await self._queue.put(None)
+        for w in self._workers:
+            await w
+        self._workers = []
         logger.info("RAG 队列 Worker 已停止")
 
-    async def _worker_loop(self) -> None:
-        """Worker 主循环：从队列取任务并顺序执行。"""
+    async def _worker_loop(self, index: int) -> None:
+        """单个 Worker 主循环：从队列取任务 id 并执行。"""
         while True:
-            task = await self._queue.get()
-            if task is None:
+            task_id = await self._queue.get()
+            if task_id is None:
                 break
             try:
-                await self._execute_task(task)
+                await self._run_task(task_id)
             except Exception:  # noqa: BLE001 - 记录错误但不中断 worker
-                logger.exception("RAG 任务执行失败：%s", task)
+                logger.exception("RAG 任务执行失败：%s", task_id)
 
-    async def _execute_task(self, task: RAGTask) -> None:
-        """执行单个任务（在异步上下文中运行 DB 操作）。"""
-        logger.info("开始执行 RAG 任务：%s", task.task_type.value)
+    async def _run_task(self, task_id: str) -> None:
+        """按 id 执行一个已登记的任务：置 running → 分发 → 写回结果/错误。
 
-        # 创建独立的数据库会话（与 HTTP 请求的会话隔离）
-        from .. import db
+        状态流转各用独立短会话并立即提交：Worker 崩溃或任务失败时，
+        「置为 running / failed」这两笔本身不能跟着任务内容一起回滚，
+        否则行会永远卡在中间态。
+        """
+        payload, task_type = await self._mark_running(task_id)
+        if payload is None:
+            # 行不存在或已不在 pending（重复投递 / 遗留任务），跳过
+            logger.warning("RAG 任务 %s 不在 pending 状态，跳过执行", task_id)
+            return
 
-        async with db.engine.connect() as conn:
-            async with conn.begin():
-                from sqlalchemy.ext.asyncio import async_sessionmaker
+        session_factory = db.get_session_factory()
+        try:
+            async with session_factory() as session:
+                result = await self._dispatch(session, task_type, payload)
+                await session.commit()
+            await self._finish(task_id, status_=SUCCESS, result=result, error=None)
+            logger.info("RAG 任务执行完成：%s (%s)", task_type, task_id)
+        except Exception as exc:  # noqa: BLE001 - 失败要落库，不能只留日志
+            async with session_factory() as session:
+                await session.rollback()
+            await self._finish(
+                task_id, status_=FAILED, result=None, error=f"{type(exc).__name__}: {exc}"
+            )
+            logger.exception("RAG 任务执行失败：%s (%s)", task_type, task_id)
 
-                session_maker = async_sessionmaker(
-                    conn, expire_on_commit=False, class_=AsyncSession
-                )
-                async with session_maker() as session:
-                    if task.task_type == TaskType.INGEST:
-                        result = await self._do_ingest(session, task.payload)
-                    elif task.task_type == TaskType.INGEST_PAIRS:
-                        result = await self._do_ingest_pairs(session, task.payload)
-                    elif task.task_type == TaskType.INGEST_URL:
-                        result = await self._do_ingest_url(session, task.payload)
-                    elif task.task_type == TaskType.UPDATE:
-                        result = await self._do_update(session, task.payload)
-                    elif task.task_type == TaskType.REINDEX:
-                        result = await self._do_reindex(session, task.payload)
-                    elif task.task_type == TaskType.REPLACE_VECTORS:
-                        result = await self._do_replace_vectors(session, task.payload)
-                    else:
-                        raise ValueError(f"未知任务类型：{task.task_type}")
+    async def _mark_running(self, task_id: str) -> tuple[dict | None, str]:
+        """条件更新 pending→running；抢不到（状态不对）返回 ``None`` 让上层跳过。"""
+        async with db.get_session_factory()() as session:
+            row = await session.get(RagTaskRow, task_id)
+            if row is None or row.status != PENDING:
+                return None, ""
+            row.status = RUNNING
+            row.started_at = time.time()
+            await session.commit()
+            return dict(row.payload or {}), row.task_type
 
-                    # 将结果写入任务元数据（可选）
-                    doc_id = result.get("knowledge_id") if isinstance(result, dict) else None
-                    if doc_id:
-                        doc = await session.get(KnowledgeDoc, doc_id)
-                        if doc and doc.meta is None:
-                            doc.meta = {}
-                        doc.meta["last_task_result"] = result
-                        await session.flush()
+    async def _finish(
+        self,
+        task_id: str,
+        *,
+        status_: str,
+        result: dict | None,
+        error: str | None,
+    ) -> None:
+        """把终态（success/failed）与结果/错误写回任务行。"""
+        async with db.get_session_factory()() as session:
+            row = await session.get(RagTaskRow, task_id)
+            if row is None:
+                return
+            row.status = status_
+            row.result = result
+            row.error = error
+            row.finished_at = time.time()
+            if result and result.get("knowledge_id"):
+                row.knowledge_id = str(result["knowledge_id"])
+            await session.commit()
 
-        logger.info("RAG 任务执行完成：%s", task.task_type.value)
+    async def _dispatch(
+        self, session: AsyncSession, task_type: str, payload: dict
+    ) -> dict:
+        """按类型分发到具体执行函数（同步/异步两条路共用，避免重复 if/elif）。"""
+        handlers: dict[
+            str, Callable[[AsyncSession, dict], Coroutine[Any, Any, dict]]
+        ] = {
+            TaskType.INGEST.value: self._do_ingest,
+            TaskType.INGEST_PAIRS.value: self._do_ingest_pairs,
+            TaskType.INGEST_URL.value: self._do_ingest_url,
+            TaskType.UPDATE.value: self._do_update,
+            TaskType.REINDEX.value: self._do_reindex,
+            TaskType.REPLACE_VECTORS.value: self._do_replace_vectors,
+        }
+        handler = handlers.get(task_type)
+        if handler is None:
+            raise ValueError(f"未知任务类型：{task_type}")
+        return await handler(session, payload)
 
     async def _do_ingest(self, session: AsyncSession, payload: dict) -> dict:
         """执行文档入库。"""
@@ -198,53 +291,80 @@ class RAGQueue:
             "chars": len(doc.content),
         }
 
-    async def enqueue(self, task: RAGTask, sync: bool = False) -> str:
-        """将任务加入队列，返回任务 ID（当前简化为时间戳字符串）。
-        
-        Args:
-            task: 要执行的任务
-            sync: 是否同步执行（用于测试或紧急场景）
+    async def enqueue(
+        self,
+        session: AsyncSession,
+        task: RAGTask,
+        sync: bool = False,
+    ) -> str:
+        """登记任务（写 ``rag_tasks`` 行）并入队，返回任务 id。
+
+        - ``session`` 用请求自己的会话：行随请求成功 commit，与队列解耦；
+        - id 由 :func:`new_task` 当场生成（uuid），并写回 ``task.id``，
+          路由层拿它拼 ``pending-{task_id}`` 响应；
+        - ``sync=True``（测试）：不走 Worker，直接执行并写回终态，
+          但任务行同样落库，让状态端点也测得到。
         """
-        task_id = f"rag-{int(task.created_at * 1000)}"
-        task.id = task_id
-        
+        task.id = await self._create_row(session, task)
         if sync:
-            # 同步执行（用于测试）
-            logger.info("同步执行 RAG 任务：%s (%s)", task.task_type.value, task_id)
-            await self._execute_task_sync(task)
+            logger.info("同步执行 RAG 任务：%s (%s)", task.task_type.value, task.id)
+            # 先提交任务行：_run_task 用独立会话读它，未提交对其他连接不可见（SQLite 尤甚）
+            await session.commit()
+            await self._run_task(task.id)
         else:
-            # 异步入队
-            await self._queue.put(task)
-            logger.info("RAG 任务已入队：%s (%s)", task.task_type.value, task_id)
-        
-        return task_id
-    
-    async def _execute_task_sync(self, task: RAGTask) -> None:
-        """同步执行任务（不启动 worker）。"""
-        from .. import db
-        from sqlalchemy.ext.asyncio import async_sessionmaker
-        
-        async with db.engine.connect() as conn:
-            async with conn.begin():
-                session_maker = async_sessionmaker(
-                    conn, expire_on_commit=False, class_=AsyncSession
-                )
-                async with session_maker() as session:
-                    if task.task_type == TaskType.INGEST:
-                        result = await self._do_ingest(session, task.payload)
-                    elif task.task_type == TaskType.INGEST_PAIRS:
-                        result = await self._do_ingest_pairs(session, task.payload)
-                    elif task.task_type == TaskType.INGEST_URL:
-                        result = await self._do_ingest_url(session, task.payload)
-                    elif task.task_type == TaskType.UPDATE:
-                        result = await self._do_update(session, task.payload)
-                    elif task.task_type == TaskType.REINDEX:
-                        result = await self._do_reindex(session, task.payload)
-                    elif task.task_type == TaskType.REPLACE_VECTORS:
-                        result = await self._do_replace_vectors(session, task.payload)
-                    else:
-                        raise ValueError(f"未知任务类型：{task.task_type}")
-                    logger.info("同步执行完成：%s", task.task_type.value)
+            await self._queue.put(task.id)
+            logger.info("RAG 任务已入队：%s (%s)", task.task_type.value, task.id)
+        return task.id
+
+    async def _create_row(self, session: AsyncSession, task: RAGTask) -> str:
+        """写入 pending 行（payload 里的 model_dump 都可 JSON 序列化）。"""
+        row = RagTaskRow(
+            task_type=task.task_type.value,
+            payload=task.payload,
+            status=PENDING,
+            created_at=task.created_at,
+        )
+        session.add(row)
+        await session.flush()
+        return row.id
+
+
+async def get_task(session: AsyncSession, task_id: str) -> RagTaskRow | None:
+    """按 id 查任务登记行（状态端点用）。"""
+    return await session.get(RagTaskRow, task_id)
+
+
+def to_status(row: RagTaskRow) -> dict[str, Any]:
+    """RagTaskRow → 对外状态字典（与 schemas.ai.RagTaskStatus 字段对齐）。"""
+    return {
+        "task_id": row.id,
+        "task_type": row.task_type,
+        "status": row.status,
+        "knowledge_id": row.knowledge_id,
+        "result": row.result,
+        "error": row.error,
+        "created_at": row.created_at,
+        "started_at": row.started_at,
+        "finished_at": row.finished_at,
+    }
+
+
+async def list_tasks(
+    session: AsyncSession, *, offset: int = 0, limit: int = 20
+) -> tuple[int, list[RagTaskRow]]:
+    """分页列最近任务（按创建时间倒序）；回总数与当页行。"""
+    from sqlalchemy import func
+
+    total = await session.scalar(select(func.count()).select_from(RagTaskRow)) or 0
+    rows = (
+        await session.scalars(
+            select(RagTaskRow)
+            .order_by(RagTaskRow.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    ).all()
+    return int(total), list(rows)
 
 
 # 全局队列实例

@@ -1,6 +1,7 @@
 """Tests for the AI endpoints (chat, RAG) using the mock backend."""
 
 import json
+import time
 
 import pytest
 from fastapi import status
@@ -1198,3 +1199,75 @@ def test_rrf_fuse_zero_vector_weight_uses_lexical_only():
         vector_hits, lexical_hits, k=60, vector_weight=0.0, pool=10
     )
     assert [h[0] for h in out] == ["d1", "d3"]
+
+
+async def test_rag_task_persisted_and_queryable(client, admin_headers):
+    """RAG 入库任务：登记行落库 → 同步执行 → 状态端点可查。"""
+    from app import db
+    from app.services import rag_queue
+
+    task = rag_queue.RAGTask(
+        task_type=rag_queue.TaskType.INGEST,
+        payload={
+            "title": "持久化测试",
+            "content": "段落一内容足够长可以切片。" * 10,
+            "format": "text",
+        },
+        created_at=time.time(),
+    )
+    async with db.session_factory() as session:
+        task_id = await rag_queue.get_queue().enqueue(session, task, sync=True)
+    # 查询单个任务状态
+    resp = await client.get(
+        f"/api/v1/ai/knowledge/tasks/{task_id}", headers=admin_headers
+    )
+    assert resp.status_code == 200
+    data = _ok(resp)
+    assert data["status"] == "success"
+    assert data["result"]["chunks"] >= 1
+    kb_id = data["knowledge_id"]
+    assert kb_id is not None
+    # 验证文档确实入库了
+    detail = _ok(await client.get(f"/api/v1/ai/knowledge/{kb_id}", headers=admin_headers))
+    assert detail["doc"]["title"] == "持久化测试"
+
+
+async def test_rag_task_status_404_for_unknown(client, admin_headers):
+    """未知 task_id 返回 404。"""
+    resp = await client.get(
+        "/api/v1/ai/knowledge/tasks/rag-nonexistent", headers=admin_headers
+    )
+    assert resp.status_code == 404
+
+
+async def test_rag_task_list_pagination(client, admin_headers):
+    """任务列表分页：总数、offset/limit 生效。"""
+    from app import db
+    from app.services import rag_queue
+
+    for i in range(5):
+        task = rag_queue.RAGTask(
+            task_type=rag_queue.TaskType.INGEST,
+            payload={"title": f"任务{i}", "content": "a" * 100, "format": "text"},
+            created_at=time.time() + i,
+        )
+        async with db.session_factory() as session:
+            await rag_queue.get_queue().enqueue(session, task, sync=True)
+
+    # 总行数应为 5
+    resp = await client.get("/api/v1/ai/knowledge/tasks", headers=admin_headers)
+    assert resp.status_code == 200
+    data = _ok(resp)
+    assert data["total"] == 5
+    assert len(data["items"]) == 5
+
+    # offset/limit 生效
+    resp = await client.get(
+        "/api/v1/ai/knowledge/tasks?offset=2&limit=2", headers=admin_headers
+    )
+    assert resp.status_code == 200
+    data = _ok(resp)
+    assert data["total"] == 5
+    assert len(data["items"]) == 2
+    # 按创建时间倒序，所以是 [4,3]
+    assert data["items"][0]["task_id"] != data["items"][1]["task_id"]
