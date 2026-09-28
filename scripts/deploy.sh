@@ -22,7 +22,7 @@ cd "$ROOT"
 # c2a3b4d5e6f7，导致裸 `upgrade head` 报歧义）；现已把 g6h7 重挂到主线尾部
 # 收敛回单 head，且它对存量库幂等（表存在即跳过）。继续钉版本号是显式
 # 控制手段：新增迁移后把这里的版本号推进，部署时能看见它没跟上。
-MIGRATION_REVISION="${MIGRATION_REVISION:-g6h7i8j9k0l1}"
+MIGRATION_REVISION="${MIGRATION_REVISION:-m2n3o4p5q6r7}"
 
 echo "==> 1/5 拉取代码（分支 $(git rev-parse --abbrev-ref HEAD)）"
 git pull --ff-only
