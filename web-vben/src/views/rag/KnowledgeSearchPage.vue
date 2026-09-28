@@ -293,6 +293,13 @@ const kindLabels: Record<string, string> = {
   faq: '问答对',
   url: '网页',
 };
+// 引用文档的向量化状态中文标签（详情抽屉展示）
+const docStatusLabels: Record<string, string> = {
+  indexed: '已学习',
+  pending: '待重建',
+  processing: '处理中',
+  failed: '重建失败',
+};
 function fmtDate(ts: number): string {
   return ts ? new Date(ts * 1000).toLocaleString() : '—';
 }
@@ -533,7 +540,11 @@ onMounted(() => {
         <template v-if="docDrawer.data">
           <a-descriptions :column="2" size="small" bordered>
             <a-descriptions-item label="ID" :span="2">{{ docDrawer.data.doc.knowledge_id }}</a-descriptions-item>
-            <a-descriptions-item label="Provider">{{ docDrawer.data.doc.provider }}</a-descriptions-item>
+            <a-descriptions-item label="状态">
+              <a-tag :color="docDrawer.data.doc.status === 'indexed' ? 'green' : 'orange'">
+                {{ docStatusLabels[docDrawer.data.doc.status] || docDrawer.data.doc.status }}
+              </a-tag>
+            </a-descriptions-item>
             <a-descriptions-item label="录入方式">{{ kindLabels[docDrawer.data.doc.kind] || docDrawer.data.doc.kind }}</a-descriptions-item>
             <a-descriptions-item label="分片数">{{ docDrawer.data.chunk_total }}</a-descriptions-item>
             <a-descriptions-item label="字符数">{{ (docDrawer.data.doc.chars || 0).toLocaleString() }}</a-descriptions-item>
@@ -544,11 +555,11 @@ onMounted(() => {
           </a-descriptions>
 
           <a-alert
-            v-if="docDrawer.data.doc.stale"
+            v-if="docDrawer.data.doc.status !== 'indexed'"
             type="warning"
             show-icon
             style="margin-top: 12px"
-            :message="`该文档向量属于 ${docDrawer.data.doc.provider}，与当前默认配置不一致，检索不会命中，请到文档列表重建索引`"
+            message="该文档尚未按当前嵌入模型完成向量化，检索不会命中，请到文档列表重建索引"
           />
 
           <template v-if="docDrawer.data.doc.metadata?.images?.length">

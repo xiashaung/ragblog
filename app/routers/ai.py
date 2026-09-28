@@ -44,6 +44,7 @@ from ..schemas.ai import (
     ChatSessionListResponse,
     ChatSessionOut,
     ChatSessionUpdate,
+    DocStatus,
     KnowledgeAnswerChunk,
     KnowledgeAnswerRequest,
     KnowledgeAnswerResponse,
@@ -58,8 +59,8 @@ from ..schemas.ai import (
     KnowledgeIngestResponse,
     KnowledgeListResponse,
     KnowledgePairsIngestRequest,
+    KnowledgeReindexAllResponse,
     KnowledgeReindexResponse,
-    KnowledgeReplaceVectorsRequest,
     KnowledgeSearchRequest,
     KnowledgeSearchResponse,
     KnowledgeStatsResponse,
@@ -68,7 +69,7 @@ from ..schemas.ai import (
     Usage,
     WebSource,
 )
-from ..services.llm import chat_model, default_chat_provider, get_llm, resolve_name
+from ..services.llm import chat_model, default_chat_provider, get_llm
 from ..services.provider_store import get_provider_config, known_providers
 from ..services.rag_queue import TaskType, get_queue
 from ..services.rbac_service import Principal
@@ -334,7 +335,7 @@ async def ingest(
         result = await services.rag.ingest(session, req)
         return KnowledgeIngestResponse(
             knowledge_id=result.knowledge_id,
-            provider=result.provider,
+            status=result.status,
             chunks=result.chunks,
             chars=result.chars,
             task_id=None,
@@ -353,7 +354,7 @@ async def ingest(
         )
         return KnowledgeIngestResponse(
             knowledge_id=f"pending-{task_id}",
-            provider=resolve_name(req.provider, feature="embedding"),
+            status=DocStatus.PENDING,
             chunks=0,
             chars=0,
             task_id=task_id,
@@ -382,7 +383,7 @@ async def ingest_pairs(
     )
     return KnowledgeIngestResponse(
         knowledge_id=f"pending-{task_id}",
-        provider=resolve_name(req.provider, feature="embedding"),
+        status=DocStatus.PENDING,
         chunks=0,
         chars=0,
         task_id=task_id,
@@ -412,7 +413,7 @@ async def ingest_from_url(
     # 立即返回接受状态
     return KnowledgeFetchResponse(
         knowledge_id=f"pending-{task_id}",
-        provider=resolve_name(req.provider, feature="embedding"),
+        status=DocStatus.PENDING,
         chunks=0,
         chars=0,
         title=req.title or "",
@@ -429,7 +430,7 @@ async def knowledge_stats(
     session: AsyncSession = Depends(get_db),
     _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_READ)),
 ) -> KnowledgeStatsResponse:
-    """文档数 / 分块数总量，另带按 provider 的拆解（看多少文档需要重索引）。"""
+    """文档数 / 分块数总量，另带按向量化状态的拆解（看多少文档待重建 / 处理中 / 失败）。"""
     return await services.rag.knowledge_stats(session)
 
 
@@ -470,19 +471,17 @@ async def get_rag_task(
 @router.get("/knowledge", response_model=KnowledgeListResponse)
 async def list_knowledge(
     keyword: str | None = Query(default=None, description="按标题 / 正文模糊匹配"),
-    provider: str | None = Query(default=None, description="按入库 provider 过滤"),
-    only_stale: bool = Query(default=False, description="只看与当前默认 provider 不一致的文档"),
+    status: str | None = Query(default=None, description="按向量化状态过滤：indexed/pending/processing/failed"),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=200),
     session: AsyncSession = Depends(get_db),
     _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_READ)),
 ) -> KnowledgeListResponse:
-    """分页列出知识文档，支持标题/正文关键字、provider 过滤与「只看陈旧的」。"""
+    """分页列出知识文档，支持标题/正文关键字与向量化状态过滤。"""
     return await services.rag.list_knowledge(
         session,
         keyword=keyword,
-        provider=provider,
-        only_stale=only_stale,
+        status=status,
         offset=offset,
         limit=limit,
     )
@@ -548,11 +547,11 @@ async def update_knowledge(
                 created_at=time.time(),
             ),
         )
-        # 立即返回接受状态
+        # 立即返回接受状态：正文将重算，占位对象先标「待重建」
         return KnowledgeDocItem(
             knowledge_id=knowledge_id,
             title=req.title or "",
-            provider=resolve_name(feature="embedding"),
+            status=DocStatus.PENDING,
             chunks=0,
             chars=0,
             preview="",
@@ -589,45 +588,41 @@ async def reindex_knowledge(
                 created_at=time.time(),
             ),
         )
-        # 立即返回接受状态
+        # 立即返回接受状态：worker 将拉回加重建，占位先标「处理中」
         return KnowledgeReindexResponse(
             knowledge_id=knowledge_id,
-            provider=resolve_name(feature="embedding"),
-            previous_provider=None,
+            status=DocStatus.PROCESSING,
             chunks=0,
             chars=0,
             task_id=task_id,
         )
 
 
-@router.post("/knowledge/{knowledge_id}/replace-vectors", response_model=KnowledgeReindexResponse)
-async def replace_vectors(
-    knowledge_id: str,
-    req: KnowledgeReplaceVectorsRequest,
+@router.post("/knowledge/reindex-all", response_model=KnowledgeReindexAllResponse)
+async def reindex_all_knowledge(
     session: AsyncSession = Depends(get_db),
     _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
-) -> KnowledgeReindexResponse:
-    """更换向量模型后重建索引（异步）。"""
-    new_provider = resolve_name(req.provider, feature="embedding")
-    
+) -> KnowledgeReindexAllResponse:
+    """全库强制重建：把所有文档标为待重建并入队 REINDEX_ALL。
+
+    有原文的文档置 ``pending``，无原文的老文档置 ``failed``（需重新上传）；
+    先提交状态变更再入队，保证 worker 新会话能读到。同步模式下直接跑完全库重建。
+    """
+    enqueued = await services.rag.mark_docs_for_full_rebuild(session)
+    await session.commit()
+    if _sync_mode():
+        await services.rag.reindex_all_docs(session)
+        return KnowledgeReindexAllResponse(enqueued=enqueued, task_id=None)
     queue = get_queue()
     task_id = await queue.enqueue(
         session,
         services.rag_queue.RAGTask(
-            task_type=services.rag_queue.TaskType.REPLACE_VECTORS,
-            payload={"knowledge_id": knowledge_id, "new_provider": new_provider},
+            task_type=TaskType.REINDEX_ALL,
+            payload={},
             created_at=time.time(),
         ),
     )
-    # 立即返回接受状态
-    return KnowledgeReindexResponse(
-        knowledge_id=knowledge_id,
-        provider=new_provider,
-        previous_provider=None,
-        chunks=0,
-        chars=0,
-        task_id=task_id,
-    )
+    return KnowledgeReindexAllResponse(enqueued=enqueued, task_id=task_id)
 
 
 @router.delete("/knowledge/{knowledge_id}")

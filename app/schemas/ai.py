@@ -248,6 +248,21 @@ class EmbeddingResponse(BaseModel):
 ContentFormat = Literal["text", "markdown", "html"]
 
 
+class DocStatus(StrEnum):
+    """知识库文档的向量化状态机（与 ``KnowledgeDoc.status`` 取值一致）。
+
+    - ``indexed``     已学习：向量与当前嵌入模型一致，可被检索；
+    - ``pending``     待重建：需重建（新建尚未学习 / 切换嵌入模型后），检索排除；
+    - ``processing``  处理中：后台 worker 正在重新向量化，检索排除；
+    - ``failed``      重建失败：上次重建报错（维度不符 / 后端失败 / 无原文），可重试。
+    """
+
+    INDEXED = "indexed"
+    PENDING = "pending"
+    PROCESSING = "processing"
+    FAILED = "failed"
+
+
 class KnowledgeIngestRequest(BaseModel):
     """文本录入：一段正文喂给服务层，由它切片 + 向量化。"""
 
@@ -274,7 +289,7 @@ class KnowledgeIngestResponse(BaseModel):
     """录入结果：文档 ID + 切了多少片。"""
 
     knowledge_id: str
-    provider: Provider
+    status: DocStatus = DocStatus.INDEXED
     chunks: int
     chars: int = 0
     task_id: str | None = Field(
@@ -335,7 +350,10 @@ class KnowledgeDocItem(BaseModel):
 
     knowledge_id: str
     title: str
-    provider: str
+    # 向量化状态（indexed/pending/processing/failed）：决定能否被检索与是否需重建。
+    status: DocStatus = DocStatus.PENDING
+    # 上次重建失败的原因（仅 status=failed 时有值），供前端 tooltip 展示。
+    reindex_error: str | None = None
     chunks: int
     chars: int = 0
     preview: str = ""
@@ -351,8 +369,6 @@ class KnowledgeDocItem(BaseModel):
     metadata: dict | None = None
     ingested_at: float = 0.0
     updated_at: float = 0.0
-    # 存库向量用的后端与当前默认值不一致时为 True（检索会碰不到它们）。
-    stale: bool = False
     # 异步任务 ID（如果入队了）
     task_id: str | None = None
 
@@ -422,11 +438,10 @@ class KnowledgeBatchDeleteResponse(BaseModel):
 
 
 class KnowledgeReindexResponse(BaseModel):
-    """重建索引的结果：回新旧两个后端，便于确认是否真的跳了模型。"""
+    """重建索引的结果：回当时状态与新分片数。"""
 
     knowledge_id: str
-    provider: str
-    previous_provider: str | None = None
+    status: DocStatus
     chunks: int
     chars: int
     task_id: str | None = Field(
@@ -435,11 +450,13 @@ class KnowledgeReindexResponse(BaseModel):
     )
 
 
-class KnowledgeReplaceVectorsRequest(BaseModel):
-    """更换向量模型后重建索引的请求体。"""
+class KnowledgeReindexAllResponse(BaseModel):
+    """全库强制重建：回本次圈定的文档数与（异步入队时的）任务 ID。"""
 
-    provider: Provider | None = Field(
-        default=None, description="新的向量模型 provider"
+    enqueued: int
+    task_id: str | None = Field(
+        default=None,
+        description="REINDEX_ALL 后台任务 ID；同步模式下为 None",
     )
 
 
@@ -470,13 +487,12 @@ class RagTaskListResponse(BaseModel):
     items: list[RagTaskStatus]
 
 
-class KnowledgeProviderStat(BaseModel):
-    """按向量后端分组的统计；``stale`` 表示这一组已不是当前默认后端。"""
+class KnowledgeStatusStat(BaseModel):
+    """按向量化状态分组的统计。"""
 
-    provider: str
+    status: str
     docs: int
     chunks: int
-    stale: bool = False
 
 
 class KnowledgeStatsResponse(BaseModel):
@@ -485,6 +501,7 @@ class KnowledgeStatsResponse(BaseModel):
     docs: int
     chunks: int
     chars: int
+    # 当前配置的嵌入 provider（仅作展示：现在整个库只对应这一个模型）
     default_provider: str
     embedding_model: str = ""
     # "pgvector" = 距离在库里算、有 HNSW 索引；"json" = SQLite 回退方案
@@ -492,10 +509,14 @@ class KnowledgeStatsResponse(BaseModel):
     vector_dim: int = 0
     # 分片存在但没有可用向量（迁移时维度不符等），重建索引前检索不到
     vectorless_chunks: int = 0
-    stale_docs: int = 0
+    # 四态计数：待重建 / 处理中 / 已学习 / 重建失败
+    pending_docs: int = 0
+    processing_docs: int = 0
+    indexed_docs: int = 0
+    failed_docs: int = 0
     missing_content_docs: int = 0
     latest_updated_at: float | None = None
-    by_provider: list[KnowledgeProviderStat] = []
+    by_status: list[KnowledgeStatusStat] = []
 
 
 class KnowledgeSearchRequest(BaseModel):

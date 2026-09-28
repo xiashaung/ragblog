@@ -11,9 +11,11 @@ SQLite 上同一列退化成 JSON、打分回到 Python 算，测试与轻量开
 检索则是：向量召回（Postgres 上可叠 pg_trgm 词法召回 → RRF 融合）
 →（可选）精排 → 拼上下文交给对话模型。
 
-embedding 可用任意已配置的 provider（见 ``llm.get_llm``）；文档行会记下录入时用的
-provider 名，检索时可据此限定「只用某个 provider 录入的文档」。不同 provider 的向量
-不可比，所以换模型必须重建索引（:func:`reindex_knowledge`）。
+embedding 用「系统配置」里选定的嵌入模型（见 ``llm.get_llm``）。文档不再记录录入时的
+provider，改用一个 ``status`` 状态机描述它相对当前模型的向量化情况：只有
+``indexed``（已学习）的文档会被检索；换嵌入模型（:func:`mark_docs_for_full_rebuild` +
+:func:`reindex_all_docs`）会把全库置 ``pending`` 再逐个重建，不同模型的向量不可比、
+也不会共存（:func:`reindex_knowledge` 是单文档重建）。
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from ..models import KnowledgeChunk, KnowledgeDoc
 from ..schemas.ai import (
     ChatMessage,
     Citation,
+    DocStatus,
     EmbeddingRequest,
     KnowledgeAnswerRequest,
     KnowledgeAnswerResponse,
@@ -305,7 +308,6 @@ def _doc_format(meta: dict) -> str:
 
 def _doc_item(doc: KnowledgeDoc, chunks: int, chars: int, first_text: str = "") -> dict:
     """管理列表用的文档形状（不带分片正文，避免列表接口拽出全文）。"""
-    default = _default_provider()
     content = doc.content or ""
     meta = doc.meta or {}
     # 早期行没有 ``content`` 列（后来才补），回退到首个分片，列表至少有东西可预览。
@@ -313,7 +315,8 @@ def _doc_item(doc: KnowledgeDoc, chunks: int, chars: int, first_text: str = "") 
     return {
         "knowledge_id": doc.id,
         "title": doc.title,
-        "provider": doc.provider,
+        "status": doc.status or DocStatus.PENDING.value,
+        "reindex_error": meta.get("reindex_error"),
         "chunks": chunks,
         "chars": len(content) or chars,
         "preview": _preview_text(meta, source),
@@ -325,7 +328,6 @@ def _doc_item(doc: KnowledgeDoc, chunks: int, chars: int, first_text: str = "") 
         "metadata": doc.meta,
         "ingested_at": doc.ingested_at,
         "updated_at": doc.updated_at or doc.ingested_at,
-        "stale": doc.provider != default,
     }
 
 
@@ -371,8 +373,9 @@ async def replace_vectors(
 ) -> int:
     """删掉文档现有分片并重建（含重新算向量），返新分片数。
 
-    重建索引也走这里：不同 provider/模型的 embedding 不可比，换了嵌入模型
-    就只能重写向量，没有「兼容共存」这条路。返值即分片数，给录入接口回体用。
+    录入 / 改正文 / 重建索引都走这里：向量属于哪个嵌入模型不再逐文档记录，
+    建成后统一置 ``indexed``（已学习，可检索）；换嵌入模型时由全库重建把旧的
+    ``indexed`` 文档拉回 ``pending`` 再逐篇重建。返值即分片数，给录入接口回体用。
     """
     meta = doc.meta or {}
     chunk_size = _chunk_size_of(None, meta)
@@ -404,7 +407,12 @@ async def replace_vectors(
                 vector=item.embedding,
             )
         )
-    doc.provider = backend.provider.value
+    doc.status = DocStatus.INDEXED.value
+    # 重建成功即抹掉上次的失败原因（若有），避免 failed 残影混在已学习文档上。
+    if doc.meta and doc.meta.get("reindex_error"):
+        meta = dict(doc.meta)
+        meta.pop("reindex_error", None)
+        doc.meta = meta or None
     doc.updated_at = time.time()
     await session.flush()
     return len(chunks)
@@ -454,7 +462,7 @@ async def upsert_document(
     doc = KnowledgeDoc(
         id=doc_id,
         title=title,
-        provider=backend.provider.value,
+        status=DocStatus.PENDING.value,
         content=body,
         meta=meta or None,
     )
@@ -464,7 +472,7 @@ async def upsert_document(
     chunks = await replace_vectors(session, doc, body, backend=backend)
     return KnowledgeIngestResponse(
         knowledge_id=doc.id,
-        provider=backend.provider,
+        status=DocStatus(doc.status),
         chunks=chunks,
         chars=len(body),
     )
@@ -556,8 +564,7 @@ async def list_knowledge(
     session: AsyncSession,
     *,
     keyword: str | None = None,
-    provider: str | None = None,
-    only_stale: bool = False,
+    status: str | None = None,
     offset: int = 0,
     limit: int = 20,
 ) -> dict:
@@ -569,10 +576,8 @@ async def list_knowledge(
         stmt = stmt.where(
             or_(KnowledgeDoc.title.ilike(like), KnowledgeDoc.content.ilike(like))
         )
-    if provider:
-        stmt = stmt.where(KnowledgeDoc.provider == provider)
-    if only_stale:
-        stmt = stmt.where(KnowledgeDoc.provider != default)
+    if status:
+        stmt = stmt.where(KnowledgeDoc.status == status)
 
     total = (
         await session.execute(
@@ -695,26 +700,95 @@ async def update_knowledge(
 
 
 async def reindex_knowledge(session: AsyncSession, knowledge_id: str) -> dict | None:
-    """用当前配的 provider 重建一份文档的向量。
+    """用当前配的嵌入模型重建一份文档的向量。
 
-    在「系统配置」改了 embedding_provider 之后需要它：已存的向量属于旧
-    provider，不重建的话检索永远碰不到它们（列表页靠 ``stale`` 提醒）。
-    没存原文的老文档无法重建，直报 ``ValueError``（转 400）请用户重新上传。
+    单文档手动重建入口（列表页的「重建」按钮）：置 ``processing`` 后调
+    :func:`replace_vectors`，成功自然变 ``indexed``。没存原文的老文档无法重建，
+    直报 ``ValueError``（转 400）请用户重新上传。重建报错（如维度不符）向外
+    抛，由队列 worker 捕获后置 ``failed``。
     """
     doc = await session.get(KnowledgeDoc, knowledge_id)
     if doc is None:
         return None
     if not doc.content:
         raise ValueError("该文档没有保存原文，无法重建索引，请重新上传文件")
-    previous = doc.provider
+    doc.status = DocStatus.PROCESSING.value
     backend = llm.get_llm(feature="embedding")
     chunks = await replace_vectors(session, doc, doc.content, backend=backend)
     return {
         "knowledge_id": doc.id,
-        "provider": doc.provider,
-        "previous_provider": previous,
+        "status": doc.status,
         "chunks": chunks,
         "chars": len(doc.content),
+    }
+
+
+async def mark_docs_for_full_rebuild(session: AsyncSession) -> int:
+    """切换嵌入模型时把全库标记为待重建（供配置钩子与 reindex-all 入口调用）。
+
+    有原文的置 ``pending``（等 worker 重建）；没存原文的无法重建，直接置
+    ``failed`` 并写明原因，免得一置卡在「待重建」里永远轮不到。返回圈定文档数。
+    """
+    now = time.time()
+    docs = (await session.scalars(select(KnowledgeDoc))).all()
+    count = 0
+    for doc in docs:
+        count += 1
+        if doc.content:
+            doc.status = DocStatus.PENDING.value
+        else:
+            doc.status = DocStatus.FAILED.value
+            meta = dict(doc.meta or {})
+            meta["reindex_error"] = "无原文，无法重建，请重新上传文件"
+            doc.meta = meta
+        doc.updated_at = now
+    await session.flush()
+    return count
+
+
+async def reindex_all_docs(session: AsyncSession) -> dict:
+    """逐文档重建待重建/失败的文档（REINDEX_ALL worker 用）。
+
+    每篇先置 ``processing`` 并提交，让列表页轮询能看到实时推进；重建成功由
+    :func:`replace_vectors` 置 ``indexed``，失败则置 ``failed`` + 写 ``reindex_error``
+    并继续下一篇（不因一篇报错中断全库）。没存原文的跳过（已置 failed）。返回各终态计数。
+    """
+    targets = (
+        await session.scalars(
+            select(KnowledgeDoc).where(
+                KnowledgeDoc.status.in_(
+                    [DocStatus.PENDING.value, DocStatus.FAILED.value]
+                )
+            )
+        )
+    ).all()
+    backend = llm.get_llm(feature="embedding")
+    indexed, failed, skipped = 0, 0, 0
+    for doc in targets:
+        if not doc.content:
+            skipped += 1
+            continue
+        doc.status = DocStatus.PROCESSING.value
+        await session.commit()
+        try:
+            await replace_vectors(session, doc, doc.content, backend=backend)
+            await session.commit()
+            indexed += 1
+        except Exception as exc:  # noqa: BLE001 - 单篇失败不中断全库
+            await session.rollback()
+            doc.status = DocStatus.FAILED.value
+            meta = dict(doc.meta or {})
+            meta["reindex_error"] = f"{type(exc).__name__}: {exc}"
+            doc.meta = meta
+            doc.updated_at = time.time()
+            await session.commit()
+            failed += 1
+            logger.warning("全库重建：%s 失败：%s", doc.id, exc)
+    return {
+        "enqueued": len(targets),
+        "indexed": indexed,
+        "failed": failed,
+        "skipped": skipped,
     }
 
 
@@ -763,7 +837,7 @@ async def _vectorless_chunks(session: AsyncSession) -> int:
 
 
 async def knowledge_stats(session: AsyncSession) -> dict:
-    """管理页页头的总量统计 + 按 provider 的分布。
+    """管理页页头的总量统计 + 按向量化状态的分布。
 
     刻意把全表捞到内存里累加：文档量级在百级，而多表聚合在 SQLite
     上反而写不出一句兼容两边的 SQL。量大了再改成单条 GROUP BY。
@@ -773,22 +847,23 @@ async def knowledge_stats(session: AsyncSession) -> dict:
     docs = (await session.scalars(select(KnowledgeDoc))).all()
     stats = await _chunk_stats(session, [d.id for d in docs])
 
-    by_provider: dict[str, tuple[int, int]] = {}
+    by_status: dict[str, tuple[int, int]] = {}
     total_chunks = 0
     total_chars = 0
-    stale = 0
     missing_content = 0
     latest = 0.0
+    counts = {s.value: 0 for s in DocStatus}
     for d in docs:
         chunks, size = stats.get(d.id, (0, 0))
         chars = len(d.content) if d.content else size
         total_chunks += chunks
         total_chars += chars
-        stale += d.provider != default
         missing_content += not d.content
         latest = max(latest, d.updated_at or d.ingested_at or 0.0)
-        count, size_old = by_provider.get(d.provider, (0, 0))
-        by_provider[d.provider] = (count + 1, size_old + chunks)
+        status = d.status or DocStatus.PENDING.value
+        counts[status] = counts.get(status, 0) + 1
+        count, size_old = by_status.get(status, (0, 0))
+        by_status[status] = (count + 1, size_old + chunks)
 
     return {
         "docs": len(docs),
@@ -801,18 +876,16 @@ async def knowledge_stats(session: AsyncSession) -> dict:
         "vector_backend": "pgvector" if _uses_pgvector(session) else "json",
         "vector_dim": settings.rag_vector_dim,
         "vectorless_chunks": await _vectorless_chunks(session),
-        "stale_docs": stale,
+        "pending_docs": counts.get(DocStatus.PENDING.value, 0),
+        "processing_docs": counts.get(DocStatus.PROCESSING.value, 0),
+        "indexed_docs": counts.get(DocStatus.INDEXED.value, 0),
+        "failed_docs": counts.get(DocStatus.FAILED.value, 0),
         "missing_content_docs": missing_content,
         "latest_updated_at": latest or None,
-        "by_provider": [
-            {
-                "provider": name,
-                "docs": docs_n,
-                "chunks": chunks_n,
-                "stale": name != default,
-            }
+        "by_status": [
+            {"status": name, "docs": docs_n, "chunks": chunks_n}
             for name, (docs_n, chunks_n) in sorted(
-                by_provider.items(), key=lambda kv: (-kv[1][0], kv[0])
+                by_status.items(), key=lambda kv: (-kv[1][0], kv[0])
             )
         ],
     }
@@ -1016,8 +1089,9 @@ async def search(
         await backend.embeddings(EmbeddingRequest(provider=provider, input=[payload.query]))
     ).items[0].embedding
 
-    # 只检同一个 provider 录入的文档：跨 provider/模型的向量不可比（维度与词表都不同）。
-    doc_stmt = select(KnowledgeDoc.id).where(KnowledgeDoc.provider == provider.value)
+    # 只检「已学习」（indexed）的文档：它们才是用当前嵌入模型建好、可比的向量；
+    # pending/processing/failed 的向量属于旧模型或尚未建好，搜了也没意义。
+    doc_stmt = select(KnowledgeDoc.id).where(KnowledgeDoc.status == DocStatus.INDEXED.value)
     if restrict_doc_ids is not None:
         doc_stmt = doc_stmt.where(KnowledgeDoc.id.in_(list(restrict_doc_ids)))
     doc_ids = (await session.scalars(doc_stmt)).all()

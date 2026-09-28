@@ -9,7 +9,9 @@
 重置 ``llm`` 的后端注册表），否则运行中的调用仍拿着旧的端点与模型名。
 """
 
+import os
 import re
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -22,7 +24,7 @@ from ..db import get_db
 from ..models import ProviderConfigRow
 from ..rbac import Permission
 from ..schemas.admin import ConfigItem, ConfigListResponse, ConfigUpdateRequest
-from ..services import provider_store, system_config
+from ..services import provider_store, rag, rag_queue, system_config
 from ..services.rbac_service import Principal
 
 
@@ -255,7 +257,12 @@ async def update_config_by_key(
             "向量嵌入使用的 embedding provider（用于知识库向量化）"
         ),
     }
-    
+
+    # 换嵌入模型前先读旧值：只有真的改了才触发全库重建（同值重复保存不应惊动整库）。
+    old_value = await system_config.SystemConfig.get(
+        session, key, default=get_settings().llm_default_provider
+    )
+
     row = await system_config.SystemConfig.set(
         session,
         key,
@@ -263,6 +270,27 @@ async def update_config_by_key(
         description=descriptions.get(key),
     )
     audit.event(audit.Actor.from_principal(principal), "config.update", row.key, value=req.value)
+
+    # 嵌入模型变更：旧向量与新模型不再匹配，整库置待重建并强制重建。
+    # 先提交 status 变更，worker 的独立会话才读得到；无原文的老文档直接标失败。
+    if (
+        key == system_config.SystemConfig.KEY_EMBEDDING_PROVIDER
+        and row.value != old_value
+    ):
+        await rag.mark_docs_for_full_rebuild(session)
+        await session.commit()
+        if os.environ.get("APP_TEST_MODE", "false").lower() == "true":
+            # 测试同步执行：直接跑完全库重建，结果确定（不依赖后台 worker）
+            await rag.reindex_all_docs(session)
+        else:
+            await rag_queue.get_queue().enqueue(
+                session,
+                rag_queue.RAGTask(
+                    task_type=rag_queue.TaskType.REINDEX_ALL,
+                    payload={},
+                    created_at=time.time(),
+                ),
+            )
     return row.value
 
 

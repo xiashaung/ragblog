@@ -207,7 +207,7 @@ async def test_rag_ingest_and_answer(client, admin_headers):
     )
     assert resp.status_code == 200
     body = _ok(resp)
-    assert body["provider"] == "mock"
+    assert body["status"] == "indexed"
     kb_id = body["knowledge_id"]
 
     resp = await client.post(
@@ -235,57 +235,46 @@ async def test_rag_ingest_and_answer(client, admin_headers):
     assert resp.status_code == 200
 
 
-async def test_rag_provider_scopes_search(client, admin_headers):
-    # Ingest the same content under two different provider slots.
+async def test_rag_status_scopes_search(client, admin_headers):
+    """检索只命中 ``status == indexed`` 的文档：非已学习状态一律排除。"""
     resp = await client.post(
         "/api/v1/ai/knowledge/ingest",
-        json={
-            "provider": "mock",
-            "title": "A-mock",
-            "content": "Paris is the capital of France. " * 3,
-        },
+        json={"title": "A", "content": "Paris is the capital of France. " * 5},
         headers=admin_headers,
     )
     assert resp.status_code == 200
-    kb_mock = _ok(resp)["knowledge_id"]
-    assert _ok(resp)["provider"] == "mock"
+    body = _ok(resp)
+    kb = body["knowledge_id"]
+    assert body["status"] == "indexed"
 
-    resp = await client.post(
-        "/api/v1/ai/knowledge/ingest",
-        json={
-            "provider": "deepseek",
-            "title": "B-deepseek",
-            "content": "Tokyo is the capital of Japan. " * 3,
-        },
-        headers=admin_headers,
-    )
-    assert resp.status_code == 200
-    kb_ds = _ok(resp)["knowledge_id"]
-    assert _ok(resp)["provider"] == "deepseek"
+    async def hit_ids(query: str) -> set[str]:
+        resp = await client.post(
+            "/api/v1/ai/knowledge/search",
+            json={"query": query, "top_k": 5},
+            headers=admin_headers,
+        )
+        assert resp.status_code == 200
+        return {c["knowledge_id"] for c in _ok(resp)["items"]}
 
-    # Searching with provider=mock should only see the mock doc...
-    resp = await client.post(
-        "/api/v1/ai/knowledge/search",
-        json={"provider": "mock", "query": "Paris", "top_k": 5},
-        headers=admin_headers,
-    )
-    assert resp.status_code == 200
-    items = _ok(resp)["items"]
-    seen = {c["knowledge_id"] for c in items}
-    assert kb_mock in seen
-    assert kb_ds not in seen  # deepseek doc is out of scope for a mock search
+    # 已学习：可被检索
+    assert kb in await hit_ids("Paris")
 
-    # ...and with provider=deepseek only the deepseek doc.
-    resp = await client.post(
-        "/api/v1/ai/knowledge/search",
-        json={"provider": "deepseek", "query": "Paris", "top_k": 5},
-        headers=admin_headers,
-    )
-    assert resp.status_code == 200
-    items = _ok(resp)["items"]
-    seen = {c["knowledge_id"] for c in items}
-    assert kb_ds in seen
-    assert kb_mock not in seen
+    # 手动把文档打回 pending（模拟切换嵌入模型后待重建），检索应排除它
+    from sqlalchemy import update
+
+    from app.db import get_session_factory
+    from app.models import KnowledgeDoc
+
+    async with get_session_factory()() as s:
+        await s.execute(
+            update(KnowledgeDoc).where(KnowledgeDoc.id == kb).values(status="pending")
+        )
+        await s.commit()
+
+    assert kb not in await hit_ids("Paris")
+
+    # 清理：删掉测试文档
+    await client.delete(f"/api/v1/ai/knowledge/{kb}", headers=admin_headers)
 
 
 async def test_stats_reports_vector_setup(client, admin_headers):
@@ -444,7 +433,8 @@ async def test_knowledge_management(client, admin_headers):
     assert body["total"] >= 1 and len(body["items"]) <= 5
     row = next(i for i in body["items"] if i["knowledge_id"] == kb_id)
     assert row["has_content"] and row["chars"] > 0 and row["chunks"] > 1
-    assert row["stale"] is False and row["preview"]
+    # 录入后向量与当前模型一致，直接已学习
+    assert row["status"] == "indexed" and row["preview"]
     # 不传 format 的旧写法算纯文本
     assert row["format"] == "text"
 
@@ -488,14 +478,14 @@ async def test_knowledge_management(client, admin_headers):
     body = _ok(resp)
     assert body["docs"] >= 1 and body["chunks"] >= 1
     assert body["default_provider"] == "mock"
-    assert {p["provider"] for p in body["by_provider"]} >= {"mock"}
+    assert {p["status"] for p in body["by_status"]} >= {"indexed"}
 
     # --- reindex rebuilds vectors with the configured provider ---
     resp = await client.post(
         f"/api/v1/ai/knowledge/{kb_id}/reindex", headers=admin_headers
     )
     body = _ok(resp)
-    assert body["provider"] == "mock" and body["chunks"] == 1
+    assert body["status"] == "indexed" and body["chunks"] == 1
 
     # --- empty patch is rejected ---
     resp = await client.patch(
@@ -640,26 +630,105 @@ async def test_upload_image_returns_media_url_without_ingesting(client, admin_he
     assert "不支持的图片格式" in resp.json()["message"]
 
 
-async def test_knowledge_stale_flag_tracks_default(client, admin_headers):
-    """文档的 provider 与后端默认不一致时标记 stale，可只筛这部分。"""
-    resp = await client.post(
-        "/api/v1/ai/knowledge/ingest",
-        json={"provider": "deepseek", "title": "Other", "content": "Tokyo text. " * 5},
+async def test_knowledge_status_filter_and_full_rebuild(client, admin_headers):
+    """列表可按状态过滤；全库重建把文档拉回 indexed；换嵌入模型触发重建。"""
+    from sqlalchemy import update
+
+    from app.db import get_session_factory
+    from app.models import KnowledgeDoc
+
+    ids: list[str] = []
+    for title in ("DocX", "DocY"):
+        resp = await client.post(
+            "/api/v1/ai/knowledge/ingest",
+            json={"title": title, "content": f"{title} is a capital city. " * 5},
+            headers=admin_headers,
+        )
+        assert resp.status_code == 200
+        assert _ok(resp)["status"] == "indexed"
+        ids.append(_ok(resp)["knowledge_id"])
+
+    # 按 status=indexed 过滤：两篇都在
+    items = _ok(
+        await client.get(
+            "/api/v1/ai/knowledge", params={"status": "indexed"}, headers=admin_headers
+        )
+    )["items"]
+    assert set(ids) <= {i["knowledge_id"] for i in items}
+
+    # 手动把 DocX 打回 pending，可按 status=pending 只筛出它
+    async with get_session_factory()() as s:
+        await s.execute(
+            update(KnowledgeDoc)
+            .where(KnowledgeDoc.id == ids[0])
+            .values(status="pending")
+        )
+        await s.commit()
+    items = _ok(
+        await client.get(
+            "/api/v1/ai/knowledge", params={"status": "pending"}, headers=admin_headers
+        )
+    )["items"]
+    assert {i["knowledge_id"] for i in items} == {ids[0]}
+
+    # 全库重建（同步模式直接跑完）：pending → indexed
+    resp = await client.post("/api/v1/ai/knowledge/reindex-all", headers=admin_headers)
+    assert resp.status_code == 200
+    assert _ok(resp)["enqueued"] >= 1
+    items = _ok(
+        await client.get(
+            "/api/v1/ai/knowledge", params={"status": "indexed"}, headers=admin_headers
+        )
+    )["items"]
+    assert ids[0] in {i["knowledge_id"] for i in items}
+
+    # 切换嵌入模型：钩子自动触发全库重建，重建后文档仍已学习且可检索
+    resp = await client.patch(
+        "/api/v1/system/config/embedding_provider",
+        json={"value": "deepseek"},
         headers=admin_headers,
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
+    hits = _ok(
+        await client.post(
+            "/api/v1/ai/knowledge/search",
+            json={"query": "capital", "top_k": 10},
+            headers=admin_headers,
+        )
+    )["items"]
+    assert ids[0] in {h["knowledge_id"] for h in hits}
 
-    resp = await client.get(
-        "/api/v1/ai/knowledge", params={"only_stale": True}, headers=admin_headers
-    )
-    items = _ok(resp)["items"]
-    assert [i["title"] for i in items] == ["Other"]
-    assert items[0]["stale"] is True
+    for kid in ids:
+        await client.delete(f"/api/v1/ai/knowledge/{kid}", headers=admin_headers)
 
-    resp = await client.get(
-        "/api/v1/ai/knowledge", params={"provider": "mock"}, headers=admin_headers
-    )
-    assert _ok(resp)["items"] == []
+
+async def test_mark_docs_for_full_rebuild_sets_failed_without_content(
+    client, admin_headers
+):
+    """无原文的老文档无法重建：全库标记时直接置 failed 并写原因。"""
+    from app.db import get_session_factory
+    from app.models import KnowledgeDoc
+    from app.services import rag
+
+    # 造一篇无原文的文档（content=None）
+    async with get_session_factory()() as s:
+        doc = KnowledgeDoc(title="无原文老档", content=None, status="indexed")
+        s.add(doc)
+        await s.commit()
+        doc_id = doc.id
+
+    async with get_session_factory()() as s:
+        affected = await rag.mark_docs_for_full_rebuild(s)
+        await s.commit()
+    assert affected >= 1
+
+    row = _ok(
+        await client.get(f"/api/v1/ai/knowledge/{doc_id}", headers=admin_headers)
+    )["doc"]
+    assert row["status"] == "failed"
+    assert "无原文" in (row["reindex_error"] or "")
+
+    await client.delete(f"/api/v1/ai/knowledge/{doc_id}", headers=admin_headers)
 
 
 def test_html_to_text_keeps_article_and_drops_chrome():

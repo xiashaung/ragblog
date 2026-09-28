@@ -169,8 +169,7 @@ const LLM_TIMEOUT = 5 * 60 * 1000;
 export const ragApi = {
     list: (params?: {
         keyword?: string;
-        provider?: string;
-        only_stale?: boolean;
+        status?: string;
         offset?: number;
         limit?: number;
     }) => request<KnowledgeListResult>({url: '/ai/knowledge', method: 'get', params}),
@@ -238,12 +237,11 @@ export const ragApi = {
             method: 'post',
             timeout: LLM_TIMEOUT,
         }),
-    // 更换向量模型后重建索引
-    replaceVectors: (id: string, provider: string) =>
-        request<KnowledgeReindexResult>({
-            url: `/ai/knowledge/${id}/replace-vectors`,
+    // 全库强制重建：切换嵌入模型后把所有文档重新向量化（异步入队）
+    reindexAll: () =>
+        request<{ enqueued: number; task_id: string | null }>({
+            url: '/ai/knowledge/reindex-all',
             method: 'post',
-            data: {provider},
             timeout: LLM_TIMEOUT,
         }),
     search: (data: { query: string; top_k: number }) =>

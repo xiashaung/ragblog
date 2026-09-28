@@ -58,7 +58,7 @@ function can(code: string | string[]): boolean {
  * 无权时卡片还在（数据是「—」），但点了不该落到 /403：看不进去就不给进。
  */
 const metricCards = computed(() => [
-  { key: 'docs', title: '知识文档', value: dash(stats.value?.docs), perm: 'knowledge:read', foot: can('knowledge:read') ? `分布在 ${stats.value?.by_provider?.length ?? 0} 个 provider` : '需 knowledge:read', to: '/knowledge' },
+  { key: 'docs', title: '知识文档', value: dash(stats.value?.docs), perm: 'knowledge:read', foot: can('knowledge:read') ? `已学习 ${stats.value?.indexed_docs ?? 0} · 待重建 ${stats.value?.pending_docs ?? 0}` : '需 knowledge:read', to: '/knowledge' },
   { key: 'chunks', title: '向量分片', value: dash(stats.value?.chunks), perm: 'knowledge:read', foot: `维度 ${stats.value?.vector_dim ?? '—'}`, to: '/knowledge' },
   { key: 'chars', title: '正文字符', value: dash(stats.value?.chars), perm: 'knowledge:read', foot: `最近更新 ${formatDate(stats.value?.latest_updated_at)}`, to: '/knowledge' },
   { key: 'chats', title: '我的对话', value: dash(chatCount.value), perm: '', foot: '仅本人可见（上限 200）', to: '/chat' },
@@ -115,12 +115,21 @@ const issues = computed(() => {
       need: 'knowledge:manage',
     });
   }
-  if (s?.stale_docs) {
+  if (s?.pending_docs) {
     list.push({
       level: 'warning',
-      text: `${s.stale_docs} 篇文档的入库 provider 与当前配置的 ${s.default_provider || '—'} 不一致`,
+      text: `${s.pending_docs} 篇文档待重建（尚未学习或刚切换嵌入模型），检索不会命中`,
       to: '/knowledge',
       action: '去重建',
+      need: 'knowledge:manage',
+    });
+  }
+  if (s?.failed_docs) {
+    list.push({
+      level: 'error',
+      text: `${s.failed_docs} 篇文档重建失败，需重试或重新上传原文`,
+      to: '/knowledge',
+      action: '去处理',
       need: 'knowledge:manage',
     });
   }
@@ -162,6 +171,20 @@ const issues = computed(() => {
 function formatDate(ts?: number | null): string {
   if (!ts) return '—';
   return new Date(ts * 1000).toLocaleString();
+}
+
+// 文档向量化状态的中文标签与颜色（与 KnowledgeDocsPage 口径一致）
+const statusMeta: Record<string, { label: string; color: string }> = {
+  indexed: { label: '已学习', color: 'green' },
+  pending: { label: '待重建', color: 'default' },
+  processing: { label: '处理中', color: 'blue' },
+  failed: { label: '重建失败', color: 'red' },
+};
+function statusLabel(s?: string): string {
+  return statusMeta[s || '']?.label ?? s ?? '—';
+}
+function statusColor(s?: string): string {
+  return statusMeta[s || '']?.color ?? 'default';
 }
 
 // a-badge 的 status 只认 success/processing/default/error/warning，
@@ -332,24 +355,21 @@ onMounted(refresh);
       <!-- provider 分布 + 向量存储 / 快捷入口 -->
       <a-row :gutter="[16, 16]" style="margin-top: 16px">
         <a-col :xs="24" :md="14">
-          <a-card :bordered="false" title="知识库 · 按 provider 分布" size="small">
+          <a-card :bordered="false" title="知识库 · 按状态分布" size="small">
             <a-table
-              :data-source="stats?.by_provider || []"
+              :data-source="stats?.by_status || []"
               :columns="[
-                { title: 'Provider', dataIndex: 'provider', key: 'provider' },
+                { title: '状态', dataIndex: 'status', key: 'status' },
                 { title: '文档', dataIndex: 'docs', key: 'docs', width: 80 },
                 { title: '分片', dataIndex: 'chunks', key: 'chunks', width: 80 },
-                { title: '索引状态', key: 'stale', width: 100 },
               ]"
               :pagination="false"
-              :row-key="(r: any) => r.provider"
+              :row-key="(r: any) => r.status"
               size="small"
             >
               <template #bodyCell="{ column, record }">
-                <template v-if="column.key === 'stale'">
-                  <a-tag :color="record.stale ? 'orange' : 'green'">
-                    {{ record.stale ? '有需重建' : '最新' }}
-                  </a-tag>
+                <template v-if="column.key === 'status'">
+                  <a-tag :color="statusColor(record.status)">{{ statusLabel(record.status) }}</a-tag>
                 </template>
               </template>
             </a-table>

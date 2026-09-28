@@ -82,10 +82,12 @@ class KnowledgeDoc(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: _uid("kb"))
     title: Mapped[str] = mapped_column(String(200), nullable=False)
-    # 录入时实际用的 embedding provider（重建索引时会改）
-    provider: Mapped[str] = mapped_column(String(20), default="mock")
+    # 文档向量化状态机（取值见 ``app.services.rag`` 的 DocStatus）：
+    # indexed=已学习（向量与当前嵌入模型一致，可检索）；pending=待重建；
+    # processing=处理中；failed=上次重建报错。换嵌入模型时全库置 pending 再逐个重建。
+    status: Mapped[str] = mapped_column(String(12), default="pending", index=True)
     # 原文全文。分片之间重叠，拼不回源文本；留着原文才能做预览/编辑/
-    # 换 provider 重建索引，而且不会跟已入库的分片对不上。
+    # 换嵌入模型重建索引，而且不会跟已入库的分片对不上。
     content: Mapped[str | None] = mapped_column(Text, default=None)
     # 列名是 metadata（SQLAlchemy 保留名，故属性叫 meta）：来源、字符数、录入方式等
     meta: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSON, default=dict)

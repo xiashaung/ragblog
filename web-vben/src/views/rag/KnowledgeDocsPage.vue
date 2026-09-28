@@ -11,7 +11,7 @@
  * 正文默认是渲染态（Markdown 文档按语法渲染，纯文本按原样展示），
  * 点「编辑源码」才切进编辑器；保存时把当前格式一并送回后端（不传则沿用原格式）。
  */
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 // 模板里用的是 PascalCase <Card>，全局注册只提供 a-*，必须显式引入
 import { Card, message } from 'ant-design-vue';
@@ -20,7 +20,7 @@ import MarkdownEditor from '@/components/MarkdownEditor.vue';
 import RichText from '@/components/RichText.vue';
 import { usePerm } from '@/composables/usePerm';
 import { useBusinessStore } from '@/store/modules/business';
-import type { ContentFormat, KnowledgeDetail, KnowledgeDocItem, KnowledgeStats } from '@/typings';
+import type { ContentFormat, KnowledgeDetail, KnowledgeDocItem, KnowledgeDocStatus, KnowledgeStats } from '@/typings';
 
 const router = useRouter();
 const route = useRoute();
@@ -44,30 +44,36 @@ const total = ref(0);
 const page = reactive({ current: 1, pageSize: 10 });
 const filters = reactive({
   keyword: '',
-  provider: undefined as string | undefined,
-  onlyStale: false,
+  status: undefined as KnowledgeDocStatus | undefined,
 });
 const selectedKeys = ref<string[]>([]);
 const reindexing = ref('');
+const reindexingAll = ref(false);
+
+// 文档状态元信息：颜色 + 中文标签（indexed 绿 / pending 灰 / processing 蓝 / failed 红）
+const statusMeta: Record<KnowledgeDocStatus, { label: string; color: string }> = {
+  indexed: { label: '已学习', color: 'green' },
+  pending: { label: '待重建', color: 'default' },
+  processing: { label: '处理中', color: 'blue' },
+  failed: { label: '重建失败', color: 'red' },
+};
+const statusOptions = [
+  { label: '已学习', value: 'indexed' },
+  { label: '待重建', value: 'pending' },
+  { label: '处理中', value: 'processing' },
+  { label: '重建失败', value: 'failed' },
+];
 
 // 窄屏（笔记本）兜底：「标题」列里带标签与预览摘要，不给最小宽度会被挤成一堆折行，
 // 因此写明列宽 + scroll.x（横向滚动代替列内容变形），操作列钉右。
 const columns = [
   { title: '标题', dataIndex: 'title', key: 'title', width: 320 },
-  { title: 'Provider', dataIndex: 'provider', key: 'provider', width: 150 },
+  { title: '状态', dataIndex: 'status', key: 'status', width: 150 },
   { title: '分片', dataIndex: 'chunks', key: 'chunks', width: 70 },
   { title: '字符', dataIndex: 'chars', key: 'chars', width: 90 },
   { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 160, responsive: ['lg'] as const },
   { title: '操作', key: 'actions', width: 300, fixed: 'right' as const },
 ];
-
-// provider 过滤项来自后端实际入库情况，而非硬编码枚举
-const providerOptions = computed(() =>
-  (stats.value?.by_provider || []).map((p) => ({
-    label: `${p.provider}（${p.docs} 篇）`,
-    value: p.provider,
-  })),
-);
 
 const rowSelection = computed(() => ({
   selectedRowKeys: selectedKeys.value,
@@ -103,8 +109,7 @@ async function loadList() {
   try {
     const data = await ragApi.list({
       keyword: filters.keyword.trim() || undefined,
-      provider: filters.provider,
-      only_stale: filters.onlyStale || undefined,
+      status: filters.status,
       offset: (page.current - 1) * page.pageSize,
       limit: page.pageSize,
     });
@@ -122,6 +127,21 @@ async function loadList() {
 
 async function refresh() {
   await Promise.all([loadList(), loadStats()]);
+  syncPolling();
+}
+
+// 列表存在非终态文档（待重建 / 处理中）时定时刷新，让状态推进能自动看到
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+function hasTransient() {
+  return list.value.some((d) => d.status === 'pending' || d.status === 'processing');
+}
+function syncPolling() {
+  if (hasTransient()) {
+    if (!pollTimer) pollTimer = setInterval(() => loadList().then(syncPolling), 4000);
+  } else if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
 }
 
 function onSearch() {
@@ -238,16 +258,31 @@ async function onReindex(row: KnowledgeDocItem) {
   reindexing.value = row.knowledge_id;
   try {
     const res = await ragApi.reindex(row.knowledge_id);
+    const label = statusMeta[res.status]?.label ?? res.status;
+    // 异步模式只回占位（chunks=0）：真实结果靠轮询列表刷新
     message.success(
-      `${res.previous_provider && res.previous_provider !== res.provider
-        ? `已从 ${res.previous_provider} 切换到`
-        : '已用'} ${res.provider} 重建 ${res.chunks} 个分片`,
+      res.chunks > 0 ? `已重建：${label}，共 ${res.chunks} 个分片` : `已提交重建：当前${label}`,
     );
     await refresh();
   } catch (e: any) {
     message.error(e?.detail || e?.message || '重建索引失败');
   } finally {
     reindexing.value = '';
+  }
+}
+
+// 全库强制重建：把所有文档标为待重建并逐篇重新向量化（后台队列）
+async function onReindexAll() {
+  if (guardManage()) return;
+  reindexingAll.value = true;
+  try {
+    const res = await ragApi.reindexAll();
+    message.success(`已触发全库重建，本次圈定 ${res.enqueued} 篇文档`);
+    await refresh();
+  } catch (e: any) {
+    message.error(e?.detail || e?.message || '全库重建失败');
+  } finally {
+    reindexingAll.value = false;
   }
 }
 
@@ -287,6 +322,13 @@ onMounted(async () => {
     openDetail({ knowledge_id: docId } as KnowledgeDocItem);
   }
 });
+
+onBeforeUnmount(() => {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+});
 </script>
 
 <template>
@@ -311,21 +353,20 @@ onMounted(async () => {
           @change="(e: any) => { if (!e.target.value) onSearch(); }"
         />
         <a-select
-          v-model:value="filters.provider"
-          :options="providerOptions"
-          placeholder="按 provider 过滤"
-          style="width: 190px"
+          v-model:value="filters.status"
+          :options="statusOptions"
+          placeholder="按状态过滤"
+          style="width: 150px"
           allow-clear
           @change="onFilterChange"
         />
-        <a-tooltip title="只列出向量 provider 与当前默认配置不一致的文档（检索不到）">
+        <a-tooltip title="将整库文档重新按当前嵌入模型向量化（切换模型后使用）">
           <span>
-            <a-switch
-              :checked="filters.onlyStale"
-              checked-children="仅待重建"
-              un-children="全部"
-              @change="(v: boolean) => { filters.onlyStale = v; onFilterChange(); }"
-            />
+            <a-button
+              v-perm="'knowledge:manage'"
+              :loading="reindexingAll"
+              @click="onReindexAll"
+            >全库重建</a-button>
           </span>
         </a-tooltip>
         <a-button @click="refresh" :loading="loading">刷新</a-button>
@@ -379,8 +420,15 @@ onMounted(async () => {
               > · 原页</a>
             </div>
           </template>
-          <template v-else-if="column.key === 'provider'">
-            <a-tag :color="record.stale ? 'orange' : 'green'">{{ record.provider }}</a-tag>
+          <template v-else-if="column.key === 'status'">
+            <a-tooltip v-if="record.status === 'failed' && record.reindex_error" :title="record.reindex_error">
+              <a-tag :color="statusMeta[record.status as KnowledgeDocStatus]?.color">
+                {{ statusMeta[record.status as KnowledgeDocStatus]?.label ?? record.status }}
+              </a-tag>
+            </a-tooltip>
+            <a-tag v-else :color="statusMeta[record.status as KnowledgeDocStatus]?.color">
+              {{ statusMeta[record.status as KnowledgeDocStatus]?.label ?? record.status }}
+            </a-tag>
             <a-tooltip v-if="!record.has_content" title="入库时未保存原文，无法编辑 / 重建，建议重新上传">
               <a-tag>无原文</a-tag>
             </a-tooltip>
@@ -445,7 +493,11 @@ onMounted(async () => {
         <template v-if="detail">
           <a-descriptions :column="2" size="small" bordered>
             <a-descriptions-item label="ID" :span="2">{{ detail.doc.knowledge_id }}</a-descriptions-item>
-            <a-descriptions-item label="Provider">{{ detail.doc.provider }}</a-descriptions-item>
+            <a-descriptions-item label="状态">
+              <a-tag :color="statusMeta[detail.doc.status as KnowledgeDocStatus]?.color">
+                {{ statusMeta[detail.doc.status as KnowledgeDocStatus]?.label ?? detail.doc.status }}
+              </a-tag>
+            </a-descriptions-item>
             <a-descriptions-item label="录入方式">{{ kindLabels[detail.doc.kind] || detail.doc.kind }}</a-descriptions-item>
             <a-descriptions-item label="分片数">{{ detail.chunk_total }}</a-descriptions-item>
             <a-descriptions-item label="字符数">{{ fmtChars(detail.doc.chars) }}</a-descriptions-item>
@@ -464,11 +516,25 @@ onMounted(async () => {
           </a-descriptions>
 
           <a-alert
-            v-if="detail.doc.stale"
+            v-if="detail.doc.status === 'failed'"
+            type="error"
+            show-icon
+            style="margin-top: 12px"
+            :message="`上次重建失败：${detail.doc.reindex_error || '原因未知'}${canManage ? '，可点「仅重建索引」重试' : '，需要重建请联系管理员'}`"
+          />
+          <a-alert
+            v-else-if="detail.doc.status === 'pending'"
             type="warning"
             show-icon
             style="margin-top: 12px"
-            :message="`该文档向量属于 ${detail.doc.provider}，当前默认是 ${stats?.default_provider}，检索不会命中${canManage ? '，请点「重建」重建索引' : '，需要重建请联系管理员'}`"
+            :message="`该文档待重建（尚未学习或刚切换嵌入模型），检索不会命中${canManage ? '，可点「仅重建索引」立即重建' : '，需要重建请联系管理员'}`"
+          />
+          <a-alert
+            v-else-if="detail.doc.status === 'processing'"
+            type="info"
+            show-icon
+            style="margin-top: 12px"
+            message="该文档正在后台重新向量化，完成后会自动变为「已学习」并可被检索"
           />
 
           <div class="section-title" style="margin-top: 16px">

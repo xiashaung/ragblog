@@ -93,7 +93,12 @@ async function updateConfig(key: string, value: string) {
     } else if (key === 'rerank_provider') {
       await http.patch('/system/config/rerank-provider', { value });
     }
-    message.success('配置已更新');
+    // 换嵌入模型会触发全库重建（后端钩子已自动入队），提示用户关注文档状态推进
+    if (key === 'embedding_provider') {
+      message.success('已触发全库重建，文档将陆续从「待重建」变为「已学习」');
+    } else {
+      message.success('配置已更新');
+    }
   } catch (e: any) {
     console.error('Update config error:', e);
     message.error(e?.detail || e?.message || `更新 ${key} 失败`);

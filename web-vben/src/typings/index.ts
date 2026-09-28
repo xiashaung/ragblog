@@ -59,10 +59,19 @@ export interface ChatMessage {
  */
 export type ContentFormat = 'text' | 'markdown' | 'html';
 
+/**
+ * 文档向量化状态机（与后端 ``schemas.ai.DocStatus`` 一致）。
+ * indexed 已学习可检索；pending 待重建；processing 处理中；failed 重建失败（可重试）。
+ */
+export type KnowledgeDocStatus = 'indexed' | 'pending' | 'processing' | 'failed';
+
 export interface KnowledgeDocItem {
   knowledge_id: string;
   title: string;
-  provider: string;
+  /** 向量化状态：决定是否可被检索与是否需重建 */
+  status: KnowledgeDocStatus;
+  /** 上次重建失败的原因（仅 status==='failed' 时有值），供 tooltip 展示 */
+  reindex_error?: string | null;
   chunks: number;
   chars: number;
   preview: string;
@@ -77,8 +86,6 @@ export interface KnowledgeDocItem {
   metadata?: Record<string, any> | null;
   ingested_at: number;
   updated_at: number;
-  /** 向量由非当前默认 provider 生成，检索不到，需重建 */
-  stale: boolean;
 }
 
 export interface KnowledgeListResult {
@@ -106,15 +113,14 @@ export interface KnowledgeDetail {
 
 export interface KnowledgeIngestResult {
   knowledge_id: string;
-  provider: string;
+  status: KnowledgeDocStatus;
   chunks: number;
   chars: number;
 }
 
 export interface KnowledgeReindexResult {
   knowledge_id: string;
-  provider: string;
-  previous_provider: string | null;
+  status: KnowledgeDocStatus;
   chunks: number;
   chars: number;
 }
@@ -145,10 +151,14 @@ export interface KnowledgeStats {
   vector_dim: number;
   /** 有分片但没有可用向量的行数（检索不到，需重建索引） */
   vectorless_chunks: number;
-  stale_docs: number;
+  /** 四态计数：待重建 / 处理中 / 已学习 / 重建失败 */
+  pending_docs: number;
+  processing_docs: number;
+  indexed_docs: number;
+  failed_docs: number;
   missing_content_docs: number;
   latest_updated_at: number | null;
-  by_provider: { provider: string; docs: number; chunks: number; stale: boolean }[];
+  by_status: { status: string; docs: number; chunks: number }[];
 }
 
 export interface UploadResult {

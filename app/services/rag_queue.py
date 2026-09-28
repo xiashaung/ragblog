@@ -31,6 +31,7 @@ from ..config import get_settings
 from ..metrics import rag_tasks_finished_total
 from ..models import KnowledgeDoc, RagTaskRow
 from ..schemas.ai import (
+    DocStatus,
     KnowledgeDocUpdateRequest,
     KnowledgeFetchRequest,
     KnowledgeIngestRequest,
@@ -54,8 +55,8 @@ class TaskType(str, Enum):
     INGEST_PAIRS = "ingest_pairs"  # 问答对入库
     INGEST_URL = "ingest_url"  # URL 抓取入库
     UPDATE = "update"  # 更新文档（含重建）
-    REINDEX = "reindex"  # 重建索引
-    REPLACE_VECTORS = "replace_vectors"  # 更换向量模型后重建
+    REINDEX = "reindex"  # 单文档重建索引
+    REINDEX_ALL = "reindex_all"  # 换嵌入模型后全库强制重建
 
 
 @dataclass
@@ -216,7 +217,7 @@ class RAGQueue:
             TaskType.INGEST_URL.value: self._do_ingest_url,
             TaskType.UPDATE.value: self._do_update,
             TaskType.REINDEX.value: self._do_reindex,
-            TaskType.REPLACE_VECTORS.value: self._do_replace_vectors,
+            TaskType.REINDEX_ALL.value: self._do_reindex_all,
         }
         handler = handlers.get(task_type)
         if handler is None:
@@ -229,7 +230,7 @@ class RAGQueue:
         result = await rag.ingest(session, req)
         return {
             "knowledge_id": result.knowledge_id,
-            "provider": result.provider,
+            "status": result.status,
             "chunks": result.chunks,
             "chars": result.chars,
         }
@@ -240,7 +241,7 @@ class RAGQueue:
         result = await rag.ingest_pairs(session, req)
         return {
             "knowledge_id": result.knowledge_id,
-            "provider": result.provider,
+            "status": result.status,
             "chunks": result.chunks,
             "chars": result.chars,
         }
@@ -251,7 +252,7 @@ class RAGQueue:
         result = await rag.ingest_from_url(session, req)
         return {
             "knowledge_id": result.knowledge_id,
-            "provider": result.provider,
+            "status": result.status,
             "chunks": result.chunks,
             "chars": result.page_chars,
             "title": result.title,
@@ -265,36 +266,27 @@ class RAGQueue:
         return {"updated": result is not None, "result": result}
 
     async def _do_reindex(self, session: AsyncSession, payload: dict) -> dict:
-        """执行重建索引。"""
-        result = await rag.reindex_knowledge(session, payload["knowledge_id"])
+        """执行单文档重建：失败时把文档置 ``failed`` 并写原因，再向上抛供任务登记。"""
+        doc_id = payload["knowledge_id"]
+        try:
+            result = await rag.reindex_knowledge(session, doc_id)
+        except Exception as exc:  # noqa: BLE001 - 失败要反映到文档状态上
+            doc = await session.get(KnowledgeDoc, doc_id)
+            if doc is not None:
+                await session.rollback()
+                doc.status = DocStatus.FAILED.value
+                meta = dict(doc.meta or {})
+                meta["reindex_error"] = f"{type(exc).__name__}: {exc}"
+                doc.meta = meta
+                await session.commit()
+            raise
         if result is None:
-            raise ValueError(f"文档不存在：{payload['knowledge_id']}")
+            raise ValueError(f"文档不存在：{doc_id}")
         return result
 
-    async def _do_replace_vectors(self, session: AsyncSession, payload: dict) -> dict:
-        """执行更换向量模型后的重建。"""
-        from ..services import llm
-
-        doc_id = payload["knowledge_id"]
-        new_provider = payload.get("new_provider")
-        doc = await session.get(KnowledgeDoc, doc_id)
-        if doc is None:
-            raise ValueError(f"文档不存在：{doc_id}")
-        if not doc.content:
-            raise ValueError("该文档没有保存原文，无法重建索引，请重新上传文件")
-
-        # 没指定则以系统配置里的 embedding_provider 为准（而不是 .env 全局默认）
-        backend = llm.get_llm(new_provider, feature="embedding")
-        chunks = await rag.replace_vectors(
-            session, doc, doc.content, backend=backend
-        )
-        return {
-            "knowledge_id": doc.id,
-            "provider": doc.provider,
-            "previous_provider": doc.provider,
-            "chunks": chunks,
-            "chars": len(doc.content),
-        }
+    async def _do_reindex_all(self, session: AsyncSession, payload: dict) -> dict:
+        """执行换嵌入模型后的全库强制重建（逐文档推进状态）。"""
+        return await rag.reindex_all_docs(session)
 
     async def enqueue(
         self,
