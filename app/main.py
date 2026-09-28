@@ -54,6 +54,7 @@ from .routers import (
     metrics as metrics_router,
 )
 from .schemas.envelope import ApiResponse
+from .security_headers import SecurityHeadersMiddleware
 from .services import rag_queue
 
 logger = logging.getLogger(__name__)
@@ -222,6 +223,9 @@ def create_app() -> FastAPI:
     # 指标中间件再套一层（最外层）：耗时与状态码统计覆盖包括信封、
     # CORS 预检在内的完整 ASGI 路径。
     application.add_middleware(MetricsMiddleware)
+    # 安全响应头最后注册 = 真正最外层：错误体、/metrics、SPA 兜底页
+    # 也能带上 nosniff / X-Frame-Options 这些基础防线。
+    application.add_middleware(SecurityHeadersMiddleware)
 
     application.include_router(health.router, prefix="/api/v1", tags=["health"])
     # /metrics 挂根路径（不在 /api/v1 下）：Prometheus 抓取配置惯例路径，
