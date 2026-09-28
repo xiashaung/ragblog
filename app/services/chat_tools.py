@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import logging
 import re
@@ -40,7 +39,7 @@ from . import reasoning, web_page, web_search
 
 logger = logging.getLogger(__name__)
 
-# 主机名形式的内网标识（IP 字面量另走 ipaddress 判断）。
+# 主机名形式的内网标识（IP 字面量另走 web_page.ip_denied 判断）。
 _PRIVATE_HOST_SUFFIXES = (".local", ".internal", ".lan", ".cluster.local")
 _PRIVATE_HOSTS = {
     "localhost",
@@ -141,8 +140,9 @@ class ToolResult:
 def assert_public_url(url: str, *, allow_private: bool | None = None) -> str:
     """拒绝内网/回环地址，挡住被模型诱导的 SSRF。
 
-    已知边界：这里只判 IP 字面量与常见内网主机名，**不解析 DNS**，所以「公网域名解析到
-    10.x」这类绕法拦不住（要拦得自己解析后再连）。重定向落点由调用方复查。
+    这是工具层的**同步快速预判**（不解析 DNS，只为立刻给出 blocked 语义）；
+    真正的完整闸门在 :func:`app.services.web_page.fetch_page` 里——它解析 DNS、
+    并对每一跳重定向复检，知识库录入与工具调用共用那一道。
     """
     target = web_page.validate_url(url)  # scheme 白名单 + 域名非空
     allowed = get_settings().web_fetch_allow_private if allow_private is None else allow_private
@@ -151,16 +151,8 @@ def assert_public_url(url: str, *, allow_private: bool | None = None) -> str:
     host = (urlparse(target).hostname or "").lower().rstrip(".")
     if host in _PRIVATE_HOSTS or host.endswith(_PRIVATE_HOST_SUFFIXES):
         raise ValueError("禁止访问内网地址")
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return target  # 是域名：交给网络层，按上面的边界说明处理
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified:
+    if web_page.ip_denied(host):
         raise ValueError("禁止访问内网或保留地址")
-    if ip.version == 6 and ip.ipv4_mapped is not None:
-        mapped = ip.ipv4_mapped
-        if mapped.is_private or mapped.is_loopback or mapped.is_link_local:
-            raise ValueError("禁止访问内网地址（IPv4 映射）")
     return target
 
 
@@ -230,10 +222,11 @@ async def _run_search(query: str, count: object) -> ToolResult:
 
 
 async def _run_fetch(url: str) -> ToolResult:
-    """执行 fetch_page：先挡内网，再抓页，把正文当工具结果回喂。
+    """执行 fetch_page：先快速挡内网，再抓页，把正文当工具结果回喂。
 
-    两道 SSRF 防线：入口过 :func:`assert_public_url`，重定向落点再查一次（httpx
-    已在内部跟随，不复查就可能被拐到内网）。拦下时给出中文原因，模型据此改口。
+    入口的 :func:`assert_public_url` 只为立刻给出 blocked 语义；完整闸门
+    （DNS 解析 + 逐跳重定向复检）在 web_page.fetch_page 内部，拦下时抛
+    ValueError，由 :func:`execute` 收敛成失败结果。
     """
     if not url:
         return ToolResult(name="fetch_page", ok=False, content="缺少 url 参数", error="bad_args")
@@ -249,17 +242,6 @@ async def _run_fetch(url: str) -> ToolResult:
         max_chars=settings.web_fetch_max_chars,
         timeout=settings.web_fetch_timeout_seconds,
     )
-    # 重定向可能被带到内网，落点再查一次（httpx 已在内部跟随）
-    if page.final_url != target:
-        try:
-            assert_public_url(page.final_url)
-        except ValueError as exc:
-            return ToolResult(
-                name="fetch_page",
-                ok=False,
-                content=f"该地址被重定向到不允许访问的内网地址：{exc}",
-                error="blocked",
-            )
     title = page.title or target
     body = page.text + ("\n（内容过长，已截断）" if page.truncated else "")
     return ToolResult(

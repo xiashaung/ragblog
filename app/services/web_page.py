@@ -7,18 +7,33 @@
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import re
+import socket
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
+
+from ..config import get_settings
 
 MAX_DOWNLOAD_BYTES = 3_000_000  # 单次下载上限，超过直接拒入库
 DEFAULT_TIMEOUT = 15.0  # 宁可放弃一次抓取，也不让用户干等
 USER_AGENT = "Mozilla/5.0 (compatible; FastAPI-KnowledgeBot/0.1)"
 
 _ALLOWED_SCHEMES = {"http", "https"}
+
+# 内网/元数据服务常用的主机名与后缀：IP 字面量之外这些也要在入口挡掉
+_DENY_HOSTS = {
+    "localhost",
+    "metadata",
+    "metadata.google.internal",
+    "nvme1.local",
+}
+_DENY_SUFFIXES = (".local", ".internal", ".lan", ".cluster.local")
+_MAX_REDIRECTS = 5  # 手动跟随重定向的跳数上限，防循环跳转
 
 # 这些标签的子树永远不算「可读正文」
 _SKIP_TAGS = {
@@ -166,22 +181,110 @@ def validate_url(url: str) -> str:
     return target
 
 
+def ip_denied(ip: str) -> bool:
+    """判断一个 IP 是否属于「不该被服务端去访问」的地址段。
+
+    含：私网（10/8、172.16/12、192.168/16）、回环、链路本地（169.254/16，
+    云元数据服务就在这段）、组播、保留与未指定地址；IPv4 映射的 IPv6
+    （::ffff:127.0.0.1）先还原再判。非 IP 字符串（是域名）返回 False。
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if addr.version == 6 and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+async def _resolve(host: str, port: int) -> list[str]:
+    """解析域名的全部 IPv4/IPv6 地址（线程池里跑阻塞的 getaddrinfo）。
+
+    单独抽出是为了可测：测试里直接 monkeypatch 本函数就能模拟
+    「公网域名解析到内网」的绕法，不必真去碰 DNS。
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"域名解析失败：{host}") from exc
+    return [str(info[4][0]) for info in infos]
+
+
+async def assert_safe_target(url: str, *, allow_private: bool | None = None) -> str:
+    """抓页前的统一闸门：scheme + 内网主机名 + **DNS 解析后**的 IP 都判一遍。
+
+    比旧版只判 IP 字面量的拦截强一层：「公网域名 A 记录指向 127.0.0.1」
+    这类绕法在解析环节就会被拦下。诚实的已知边界：检查与 httpx 真正建连
+    之间仍有微小的 DNS rebinding 窗口（TTL 极短的域名理论上可在两次解析间
+    换答案）；要彻底封死得自己持解析结果发起连接，这里不为此引私有 transport。
+    """
+    target = validate_url(url)
+    allowed = (
+        get_settings().web_fetch_allow_private if allow_private is None else allow_private
+    )
+    if allowed:
+        return target
+    parsed = urlparse(target)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        raise ValueError("网址缺少域名")
+    if host in _DENY_HOSTS or host.endswith(_DENY_SUFFIXES):
+        raise ValueError("禁止访问内网地址")
+    if ip_denied(host):  # IP 字面量（含 IPv6：hostname 已去方括号）直接判
+        raise ValueError("禁止访问内网或保留地址")
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    for ip in await _resolve(host, port):
+        if ip_denied(ip):
+            raise ValueError(f"域名 {host} 解析到内网/保留地址，禁止访问")
+    return target
+
+
 async def fetch_page(
-    url: str, *, max_chars: int | None = None, timeout: float = DEFAULT_TIMEOUT
+    url: str,
+    *,
+    max_chars: int | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    allow_private: bool | None = None,
 ) -> PageText:
     """下载 ``url`` 并抽取它的可读正文。
 
-    预期内的失败（scheme 不对、网络错、非 2xx、内容不是文本、体积超限、正文为空）
-    一律抛 ``ValueError`` + 中文描述，由全局处理器翻译成 HTTP 400。
+    预期内的失败（scheme 不对、内网地址、网络错、非 2xx、内容不是文本、体积超限、
+    正文为空）一律抛 ``ValueError`` + 中文描述，由全局处理器翻译成 HTTP 400。
+
+    SSRF 防线收在这里而不是调用方：知识库录入与对话工具共用本函数，只拦一头
+    等于没拦。重定向不再交给 httpx 自动跟随，而是一跳一跳手动跟、每一跳都重新
+    过 :func:`assert_safe_target`——旧写法里「跟完再复查落点」其实内网请求已经
+    发出去了，数据都拿回来了才说不信。
     """
-    target = validate_url(url)
+    target = await assert_safe_target(url, allow_private=allow_private)
     try:
         async with httpx.AsyncClient(
-            follow_redirects=True,
+            follow_redirects=False,  # 手动跟随：每跳落点都要过闸门
             timeout=timeout,
             headers={"User-Agent": USER_AGENT},
         ) as client:
-            resp = await client.get(target)
+            current = target
+            for _ in range(_MAX_REDIRECTS):
+                resp = await client.get(current)
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("location")
+                    if not location:
+                        break
+                    current = await assert_safe_target(
+                        urljoin(str(resp.url), location), allow_private=allow_private
+                    )
+                    continue
+                break
+            else:
+                raise ValueError(f"重定向超过 {_MAX_REDIRECTS} 次，已放弃抓取")
     except httpx.HTTPError as exc:
         raise ValueError(f"抓取失败：{exc}") from exc
 
