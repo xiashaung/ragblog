@@ -17,11 +17,12 @@ from __future__ import annotations
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import deps, services
+from ..config import get_settings
 from ..db import get_db
 from ..rbac import Permission
 from ..schemas.blog import (
@@ -287,6 +288,52 @@ async def public_post_related(
     if items is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文章不存在或未发布")
     return {"total": len(items), "offset": 0, "limit": limit, "items": items}
+
+
+def _public_base(request: Request) -> str:
+    """绝对基址：显式配的 ``site_url`` 优先，没配则从请求头推断。
+
+    反代后面 ``request.base_url`` 常不准（拿到内部 :8011），因此生产建议显式配。
+    """
+    site = get_settings().site_url.strip()
+    return (site or str(request.base_url)).rstrip("/")
+
+
+@public_router.get("/feed")
+async def blog_feed(
+    request: Request,
+    session: AsyncSession = Depends(get_db),
+) -> Response:
+    """RSS 2.0 订阅源：最近 20 篇已发布文章（返回原样 XML，不进信封）。"""
+    base = _public_base(request)
+    posts = await services.blog.feed_posts(session, limit=20)
+    settings = get_settings()
+    xml = services.blog_feed.build_rss(
+        title=settings.app_name,
+        link=base,
+        description=settings.app_name,
+        language="zh-CN",
+        items=posts,
+    )
+    return Response(content=xml, media_type="application/rss+xml; charset=utf-8")
+
+
+@public_router.get("/sitemap.xml")
+async def blog_sitemap(
+    request: Request,
+    session: AsyncSession = Depends(get_db),
+) -> Response:
+    """sitemap.xml：首页 + 各已发布文章 + 有文章的分类页（供搜索引擎收录）。"""
+    base = _public_base(request)
+    posts = await services.blog.sitemap_posts(session)
+    cats = await services.blog.list_categories(session, published_only=True)
+    extra = [
+        {"path": f"/category/{c.slug}", "updated_at": c.updated_at}
+        for c in cats
+        if c.post_count > 0
+    ]
+    xml = services.blog_feed.build_sitemap(link=base, posts=posts, extra=extra)
+    return Response(content=xml, media_type="application/xml; charset=utf-8")
 
 
 @public_router.post("/search", response_model=BlogSearchResponse)

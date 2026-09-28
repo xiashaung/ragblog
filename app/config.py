@@ -361,6 +361,12 @@ class Settings(BaseSettings):
     media_dir: str = "media"
     media_url: str = "/media"
 
+    # --- 博客对外基址（RSS / sitemap 里的绝对链接用）---
+    # RSS 订阅器与搜索引擎爬虫需要绝对 URL，不能像页面那样用相对路径。
+    # 留空时退回从请求头推断（``request.base_url``）；反代后面推断常不准，
+    # 生产建议显式配成公开访问域名（如 https://blog.example.com）。
+    site_url: str = ""
+
     @property
     def media_root(self) -> Path:
         """媒体根目录的绝对路径（相对值按仓库根解析，绝对值原样用）。"""

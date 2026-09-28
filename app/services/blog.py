@@ -600,6 +600,50 @@ async def get_published_by_slug(session: AsyncSession, slug: str) -> dict | None
     return await _with_category(session, data, public=True)
 
 
+async def feed_posts(session: AsyncSession, *, limit: int = 20) -> list[dict]:
+    """RSS 用：最近发布的文章（带正文与时间戳），按发布时间倒序。
+
+    与列表出口分开：这里要直接给正文与 epoch 时间（喂 XML 渲染），
+    不走 _public_item 那套展示字段。
+    """
+    rows = (
+        await session.scalars(
+            select(BlogPost)
+            .where(BlogPost.status == STATUS_PUBLISHED)
+            .order_by(desc(BlogPost.published_at))
+            .limit(limit)
+        )
+    ).all()
+    return [
+        {
+            "slug": r.slug,
+            "title": r.title,
+            "summary": r.summary or "",
+            "content": r.content or "",
+            "tags": [t for t in (r.tags or []) if isinstance(t, str)],
+            "published_at": r.published_at or r.created_at or 0.0,
+            "updated_at": r.updated_at or r.published_at or r.created_at or 0.0,
+        }
+        for r in rows
+    ]
+
+
+async def sitemap_posts(session: AsyncSession) -> list[dict]:
+    """sitemap 用：全部已发布文章的 slug 与最近更新时间（不分页）。"""
+    rows = (
+        await session.scalars(
+            select(BlogPost).where(BlogPost.status == STATUS_PUBLISHED)
+        )
+    ).all()
+    return [
+        {
+            "slug": r.slug,
+            "updated_at": r.updated_at or r.published_at or r.created_at or 0.0,
+        }
+        for r in rows
+    ]
+
+
 async def post_neighbors(session: AsyncSession, slug: str) -> dict | None:
     """上一篇 / 下一篇（按发布时间正序；同刻用 ID 稳定排序）。
 
