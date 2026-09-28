@@ -21,6 +21,7 @@ from .. import deps, services
 from ..config import get_settings
 from ..db import get_db
 from ..models import AdminUser
+from ..rate_limit import client_key, login_limiter
 from ..rbac import PERMISSION_CATALOG, Permission
 from ..schemas.admin import (
     AccountCreate,
@@ -50,6 +51,21 @@ def _extract_token(request) -> str:
     if bearer.startswith("Bearer "):
         return bearer[7:].strip()
     return request.cookies.get("admin_token", "")
+
+
+def _enforce_login_limit(key: str) -> None:
+    """登录/引导入口的统一闸：被限就 429，顺带报还要等多久。"""
+    settings = get_settings()
+    if not settings.login_rate_limit_enabled:
+        return
+    wait = login_limiter.retry_after(key, settings=settings)
+    if wait > 0:
+        seconds = int(wait) + 1
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"尝试过于频繁，请 {seconds} 秒后再试",
+            headers={"Retry-After": str(seconds)},
+        )
 
 
 def _ensure_bootstrap_key(request: Request) -> None:
@@ -83,9 +99,17 @@ async def onboard(
     之后新建账号请走 ``POST /admin/accounts``（需 ``account:manage``）。
 
     先用引导密钥证明「是运维本人」，再才去建账号；服务层的
-    ``ValueError``（已存在账号）翻译成 409。
+    ``ValueError``（已存在账号）翻译成 409。密钥猜测也吃限流：
+    引导窗内错满次数同样锁定，公网暴露的首次入口不能裸奔。
     """
-    _ensure_bootstrap_key(request)
+    key = client_key(request, "onboard")
+    _enforce_login_limit(key)
+    login_limiter.record_attempt(key)
+    try:
+        _ensure_bootstrap_key(request)
+    except HTTPException:
+        login_limiter.record_failure(key)
+        raise
     try:
         await services.admin_service.create_admin(
             session, payload.username, payload.password, payload.name
@@ -107,13 +131,20 @@ async def login(
     """账号口令登录：返 token + 角色/权限，同时下发 httpOnly cookie。
 
     口令错 / 账号停用都归 401（服务层的 ``ValueError`` 在这里接）。
+    限流两道闸（见 app/rate_limit.py）：尝试窗防扫接口，失败锁定防爆口令；
+    账号不存在与口令错都计入失败，不给探测「哪个用户名存在」留差异。
     """
+    key = client_key(request, payload.username)
+    _enforce_login_limit(key)
+    login_limiter.record_attempt(key)
     try:
         result = await services.admin_service.login(session, payload.username, payload.password)
     except ValueError as exc:
+        login_limiter.record_failure(key)
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, str(exc)
         ) from exc
+    login_limiter.record_success(key)
     expires_in = int((result.expires_at - time.time()) or 0)
     response.set_cookie(
         "admin_token",

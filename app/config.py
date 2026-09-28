@@ -328,6 +328,16 @@ class Settings(BaseSettings):
     default_request_quota: int = 100  # 每 Key 每小时请求数上限
     admin_session_ttl_seconds: int = 86_400  # 控制台 Bearer token 的有效期（秒）
 
+    # --- 登录限流（进程内滑窗，见 app/rate_limit.py）---
+    # 尝试窗：同一「IP+用户名」在 window 内最多 max_attempts 次登录尝试；
+    # 失败锁：lockout 窗内累计 threshold 次口令错误即锁定。多 Worker 时
+    # 每进程各记各的，实际阈值约等于配置值 × 进程数（取舍已写在模块头）。
+    login_rate_limit_enabled: bool = True
+    login_window_seconds: int = 60
+    login_max_attempts: int = 10
+    login_lock_threshold: int = 5
+    login_lockout_seconds: int = 900
+
     # --- 数据库（默认 SQLite，生产用 Postgres + pgvector）---
     database_url: str = "sqlite+aiosqlite:///./app.db"
     db_echo: bool = False

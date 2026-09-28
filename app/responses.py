@@ -39,10 +39,15 @@ def _message_for_status(status_code: int) -> str:
 
 
 async def _http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
-    """路由里主动 raise 的业务错：状态码不变，``detail`` 当 message 透出。"""
+    """路由里主动 raise 的业务错：状态码不变，``detail`` 当 message 透出。
+
+    ``exc.headers`` 必须透传：限流响应的 ``Retry-After`` 等元信息就住在里面，
+    早先的写法会把它们静默丢掉。
+    """
     return JSONResponse(
         status_code=exc.status_code,
         content=ApiResponse.error(exc.status_code, str(exc.detail)).model_dump(),
+        headers=exc.headers,
     )
 
 
