@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import services
 from ..db import get_db
 from ..schemas import User, UserCreate, UserUpdate
+from ..schemas.page import DefaultPage, Page
 
 router = APIRouter()
 
@@ -22,10 +23,16 @@ async def create_user(
     return await services.user_service.create_user(session, payload)
 
 
-@router.get("", response_model=list[User])
-async def list_users(session: AsyncSession = Depends(get_db)) -> list[User]:
-    """列出全量用户（示例接口，没分页）。"""
-    return await services.user_service.list_users(session)
+@router.get("", response_model=Page[User])
+async def list_users(
+    page: DefaultPage,
+    session: AsyncSession = Depends(get_db),
+) -> Page[User]:
+    """分页列出用户（默认 20/页，上限 100）。"""
+    total, items = await services.user_service.list_users(
+        session, offset=page.offset, limit=page.limit
+    )
+    return Page.of(items, total, page)
 
 
 @router.get("/{user_id}", response_model=User)

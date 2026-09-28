@@ -171,3 +171,24 @@ async def test_sample_routes_mounted_only_in_debug(monkeypatch) -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
         resp = await ac.get("/api/v1/users")
     assert resp.status_code == 404
+
+
+async def test_list_users_paginated(client) -> None:
+    """/users 列表返回统一分页体：total/offset/limit/items。"""
+    for i in range(3):
+        await client.post(
+            "/api/v1/users", json={"name": f"U{i}", "email": f"u{i}@e.com"}
+        )
+
+    body = _ok(await client.get("/api/v1/users"))
+    assert body["total"] == 3
+    assert body["offset"] == 0 and body["limit"] == 20
+    assert len(body["items"]) == 3
+
+    # limit 生效并夹到上限区间；取一页一条
+    one = _ok(await client.get("/api/v1/users?limit=1"))
+    assert one["total"] == 3 and len(one["items"]) == 1
+
+    # offset 翻页不重叠
+    page2 = _ok(await client.get("/api/v1/users?offset=1&limit=1"))
+    assert page2["items"][0]["id"] != one["items"][0]["id"]

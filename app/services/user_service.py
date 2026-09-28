@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import UserRow
@@ -35,10 +35,15 @@ async def get_user(session: AsyncSession, user_id: int) -> User | None:
     return _to_schema(row) if row else None
 
 
-async def list_users(session: AsyncSession) -> list[User]:
-    """列出全量用户（示例接口，没做分页）。"""
-    result = await session.scalars(select(UserRow).order_by(UserRow.id))
-    return [_to_schema(r) for r in result.all()]
+async def list_users(
+    session: AsyncSession, *, offset: int = 0, limit: int = 20
+) -> tuple[int, list[User]]:
+    """分页列用户；回 ``(总数, 当页数据)``。"""
+    total = await session.scalar(select(func.count()).select_from(UserRow)) or 0
+    result = await session.scalars(
+        select(UserRow).order_by(UserRow.id).offset(offset).limit(limit)
+    )
+    return int(total), [_to_schema(r) for r in result.all()]
 
 
 async def update_user(

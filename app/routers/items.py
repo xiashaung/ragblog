@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import services
 from ..db import get_db
 from ..schemas.item import Item, ItemCreate
+from ..schemas.page import DefaultPage, Page
 
 router = APIRouter()
 
@@ -22,10 +23,16 @@ async def create_item(
     return await services.item_service.create_item(session, payload)
 
 
-@router.get("", response_model=list[Item])
-async def list_items(session: AsyncSession = Depends(get_db)) -> list[Item]:
-    """列出全量条目（示例接口，没分页）。"""
-    return await services.item_service.list_items(session)
+@router.get("", response_model=Page[Item])
+async def list_items(
+    page: DefaultPage,
+    session: AsyncSession = Depends(get_db),
+) -> Page[Item]:
+    """分页列出条目（默认 20/页，上限 100）。"""
+    total, items = await services.item_service.list_items(
+        session, offset=page.offset, limit=page.limit
+    )
+    return Page.of(items, total, page)
 
 
 @router.get("/{item_id}", response_model=Item)

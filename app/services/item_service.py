@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import ItemRow
@@ -43,10 +43,15 @@ async def get_item(session: AsyncSession, item_id: int) -> Item | None:
     return _to_schema(row) if row else None
 
 
-async def list_items(session: AsyncSession) -> list[Item]:
-    """列出全量条目（示例接口，没做分页）。"""
-    result = await session.scalars(select(ItemRow).order_by(ItemRow.id))
-    return [_to_schema(r) for r in result.all()]
+async def list_items(
+    session: AsyncSession, *, offset: int = 0, limit: int = 20
+) -> tuple[int, list[Item]]:
+    """分页列条目；回 ``(总数, 当页数据)``。"""
+    total = await session.scalar(select(func.count()).select_from(ItemRow)) or 0
+    result = await session.scalars(
+        select(ItemRow).order_by(ItemRow.id).offset(offset).limit(limit)
+    )
+    return int(total), [_to_schema(r) for r in result.all()]
 
 
 async def delete_item(session: AsyncSession, item_id: int) -> bool:
