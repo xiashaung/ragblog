@@ -8,8 +8,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from http import HTTPStatus
 
+from sqlalchemy import select
+
+from app import db
 from app.rbac import ALL_PERMISSIONS, SUPERADMIN_ROLE, Permission
 
 
@@ -516,3 +520,38 @@ async def test_system_config_permissions_gate_model_pages(client, console, accou
             headers=console["headers"],
         )
     ).status_code == HTTPStatus.OK
+
+
+async def test_legacy_sha256_password_logins_and_upgrades_in_place(client, console):
+    """存量 SHA-256 口令：能登录，且登录成功后库里升级成 Argon2。"""
+    from app.models import AdminUser
+
+    password = "legacy-pass-123"
+    async with db.session_factory() as session:
+        session.add(
+            AdminUser(
+                id="adm_legacy000001",
+                username="legacy",
+                password_hash=hashlib.sha256(password.encode()).hexdigest(),
+                name="Legacy",
+                is_active=True,
+            )
+        )
+        await session.commit()
+
+    res = await client.post(
+        "/api/v1/admin/login", json={"username": "legacy", "password": password}
+    )
+    assert res.status_code == HTTPStatus.OK, res.text
+
+    # 错误口令仍被拒（升级后的 Argon2 校验路径也生效）
+    bad = await client.post(
+        "/api/v1/admin/login", json={"username": "legacy", "password": "wrong-pass-1"}
+    )
+    assert bad.status_code == HTTPStatus.UNAUTHORIZED
+
+    async with db.session_factory() as session:
+        stored = await session.scalar(
+            select(AdminUser.password_hash).where(AdminUser.username == "legacy")
+        )
+    assert stored.startswith("$argon2id$"), stored

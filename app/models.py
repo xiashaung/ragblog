@@ -159,9 +159,8 @@ class AdminRoleRow(Base):
 class AdminUser(Base):
     """能登录管理后台的账号。
 
-    ``username`` 唯一；``password_hash`` 是 SHA-256 摘要（与
-    ``AdminSession.token_hash`` 同一做法）——真正的控制靠 token 黑名单，
-    这套哈希仅算凑齐可用，生产建议升级到 bcrypt/argon2。
+    ``username`` 唯一；``password_hash`` 是 Argon2id 摘要（存量旧值可能是
+    SHA-256，登录验过即升级写回，见 ``admin_service.verify_password``）。
     权限不在这张表上，一律通过 ``AdminRoleRow`` 关联的角色推导。
     """
 
@@ -169,7 +168,8 @@ class AdminUser(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: _uid("adm"))
     username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Argon2id 摘要约 95 字符，64 存不下，迁移 k0l1m2n3o4p5 已拓宽到 128
+    password_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     name: Mapped[str] = mapped_column(String(100), default="Administrator")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[float] = mapped_column(Float, default=_now)

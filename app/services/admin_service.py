@@ -4,7 +4,8 @@
 本层只 ``flush``、不 ``commit``。认证凭据是一个随机生成的 Bearer token，
 库里只存它的 SHA-256 摘要，因此拿到的 ``Authorization`` 头要先哈希再查：
 
-- ``login``：按用户名找账号、验密码，然后**清掉该账号已有的未过期会话**再签一个新的
+- ``login``：按用户名找账号、验口令（Argon2，兼容旧 SHA-256 并验过即升级写回），
+  然后**清掉该账号已有的未过期会话**再签一个新的
   （所以一次登录会把其他设备上的旧 token 一并作废）。
 - ``refresh_token``：验一个有效 token，验过就把旧的删掉、签一个替换的（旋转）。
 - ``logout``（以及 token 自然过期）只是把这一行删掉，让 token 直接变成无效值。
@@ -17,12 +18,23 @@ import secrets
 import time
 import uuid
 
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
 from ..models import AdminSession, AdminUser
 from ..schemas.admin import AdminLoginResponse, AdminToken
+
+# Argon2id 口令哈希器（默认参数 m=64MiB/t=3/p=4）。登录校验是 CPU 密集的，
+# 都在 async 路由里同步调用；单管理后台的并发量级可接受，若登录 QPS 上来
+# 应改用 Starlette 线程池依赖把校验挪出事件循环。
+_hasher = PasswordHasher()
+
+# 旧版口令哈希是裸 SHA-256（64 位十六进制）。留着它只为「平滑迁移」：
+# 存量账号仍可用口令登录，验过即升级为 Argon2 写回（见 login）。
+_SHA256_LEN = 64
 
 
 def _hash_token(token: str) -> str:
@@ -31,8 +43,26 @@ def _hash_token(token: str) -> str:
 
 
 def hash_password(password: str) -> str:
-    """口令摘要。与种子脚本、``create_admin`` 共用，保证写入与比对一致。"""
-    return hashlib.sha256(password.encode()).hexdigest()
+    """口令摘要（Argon2id）。与种子脚本、``create_admin`` 共用，保证写入与比对一致。"""
+    return _hasher.hash(password)
+
+
+def verify_password(stored_hash: str, password: str) -> bool:
+    """校验口令，兼容新旧两种哈希：SHA-256 直比 / Argon2 走验证器。"""
+    if len(stored_hash) == _SHA256_LEN and all(c in "0123456789abcdef" for c in stored_hash):
+        return secrets.compare_digest(stored_hash, hashlib.sha256(password.encode()).hexdigest())
+    try:
+        _hasher.verify(stored_hash, password)
+    except (VerificationError, InvalidHashError):
+        return False
+    return True
+
+
+def needs_password_upgrade(stored_hash: str) -> bool:
+    """存的还是旧 SHA-256，或 Argon2 参数已落后于当前哈希器 → 需要重写。"""
+    if len(stored_hash) == _SHA256_LEN and all(c in "0123456789abcdef" for c in stored_hash):
+        return True
+    return _hasher.check_needs_rehash(stored_hash)
 
 
 def _now() -> float:
@@ -87,10 +117,14 @@ async def login(session: AsyncSession, username: str, password: str) -> AdminLog
     row = (
         await session.scalar(select(AdminUser).where(AdminUser.username == username))
     )
-    if row is None or row.password_hash != hash_password(password):
+    if row is None or not verify_password(row.password_hash, password):
         raise ValueError("Invalid username or password")
     if not row.is_active:
         raise ValueError("This account has been disabled")
+
+    # 旧 SHA-256（或参数过时的 Argon2）验过即就地升级写回，存量数据逐步淘汰
+    if needs_password_upgrade(row.password_hash):
+        row.password_hash = hash_password(password)
 
     window = _now() - _ttl()
     # 清掉该账号所有还在有效期内的会话：一次登录就把其他设备上签发过的 token 一并作废
@@ -203,6 +237,8 @@ __all__ = [
     "login",
     "create_admin",
     "hash_password",
+    "verify_password",
+    "needs_password_upgrade",
     "verify_token",
     "refresh_token",
     "logout",
