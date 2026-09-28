@@ -121,6 +121,9 @@ class Settings(BaseSettings):
     version: str = "0.1.0"
     debug: bool = False
     api_v1_prefix: str = "/api/v1"
+    # 全局日志级别（app 与 uvicorn 共用一套格式，见 logging_setup）。
+    # 设成 DEBUG 会连带放大所有未单独设级别的三方库日志，线上慎开。
+    log_level: str = "INFO"
     # 默认通配——此时 main.py 会强制关闭 CORS 凭据模式（浏览器本来也不接受
     # 通配 + credentials 的组合）。需要 cookie/Authorization 跨域携带时，
     # 把具体来源逐个列进来。

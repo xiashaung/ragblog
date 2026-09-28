@@ -31,6 +31,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import db, services
 from .config import get_settings
+from .logging_setup import RequestIdMiddleware, setup_logging
 from .responses import (
     _http_exception_handler,
     _validation_exception_handler,
@@ -173,6 +174,8 @@ def create_app() -> FastAPI:
     新加路由时别在 router 里重复写 prefix，否则会拼出双层路径。
     """
     settings = get_settings()
+    # 日志先配好，后面启动环节的 warning（如 CORS 守卫）才能走统一格式
+    setup_logging(settings.log_level)
     application = FastAPI(
         title=settings.app_name,
         version=settings.version,
@@ -209,6 +212,9 @@ def create_app() -> FastAPI:
     # （SPA 的 HTML、流式对话）不动。错误响应体已由 app.responses 的异常处理器拼好，
     # 因此本中间件只碰 2xx。
     application.add_middleware(_EnvelopeMiddleware)
+    # 请求 ID 中间件最后注册 = 最外层执行：不管响应最内层是谁发的，
+    # X-Request-ID 头都能补上；contextvar 也从这里开始覆盖整个请求周期。
+    application.add_middleware(RequestIdMiddleware)
 
     application.include_router(health.router, prefix="/api/v1", tags=["health"])
     application.include_router(ai.router, prefix="/api/v1/ai", tags=["ai"])

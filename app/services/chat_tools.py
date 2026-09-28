@@ -956,7 +956,7 @@ async def stream_with_tools(
             tools = None
             max_rounds = round_no
             logger.info(
-                "{}，已停止后续搜索并强制作答",
+                "%s，已停止后续搜索并强制作答",
                 "搜索结果重复" if repeated else "搜索次数超预算",
             )
 
