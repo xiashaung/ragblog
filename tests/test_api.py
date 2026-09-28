@@ -154,3 +154,20 @@ async def test_cors_wildcard_disables_credentials(monkeypatch) -> None:
     headers = await _preflight(create_app(), "http://good.example")
     assert headers.get("access-control-allow-origin") == "http://good.example"
     assert headers.get("access-control-allow-credentials") == "true"
+
+
+async def test_sample_routes_mounted_only_in_debug(monkeypatch) -> None:
+    """users/items 是无鉴权示例接口：debug=False 时根本不挂。"""
+    import httpx
+
+    from app.config import Settings
+    from app.main import create_app
+
+    monkeypatch.setattr(
+        "app.main.get_settings", lambda: Settings(_env_file=None, debug=False)
+    )
+    app = create_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
+        resp = await ac.get("/api/v1/users")
+    assert resp.status_code == 404

@@ -211,8 +211,6 @@ def create_app() -> FastAPI:
     application.add_middleware(_EnvelopeMiddleware)
 
     application.include_router(health.router, prefix="/api/v1", tags=["health"])
-    application.include_router(users.router, prefix="/api/v1/users", tags=["users"])
-    application.include_router(items.router, prefix="/api/v1/items", tags=["items"])
     application.include_router(ai.router, prefix="/api/v1/ai", tags=["ai"])
     application.include_router(
         analytics.router, prefix="/api/v1/analytics", tags=["analytics"]
@@ -225,6 +223,16 @@ def create_app() -> FastAPI:
     application.include_router(system_config.router, prefix="/api/v1")
     application.include_router(datasources.router)
     application.include_router(upload.router, prefix="/api/v1", tags=["upload"])
+
+    # 示例 CRUD（users/items）：无鉴权的模板接口，只在 debug 下挂载，
+    # 避免生产环境白暴露一张可增删改的演示表。
+    if settings.debug:
+        application.include_router(
+            users.router, prefix="/api/v1/users", tags=["users"]
+        )
+        application.include_router(
+            items.router, prefix="/api/v1/items", tags=["items"]
+        )
 
     # --- 上传的图片（直接从磁盘对外提供）---
     # 上传的图片落盘到 ``settings.media_root``，这里挂为静态目录，浏览器可直接

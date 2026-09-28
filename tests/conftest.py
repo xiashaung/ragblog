@@ -1,9 +1,9 @@
 """Test fixtures: mock LLM backend + a fresh SQLite DB per test + async client."""
 
+import asyncio  # noqa: F401  (保留：历史 fixture 用过，部分测试模块间接依赖导入时机)
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-import asyncio
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -16,6 +16,8 @@ from app.services import (
     llm,
     provider_store,
     rag_queue,
+)
+from app.services import (
     system_config as system_config_service,
 )
 
@@ -31,6 +33,7 @@ def _mock_settings() -> Settings:
     """
     return Settings(
         _env_file=None,
+        debug=True,  # 打开示例 users/items 路由（生产默认不挂，见 main.create_app）
         llm_default_provider="mock",
         admin_api_key="admin-test-key",
         default_request_quota=3,
