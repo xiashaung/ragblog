@@ -337,6 +337,14 @@ class Settings(BaseSettings):
     login_lock_threshold: int = 5
     login_lockout_seconds: int = 900
 
+    # --- 公开博客 AI 端点限流（按 IP，见 app/rate_limit.py）---
+    # /blog/search|answer|chat 匿名可达且真调嵌入 / 精排 / 对话模型，零门槛会被脚本
+    # 刷爆 API 预算。同一 IP 在 window 秒内最多 max 次（三个端点共用一个窗口），
+    # 超限 429 + Retry-After。默认给一个正常访客够用的宽松值，主要防失控自动脚本。
+    blog_ai_rate_limit_enabled: bool = True
+    blog_ai_window_seconds: int = 60
+    blog_ai_max_requests: int = 20
+
     # --- 后台巡检（增长型表的保留策略，见 app/housekeeping.py）---
     # rag_tasks 每次写入操作都落一行、admin_sessions 过期行只靠自然淘汰，
     # 都没兜底清理——长期跑下去只涨不消。启动时跑一次、之后按 interval

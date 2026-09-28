@@ -26,6 +26,7 @@ from ..audit import Actor
 from ..audit import event as audit_event
 from ..config import get_settings
 from ..db import get_db
+from ..rate_limit import blog_ai_limiter, client_key
 from ..rbac import Permission
 from ..schemas.blog import (
     BlogAnswerResponse,
@@ -344,21 +345,49 @@ async def blog_sitemap(
     return Response(content=xml, media_type="application/xml; charset=utf-8")
 
 
+def _enforce_blog_ai_limit(request: Request) -> None:
+    """公开 AI 端点的成本闸：按访客 IP 滑窗，超限 429 + Retry-After。
+
+    /blog/search|answer|chat 匿名可达且真调嵌入/精排/对话模型，是公网最容易刷爆
+    API 预算的三个口。只把「成功放行」计入窗口（见 ``SlidingWindowLimiter.allow``），
+    被拒的不计，所以持续硬刷也只是不停拿 429，不会把某个 IP 永久锁死。
+    """
+    settings = get_settings()
+    if not settings.blog_ai_rate_limit_enabled:
+        return
+    allowed, retry = blog_ai_limiter.allow(
+        client_key(request),
+        window_seconds=settings.blog_ai_window_seconds,
+        max_requests=settings.blog_ai_max_requests,
+    )
+    if not allowed:
+        seconds = int(retry) + 1
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"AI 请求过于频繁，请 {seconds} 秒后再试",
+            headers={"Retry-After": str(seconds)},
+        )
+
+
 @public_router.post("/search", response_model=BlogSearchResponse)
 async def blog_search(
+    request: Request,
     req: BlogSearchRequest,
     session: AsyncSession = Depends(get_db),
 ) -> BlogSearchResponse:
     """AI 语义搜索：混合检索限定在已发布文章的索引里，命中片段带高亮摘要。"""
+    _enforce_blog_ai_limit(request)
     return await services.blog.search_posts(session, req)
 
 
 @public_router.post("/answer", response_model=BlogAnswerResponse)
 async def blog_answer(
+    request: Request,
     req: BlogSearchRequest,
     session: AsyncSession = Depends(get_db),
 ) -> BlogAnswerResponse:
     """一次性 AI 问答：检索 + 组织回答 + 引用（无命中不调模型直接说明）。"""
+    _enforce_blog_ai_limit(request)
     return await services.blog.answer_question(
         session, BlogSearchRequest(query=req.query, top_k=req.top_k)
     )
@@ -366,6 +395,7 @@ async def blog_answer(
 
 @public_router.post("/chat")
 async def blog_chat(
+    request: Request,
     req: BlogChatRequest,
     session: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
@@ -374,6 +404,7 @@ async def blog_chat(
     检索在返回流之前做完（生成器活不过请求级 DB session 的活不能留给流里），
     流中报错按既有惯例包成最后一行 chunk 透出。
     """
+    _enforce_blog_ai_limit(request)
     citations, messages = await services.blog.prepare_chat(session, req)
     backend = get_llm(None, feature="rag")
 

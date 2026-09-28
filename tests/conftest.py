@@ -208,11 +208,13 @@ def account_factory(client, console):
 
 @pytest.fixture(autouse=True)
 def _reset_login_limiter() -> None:
-    """清空登录限流的进程内计数，避免用例之间互相串染。
+    """清空各滑窗限流器的进程内计数，避免用例之间互相串染。
 
     限流状态挂在模块级单例上，跨用例不清零的话，前面故意刷失败次数的
-    用例会把自己（同 IP+用户名）锁进 429，坑掉后面的登录类用例。
+    用例会把同 IP+用户名锁进 429，坑掉后面的登录类用例；公开博客 AI / 控制
+    台 AI 的成本闸同理（测试客户端 IP 固定，不重置会被跨用例累加到超限）。
     """
     from app import rate_limit
 
     rate_limit.login_limiter.reset()
+    rate_limit.blog_ai_limiter.reset()

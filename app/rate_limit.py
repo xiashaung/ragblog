@@ -103,6 +103,59 @@ class LoginLimiter:
 login_limiter = LoginLimiter()
 
 
+class SlidingWindowLimiter:
+    """通用「每 key 每窗最多 N 次」滑窗计数——给昂贵端点当成本预算闸。
+
+    与 :class:`LoginLimiter` 分开：那个绑死了「尝试窗 + 失败锁定」的登录语义，
+    这里只做纯计数，谁调都一样的第一性用途。状态同样只在**进程内存**里，
+    多 Worker 部署各记各的，实际阈值约等于「配置值 ÷ 进程数」（护栏够用即可，
+    要全局精确得上 Redis，对这个量级不值得）。
+    """
+
+    def __init__(self) -> None:
+        """key → 放行时间戳队列（只记被放行的，拦下的不计入，免得持续轰把封锁无限延长）。"""
+        self._hits: dict[str, deque[float]] = {}
+
+    def reset(self) -> None:
+        """清空全部计数（测试之间互不串染的逃生门）。"""
+        self._hits.clear()
+
+    @staticmethod
+    def _now() -> float:
+        """单调时钟：改系统时间不能用来提前解锁。"""
+        return time.monotonic()
+
+    def _prune(self, q: deque[float], window: float, now: float) -> None:
+        """丢窗旧记录：deque 按时间入队，从左边弹就够了。"""
+        cutoff = now - window
+        while q and q[0] < cutoff:
+            q.popleft()
+
+    def _sweep_if_bloated(self) -> None:
+        """key 数超限时的粗清：直接全丢。误伤表现为个别来源重得一次机会。"""
+        if len(self._hits) > _MAX_KEYS:
+            self.reset()
+
+    def allow(self, key: str, *, window_seconds: int, max_requests: int) -> tuple[bool, float]:
+        """打一次并判定是否放行（检查与记录原子完成，无 TOCTOU）。
+
+        返回 ``(放行?, 需等待秒数)``：窗口内未满则记一次并放行；已满则不记录、
+        返回距最早那次放行滑出窗口还要等的秒数（向上取整交由调用方）。
+        """
+        now = self._now()
+        self._sweep_if_bloated()
+        q = self._hits.setdefault(key, deque())
+        self._prune(q, window_seconds, now)
+        if len(q) >= max_requests:
+            return False, max(0.0, q[0] + window_seconds - now)
+        q.append(now)
+        return True, 0.0
+
+
+# 公开博客 AI 端点（/blog/search|answer|chat）的成本闸：按访客 IP 计数
+blog_ai_limiter = SlidingWindowLimiter()
+
+
 def client_key(request: Request, username: str = "") -> str:
     """拼限流 key：``IP|小写用户名``。onboard 等无用户名入口只用 IP 段。"""
     fwd = request.headers.get("x-forwarded-for", "")

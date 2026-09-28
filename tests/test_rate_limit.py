@@ -1,4 +1,8 @@
-"""登录限流测试：LoginLimiter 单元行为 + login/onboard 入口的 429。"""
+"""限流测试：LoginLimiter（登录/引导）+ SlidingWindowLimiter（公开博客 AI 成本闸）。
+
+登录侧验「尝试窗 + 失败锁定」语义与 login/onboard 入口的 429；博客 AI 侧验通用
+滑窗的计数 / 隔离，以及 /blog/* 端点越界即 429（带 Retry-After）、开关关掉后放行。
+"""
 
 from __future__ import annotations
 
@@ -104,3 +108,72 @@ async def test_onboard_key_guessing_gets_locked(client) -> None:
         headers={"X-API-Key": "guess"},
     )
     assert res.status_code == 429
+
+
+# ---------------- 通用滑窗：SlidingWindowLimiter 单元 ----------------
+
+
+def test_sliding_window_blocks_over_limit() -> None:
+    lim = rate_limit.SlidingWindowLimiter()
+    for _ in range(3):
+        ok, _wait = lim.allow("k", window_seconds=60, max_requests=3)
+        assert ok
+    ok, wait = lim.allow("k", window_seconds=60, max_requests=3)
+    assert not ok
+    assert wait > 0
+
+
+def test_sliding_window_isolates_keys_and_reset_clears() -> None:
+    lim = rate_limit.SlidingWindowLimiter()
+    lim.allow("a", window_seconds=60, max_requests=1)
+    # 另一个 key 不受影响
+    ok, _ = lim.allow("b", window_seconds=60, max_requests=1)
+    assert ok
+    # a 已满
+    ok, _ = lim.allow("a", window_seconds=60, max_requests=1)
+    assert not ok
+    # 清零后 a 重得机会
+    lim.reset()
+    ok, _ = lim.allow("a", window_seconds=60, max_requests=1)
+    assert ok
+
+
+# ---------------- 公开博客 AI 端点：端到端 ----------------
+
+
+def _tiny_limit(monkeypatch: pytest.MonkeyPatch, *, enabled=True, max_requests=2) -> None:
+    """把 blog 路由读到的 settings 换成小阈值假对象（其余逻辑不变）。"""
+    from app.routers import blog as blog_module
+
+    fake = SimpleNamespace(
+        blog_ai_rate_limit_enabled=enabled,
+        blog_ai_window_seconds=60,
+        blog_ai_max_requests=max_requests,
+    )
+    monkeypatch.setattr(blog_module, "get_settings", lambda: fake)
+
+
+async def test_blog_answer_rate_limited(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    _tiny_limit(monkeypatch, max_requests=2)
+    for _ in range(2):
+        r = await client.post("/api/v1/blog/answer", json={"query": "x"})
+        assert r.status_code == 200, r.text
+    r = await client.post("/api/v1/blog/answer", json={"query": "x"})
+    assert r.status_code == 429
+    assert "Retry-After" in r.headers
+
+
+async def test_limit_shared_across_ai_endpoints(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """三个端点共用同一个 IP 窗口：search 打满后 answer 也进不了。"""
+    _tiny_limit(monkeypatch, max_requests=2)
+    assert (await client.post("/api/v1/blog/search", json={"query": "x"})).status_code == 200
+    assert (await client.post("/api/v1/blog/answer", json={"query": "x"})).status_code == 200
+    r = await client.post("/api/v1/blog/search", json={"query": "x"})
+    assert r.status_code == 429
+
+
+async def test_limit_disabled_passes_through(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    _tiny_limit(monkeypatch, enabled=False, max_requests=1)
+    for _ in range(5):
+        r = await client.post("/api/v1/blog/answer", json={"query": "x"})
+        assert r.status_code == 200, r.text
