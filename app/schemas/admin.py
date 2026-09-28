@@ -147,6 +147,13 @@ class AccountRolesUpdate(BaseModel):
     roles: list[str] = Field(default_factory=list)
 
 
+class PasswordChange(BaseModel):
+    """自助改密：验旧口令、设新口令（两个口令都只进不出，不回显）。"""
+
+    old_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8, description="至少 8 位")
+
+
 class ConfigItem(BaseModel):
     """系统配置项。"""
 
@@ -180,6 +187,7 @@ __all__ = [
     "AdminLoginResponse",
     "AdminToken",
     "AdminUserOut",
+    "PasswordChange",
     "PermissionOut",
     "PrincipalOut",
     "RoleCreate",

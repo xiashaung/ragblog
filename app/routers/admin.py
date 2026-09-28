@@ -32,6 +32,7 @@ from ..schemas.admin import (
     AdminLoginRequest,
     AdminLoginResponse,
     AdminToken,
+    PasswordChange,
     PermissionOut,
     PrincipalOut,
     RoleCreate,
@@ -209,6 +210,36 @@ async def me(
         is_superadmin=principal.is_superadmin,
         live_sessions=len(sessions),
     )
+
+
+@router.post("/me/password")
+async def change_my_password(
+    payload: PasswordChange,
+    request: Request,
+    session: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(deps.require_admin_principal),
+) -> dict:
+    """自助改密：验旧口令 → 更新 → 吊销除本次外的所有会话。
+
+    面对任何登录账号（不需 ``account:manage``）——普通运营想改自己
+    密码不该求人。旧口令校验跟登录限流（按 IP+用户名），防「劫持某个
+    已登录会话后就地猜旧口令」。改完保留当前会话，其它设备需新口令重登。
+    """
+    key = client_key(request, principal.username)
+    _enforce_login_limit(key)
+    try:
+        revoked = await services.admin_service.change_password(
+            session,
+            principal.admin_id,
+            payload.old_password,
+            payload.new_password,
+            keep_token=_extract_token(request),
+        )
+    except ValueError as exc:
+        login_limiter.record_failure(key)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    login_limiter.record_success(key)
+    return {"changed": True, "revoked_sessions": revoked}
 
 
 @router.get("/sessions", response_model=list[dict])

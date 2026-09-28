@@ -233,6 +233,42 @@ async def revoke_session(session: AsyncSession, session_id: str) -> bool:
     return True
 
 
+async def change_password(
+    session: AsyncSession,
+    admin_id: str,
+    old_password: str,
+    new_password: str,
+    *,
+    keep_token: str = "",
+) -> int:
+    """自助改密：验旧口令 → 写新哈希 → 吊销除当前外的所有会话，返被吊销数。
+
+    旧口令错 / 账号不存在都抛 ``ValueError``（路由翻译）。
+    改密后其它设备的 token 全部失效（口令一旦泄露，旧会话不能继续拿用），
+    只保留带 ``keep_token`` 的本次登录——改完不必重新登录。
+    """
+    row = await session.scalar(select(AdminUser).where(AdminUser.id == admin_id))
+    if row is None:
+        raise ValueError("账号不存在")
+    if not verify_password(row.password_hash, old_password):
+        raise ValueError("旧口令不正确")
+    row.password_hash = hash_password(new_password)
+    keep_hash = _hash_token(keep_token) if keep_token else ""
+    sessions = (
+        await session.scalars(
+            select(AdminSession).where(AdminSession.admin_id == admin_id)
+        )
+    ).all()
+    revoked = 0
+    for live in sessions:
+        if keep_hash and live.token_hash == keep_hash:
+            continue
+        await session.delete(live)
+        revoked += 1
+    await session.flush()
+    return revoked
+
+
 __all__ = [
     "login",
     "create_admin",
@@ -244,6 +280,7 @@ __all__ = [
     "logout",
     "list_live_sessions",
     "revoke_session",
+    "change_password",
 ]
 
 
