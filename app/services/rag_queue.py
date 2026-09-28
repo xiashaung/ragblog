@@ -93,6 +93,9 @@ class RAGQueue:
         if self._running:
             return
         self._running = True
+        # 每次启动重建 asyncio 队列对象：Queue 绑定首次使用的事件循环，
+        # 旧实例拿到新循环里用会直接 RuntimeError（测试每个用例新建循环时尤其易现）
+        self._queue = asyncio.Queue()
         n = max(1, get_settings().rag_queue_workers)
         self._workers = [
             asyncio.create_task(self._worker_loop(i)) for i in range(n)

@@ -29,6 +29,31 @@ async def test_health(client) -> None:
     assert _ok(resp) == {"status": "ok"}
 
 
+async def test_health_ready_ok(client) -> None:
+    """依赖都健康（测试库 + 真启动的队列 Worker）：ready 通过并给出分项。"""
+    body = _ok(await client.get("/api/v1/health/ready"))
+    assert body["status"] == "ready"
+    assert body["checks"]["db"]["status"] == "ok"
+    assert body["checks"]["rag_queue"]["status"] in ("ok", "degraded")
+    assert "latency_ms" in body["checks"]["db"]
+
+
+async def test_health_ready_db_down(client, monkeypatch) -> None:
+    """主库探测失败 → 503，body 里指出坏在 db 这一项（错误摘要不外泄堆栈）。"""
+    from app.routers import health as health_router
+
+    def _boom():
+        raise RuntimeError("database is gone")
+
+    monkeypatch.setattr(health_router.db, "get_session_factory", _boom)
+    resp = await client.get("/api/v1/health/ready")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "unready"
+    assert body["checks"]["db"]["status"] == "error"
+    assert "database is gone" in body["checks"]["db"]["detail"]
+
+
 async def test_user_crud(client) -> None:
     resp = await client.post(
         "/api/v1/users", json={"name": "Alice", "email": "alice@example.com"}

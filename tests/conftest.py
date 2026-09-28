@@ -15,7 +15,6 @@ from app.services import (
     admin_service,
     llm,
     provider_store,
-    rag_queue,
 )
 from app.services import (
     system_config as system_config_service,
@@ -88,14 +87,10 @@ async def client(
     monkeypatch.setattr(provider_store, "get_settings", lambda: test_settings)
     llm.reset_registry()
     
-    # 测试模式：同步执行 RAG 任务，保持向后兼容；同时禁用队列 worker
+    # 测试模式：路由层的 RAG 写入走同步执行（见 ai._sync_mode），不依赖后台消费；
+    # 但队列 Worker 照常启动/停止——/health/ready 真探 Worker 存活，测试环境
+    # 与生产的生命周期要保持一致。
     monkeypatch.setenv("APP_TEST_MODE", "true")
-    
-    async def _noop():
-        pass
-    
-    monkeypatch.setattr(rag_queue, "start_queue", _noop)
-    monkeypatch.setattr(rag_queue, "stop_queue", _noop)
 
     # A fresh file-backed engine so the whole process (including the
     # app's own init_models call) uses a single connection pool and the
