@@ -12,11 +12,11 @@ import { Card, message } from 'ant-design-vue';
 import { FileTextOutlined, PictureOutlined } from '@ant-design/icons-vue';
 import { ragApi } from '@/api';
 import { useBusinessStore } from '@/store/modules/business';
-import type { KnowledgeDetail } from '@/typings';
+import type { ImageHit, KnowledgeDetail } from '@/typings';
 import RichText from '@/components/RichText.vue';
 import { fileToDataUrl, isImageFile } from '@/utils/rich';
 
-type Mode = 'answer' | 'search';
+type Mode = 'answer' | 'search' | 'image';
 interface UiMsg {
   key: string;
   role: 'user' | 'assistant';
@@ -39,6 +39,7 @@ const topKOptions = [2, 4, 6, 8, 12].map((k) => ({ label: `Top ${k}`, value: k }
 const modeOptions = [
   { label: '知识问答', value: 'answer' },
   { label: '相似检索', value: 'search' },
+  { label: '文搜图', value: 'image' },
 ];
 
 /* ---------------- 知识问答（对话） ---------------- */
@@ -344,6 +345,36 @@ async function runSearch() {
   }
 }
 
+/* ---------------- 文搜图（跨模态：文字查询召回图片） ---------------- */
+const imgQuery = ref('');
+const imgSearching = ref(false);
+const imgHits = ref<ImageHit[]>([]);
+const imgSearched = ref(false);
+const imgElapsed = ref(0);
+const imgProviderUsed = ref('');
+
+async function runImageSearch() {
+  const q = imgQuery.value.trim();
+  if (!q) return message.warning('请输入查询');
+  if (imgSearching.value) return;
+  imgSearching.value = true;
+  const started = Date.now();
+  try {
+    const res = await ragApi.searchImages({ query: q, top_k: topK.value });
+    const data = (res as any)?.data ?? res;
+    imgHits.value = data?.items || [];
+    imgProviderUsed.value = data?.provider || '';
+    imgSearched.value = true;
+    imgElapsed.value = Date.now() - started;
+    if (!imgHits.value.length)
+      message.warning('未召回图片（可能图片尚未建向量，或需配置图片向量模型后重建）');
+  } catch (e: any) {
+    message.error(e?.detail || e?.message || '文搜图失败');
+  } finally {
+    imgSearching.value = false;
+  }
+}
+
 // 模式或 Top K 变化时，滚动到对话底部，保持输入焦点体验
 watch(mode, () => scrollBottom());
 
@@ -484,7 +515,7 @@ onMounted(() => {
       </div>
 
       <!-- ========== 相似检索 ========== -->
-      <div v-else class="search-wrap">
+      <div v-else-if="mode === 'search'" class="search-wrap">
         <a-space wrap style="margin-bottom: 12px">
           <a-input-search
             v-model:value="query"
@@ -526,6 +557,53 @@ onMounted(() => {
           </Card>
         </template>
         <a-empty v-else description="输入查询并点「检索」，查看命中的相似片段" />
+      </div>
+
+      <!-- ========== 文搜图（跨模态） ========== -->
+      <div v-else class="search-wrap">
+        <a-space wrap style="margin-bottom: 12px">
+          <a-input-search
+            v-model:value="imgQuery"
+            placeholder="输入文字，跨模态召回最相似的图片"
+            style="width: min(320px, 100%)"
+            enter-button="搜图"
+            :loading="imgSearching"
+            @search="runImageSearch"
+          />
+          <a-select v-model:value="topK" :options="topKOptions" style="width: 110px" />
+        </a-space>
+
+        <template v-if="imgSearched">
+          <a-space wrap style="margin-bottom: 8px">
+            <a-tag color="blue">召回 {{ imgHits.length }} 张图</a-tag>
+            <a-tag v-if="imgProviderUsed">provider：{{ imgProviderUsed }}</a-tag>
+            <a-tag v-if="imgElapsed">耗时 {{ imgElapsed }} ms</a-tag>
+          </a-space>
+          <a-empty v-if="!imgHits.length" description="没有召回图片，请确认已配置图片向量模型并完成图片入库/重建" />
+          <div v-else class="img-grid">
+            <Card
+              v-for="(hit, i) in imgHits"
+              :key="`${hit.knowledge_id}-${i}`"
+              :bordered="false"
+              size="small"
+              class="img-card"
+            >
+              <a-image :src="hit.image_url" :width="180" :height="130" class="img-thumb" />
+              <div class="img-meta">
+                <a-tag class="rank">[#{{ i + 1 }}]</a-tag>
+                <a class="img-title" @click="openDoc(hit.knowledge_id)">{{ hit.title }}</a>
+                <span class="img-score">{{ (Number(hit.score) || 0).toFixed(4) }}</span>
+              </div>
+              <a-progress
+                :percent="scorePercent(hit.score)"
+                :stroke-color="scoreColor(hit.score)"
+                :show-info="false"
+                size="small"
+              />
+            </Card>
+          </div>
+        </template>
+        <a-empty v-else description="输入文字并点「搜图」，跨模态召回最相似的图片" />
       </div>
     </Card>
 
@@ -753,6 +831,22 @@ onMounted(() => {
   white-space: pre-wrap; word-break: break-word;
   background: var(--app-panel-2); border-radius: 6px; padding: 8px 10px;
 }
+
+/* ---- 文搜图 ---- */
+.img-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.img-card { background: var(--app-panel-2); border-radius: 8px; }
+.img-card :deep(.ant-card-body) { padding: 10px; }
+.img-thumb :deep(.ant-image-img) {
+  width: 100%; height: 130px; object-fit: cover; border-radius: 6px;
+  border: 1px solid var(--app-border);
+}
+.img-meta { display: flex; align-items: center; gap: 6px; margin: 8px 0 4px; }
+.img-title {
+  flex: 1; font-weight: 600; color: var(--app-fg); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.img-title:hover { color: #1677ff; }
+.img-score { font-family: 'SF Mono', Consolas, monospace; font-size: 12px; color: var(--app-muted); }
 
 /* ---- 文档详情抽屉 ---- */
 .drawer-section { font-size: 14px; font-weight: 600; color: var(--app-fg); margin: 16px 0 8px; }

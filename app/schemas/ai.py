@@ -547,6 +547,31 @@ class KnowledgeSearchResponse(BaseModel):
     items: list[Citation]
 
 
+class KnowledgeImageSearchRequest(BaseModel):
+    """文搜图：拿一段文字去召回最相近的图片（跨模态）。"""
+
+    query: str = Field(..., min_length=1)
+    top_k: int = Field(default=8, ge=1, le=50)
+    provider: Provider | None = None
+
+
+class ImageHit(BaseModel):
+    """一条图片命中：落盘地址 + 归属文档 + 相似度分数。"""
+
+    knowledge_id: str
+    image_url: str
+    title: str
+    score: float
+
+
+class KnowledgeImageSearchResponse(BaseModel):
+    """文搜图响应：回实际用的 VL provider 与命中列表。"""
+
+    query: str
+    provider: Provider
+    items: list[ImageHit]
+
+
 class KnowledgeAnswerRequest(BaseModel):
     """知识库问答：先检索再组提示词交给模型，最后带引用回答。"""
 

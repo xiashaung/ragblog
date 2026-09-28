@@ -20,6 +20,7 @@ provider，改用一个 ``status`` 状态机描述它相对当前模型的向量
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import math
@@ -32,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import media_gc
 from ..config import get_settings
-from ..models import KnowledgeChunk, KnowledgeDoc
+from ..models import KnowledgeChunk, KnowledgeDoc, KnowledgeImage
 from ..schemas.ai import (
     ChatMessage,
     Citation,
@@ -266,8 +267,58 @@ def _default_provider() -> str:
 
 
 def _vector_dim() -> int:
-    """列维度：存进去的每个向量必须正好这么长。"""
+    """文本列维度：存进 ``knowledge_chunks.vector`` 的每个向量必须正好这么长。"""
     return get_settings().rag_vector_dim
+
+
+def _image_vector_dim() -> int:
+    """图片列维度：存进 ``knowledge_images.vector`` 的每个 VL 向量必须正好这么长。
+
+    与文本维度是两回事（两个嵌入模型、两个空间），故各配各的。
+    """
+    return get_settings().rag_image_vector_dim
+
+
+# 图片扩展名 -> MIME：把落盘的媒体文件还原成 data URL 时用来猜类型。
+_IMAGE_EXT_MIME = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "bmp": "image/bmp",
+}
+
+
+def _image_embed_source(image_url: str) -> str | None:
+    """把库里存的图片地址还原成能喂 VL 模型的源（data URL）。
+
+    绝对 ``http(s)`` 地址与 ``data:`` URL 原样返回（网关自己能取）；本服务的相对媒体
+    地址（``/media/uploads/x.png``）读回磁盘字节拼成 data URL——重建图片向量时手上
+    只有当初落库的 URL，没有原始字节，只能这样还原。读不到（文件已删 / 越界）返
+    ``None``，调用方据此跳过该图，不把空源喂给模型。
+    """
+    if not image_url:
+        return None
+    if image_url.startswith("data:") or image_url.startswith("http://") or image_url.startswith(
+        "https://"
+    ):
+        return image_url
+    settings = get_settings()
+    prefix = settings.media_url.rstrip("/")
+    if not image_url.startswith(prefix):
+        return None
+    rel = image_url[len(prefix) :].lstrip("/")
+    root = settings.media_root.resolve()
+    path = (root / rel).resolve()
+    try:
+        path.relative_to(root)  # 防目录穿越：还原后的路径必须仍在媒体根目录内
+    except ValueError:
+        return None
+    if not path.is_file():
+        return None
+    mime = _IMAGE_EXT_MIME.get(path.suffix.lstrip(".").lower(), "image/png")
+    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
 
 
 def _uses_pgvector(session: AsyncSession) -> bool:
@@ -470,6 +521,19 @@ async def upsert_document(
     await session.flush()
 
     chunks = await replace_vectors(session, doc, body, backend=backend)
+    # 独立图片文档（kind==image）：文字描述已成分片，这里再补一份图片 VL 向量供「文搜图」。
+    # 走 SAVEPOINT 的 best-effort：图片后端没配 / 回源失败 / 维度不符都只记
+    # ``image_index_error``，不翻转文档状态（描述式文本检索仍可用——即「两者共存」）。
+    # 本期只给独立图片建向量；PDF/DOCX 内嵌图仍走描述式（不在此列）。
+    meta_now = doc.meta or {}
+    if meta_now.get("kind") == "image":
+        img_urls = [u for u in (meta_now.get("images") or []) if isinstance(u, str) and u]
+        _n, img_err = await _index_images_safe(session, doc.id, img_urls)
+        if img_err:
+            meta = dict(doc.meta or {})
+            meta["image_index_error"] = img_err
+            doc.meta = meta
+            await session.flush()
     return KnowledgeIngestResponse(
         knowledge_id=doc.id,
         status=DocStatus(doc.status),
@@ -715,6 +779,9 @@ async def reindex_knowledge(session: AsyncSession, knowledge_id: str) -> dict | 
     doc.status = DocStatus.PROCESSING.value
     backend = llm.get_llm(feature="embedding")
     chunks = await replace_vectors(session, doc, doc.content, backend=backend)
+    # 带图文档顺带刷新图片向量（best-effort）：图片走另一个 VL 嵌入模型，
+    # 没配图片后端 / 源文件丢失都只记日志，不影响文本重建本身的成功。
+    await refresh_doc_images(session, doc.id)
     return {
         "knowledge_id": doc.id,
         "status": doc.status,
@@ -792,6 +859,126 @@ async def reindex_all_docs(session: AsyncSession) -> dict:
     }
 
 
+async def index_image_vectors(
+    session: AsyncSession,
+    knowledge_id: str,
+    items: Sequence[tuple[str, str | None]],
+    *,
+    backend: llm.LLMBackend,
+) -> int:
+    """为文档的图片建 / 重建 VL 向量：删旧行、批量 ``embed_images``、写 ``KnowledgeImage``。
+
+    ``items`` 是 ``(image_url, embed_source)`` 列表——``image_url`` 落库供展示与回源，
+    ``embed_source`` 是能喂 VL 模型的源（data URL / http URL，由调用方备好）；源为空的
+    项直接跳过（文件丢了就不再为它占一行）。录入与重建都走这里：图片向量的归属与
+    文本分片一致（按 ``knowledge_id`` 全删重灌），换 VL 模型重建时不会残留旧空间向量。
+    维度不符抛 ``ValueError``（与 :func:`replace_vectors` 同一取向：宁可不写也不写脏向量）。
+    返回写入的行数。
+    """
+    await session.execute(
+        delete(KnowledgeImage).where(KnowledgeImage.knowledge_id == knowledge_id)
+    )
+    pairs = [(url, src) for url, src in items if src]
+    if not pairs:
+        await session.flush()
+        return 0
+    dim = _image_vector_dim()
+    resp_items, _usage, _model = await backend.embed_images([src for _u, src in pairs])
+    if len(resp_items) != len(pairs):
+        raise ValueError(f"图片向量数({len(resp_items)})与图片数({len(pairs)})不一致")
+    count = 0
+    for (image_url, _src), item in zip(pairs, resp_items, strict=True):
+        embedding = item.embedding
+        if len(embedding) != dim:
+            raise _dim_error("图片", len(embedding), dim)
+        session.add(
+            KnowledgeImage(
+                knowledge_id=knowledge_id, image_url=image_url, vector=embedding
+            )
+        )
+        count += 1
+    await session.flush()
+    return count
+
+
+async def _index_images_safe(
+    session: AsyncSession, knowledge_id: str, urls: list[str]
+) -> tuple[int, str | None]:
+    """在一个 SAVEPOINT 内为文档建图片向量：失败只回滚这一段。
+
+    为何用嵌套事务而不是直接 ``session.rollback()``：图片向量常与文本分片同属一个
+    未提交事务（录入时 :func:`upsert_document` 刚 add 了 chunk，重建时刚改过 doc），一遇
+    异常就回滚整个会话会把文本改动一并抹掉——而“图片向量失败不影响文本入库”恰恰要求
+    保留文本。SAVEPOINT 只撤销本段对 ``knowledge_images`` 的删/写，外层事务不受牵连。
+
+    返 ``(写入行数, 错误摘要或 None)``：全部图都回源不到（文件丢失）时静默跳过（重建场景
+    常态，不当错误）；但维度不符 / 后端未配等真异常会记一条供后台排障。
+    """
+    items = [(url, _image_embed_source(url)) for url in urls]
+    if not any(src for _u, src in items):
+        return 0, None
+    try:
+        async with session.begin_nested():
+            backend = llm.get_llm(feature="image_embedding")
+            count = await index_image_vectors(session, knowledge_id, items, backend=backend)
+        return count, None
+    except Exception as exc:  # noqa: BLE001 - 图片失败不抛出给主流程
+        logger.warning("图片向量索引失败（%s）：%s", knowledge_id, exc)
+        return 0, f"{type(exc).__name__}: {exc}"
+
+
+async def refresh_doc_images(session: AsyncSession, knowledge_id: str) -> int:
+    """按库里已存的 ``image_url`` 回源重算某文档的图片向量（best-effort）。
+
+    供单文档重建时顺带刷新图片向量用：全程走 SAVEPOINT，图片后端没配 / 回源失败
+    / 维度不符都只记日志并返回 0，绝不把异常或回滚带给文本重建流程（一次图片刷新
+    不该让整篇重建失败）。没有任何图片行时直接返回 0，不去构造图片后端。
+    """
+    urls = (
+        await session.execute(
+            select(KnowledgeImage.image_url).where(
+                KnowledgeImage.knowledge_id == knowledge_id
+            )
+        )
+    ).scalars().all()
+    if not urls:
+        return 0
+    count, _err = await _index_images_safe(session, knowledge_id, list(urls))
+    return count
+
+
+async def reindex_all_images(session: AsyncSession) -> dict:
+    """换图片嵌入模型后全库重算图片向量（REINDEX_ALL_IMAGES worker 用）。
+
+    逐个「有图片向量记录」的文档重算：把库里存的 ``image_url`` 还原成源喂 VL 模型，
+    重建该文档的 ``knowledge_images`` 行。单文档失败（维度不符 / 回源异常）只记
+    ``failed`` 并继续下一篇，不因一篇报错中断全库。返回处理计数。
+    """
+    backend = llm.get_llm(feature="image_embedding")
+    doc_ids = (
+        await session.scalars(select(KnowledgeImage.knowledge_id).distinct())
+    ).all()
+    reindexed, failed = 0, 0
+    for doc_id in doc_ids:
+        urls = (
+            await session.execute(
+                select(KnowledgeImage.image_url).where(
+                    KnowledgeImage.knowledge_id == doc_id
+                )
+            )
+        ).scalars().all()
+        items = [(url, _image_embed_source(url)) for url in urls]
+        try:
+            await index_image_vectors(session, doc_id, items, backend=backend)
+            await session.commit()
+            reindexed += 1
+        except Exception as exc:  # noqa: BLE001 - 单文档失败不中断全库
+            await session.rollback()
+            failed += 1
+            logger.warning("图片向量重建：%s 失败：%s", doc_id, exc)
+    return {"docs": len(doc_ids), "reindexed": reindexed, "failed": failed}
+
+
 async def delete_knowledge(session: AsyncSession, knowledge_id: str) -> bool:
     """删一份文档及其全部分片，返是否真的删了（不存在不算错）。
 
@@ -804,6 +991,10 @@ async def delete_knowledge(session: AsyncSession, knowledge_id: str) -> bool:
     image_urls = media_gc.doc_image_urls(doc.meta)
     await session.execute(
         delete(KnowledgeChunk).where(KnowledgeChunk.knowledge_id == knowledge_id)
+    )
+    # 图片向量行与分片同为「按文档归属」的子表，删文档必须一并清掉，否则留下孤儿向量。
+    await session.execute(
+        delete(KnowledgeImage).where(KnowledgeImage.knowledge_id == knowledge_id)
     )
     await session.delete(doc)
     await session.flush()
@@ -1172,6 +1363,92 @@ async def search(
         for i, (doc_id, source, text, score) in enumerate(hits)
     ]
     return KnowledgeSearchResponse(query=payload.query, provider=provider, items=items)
+
+
+async def search_images(
+    session: AsyncSession,
+    query: str,
+    top_k: int,
+    *,
+    provider: Provider | str | None = None,
+) -> list[dict]:
+    """文搜图：把查询文本转到 VL 空间，在 ``knowledge_images`` 上取余弦 top-k。
+
+    跨模态的关键在「查与存同模型同空间」：查询文本走 ``image_embedding`` 后端的
+    :meth:`embed_images`（入参是普通字符串，OpenAI 兼容 ``/embeddings`` 会把它当文本、
+    用与图片相同的 VL 模型编码），与入库时算图片向量取的是同一端点、同一模型、
+    同一维度，才能拿文字向量去比图片向量。
+
+    Postgres 走库内 ``<=>`` 余弦距离（走 HNSW），SQLite 退 Python 逐行打分（与
+    :func:`_search_pgvector` / :func:`_search_in_python` 同构）。只返「已学习」（indexed）
+    文档的图：与文本检索一致，未建好的不参与召回。返 ``[{knowledge_id, image_url,
+    title, score}]``，按分数从高到低。
+    """
+    if top_k <= 0 or not query.strip():
+        return []
+    backend = llm.get_llm(provider, feature="image_embedding")
+    # 查询走图片嵌入通道：与图片向量同模型同端点同维度（mock 下也对齐 rag_image_vector_dim）。
+    emb_items, _usage, _model = await backend.embed_images([query])
+    query_emb = emb_items[0].embedding
+    dim = _image_vector_dim()
+    if len(query_emb) != dim:
+        raise _dim_error("图片查询", len(query_emb), dim)
+
+    if _uses_pgvector(session):
+        distance = KnowledgeImage.vector.cosine_distance(query_emb)
+        rows = (
+            await session.execute(
+                select(
+                    KnowledgeImage.knowledge_id,
+                    KnowledgeImage.image_url,
+                    KnowledgeDoc.title,
+                    (1.0 - distance).label("score"),
+                )
+                .join(KnowledgeDoc, KnowledgeDoc.id == KnowledgeImage.knowledge_id)
+                .where(
+                    KnowledgeDoc.status == DocStatus.INDEXED.value,
+                    KnowledgeImage.vector.is_not(None),
+                )
+                .order_by(distance)
+                .limit(top_k)
+            )
+        ).all()
+        return [
+            {
+                "knowledge_id": knowledge_id,
+                "image_url": image_url,
+                "title": title,
+                "score": float(score),
+            }
+            for knowledge_id, image_url, title, score in rows
+        ]
+
+    rows = (
+        await session.execute(
+            select(
+                KnowledgeImage.knowledge_id,
+                KnowledgeImage.image_url,
+                KnowledgeImage.vector,
+                KnowledgeDoc.title,
+            ).join(KnowledgeDoc, KnowledgeDoc.id == KnowledgeImage.knowledge_id).where(
+                KnowledgeDoc.status == DocStatus.INDEXED.value
+            )
+        )
+    ).all()
+    scored = [
+        (knowledge_id, image_url, title, _cosine(query_emb, vector or []))
+        for knowledge_id, image_url, vector, title in rows
+    ]
+    scored.sort(key=lambda hit: hit[3], reverse=True)
+    return [
+        {
+            "knowledge_id": knowledge_id,
+            "image_url": image_url,
+            "title": title,
+            "score": score,
+        }
+        for knowledge_id, image_url, title, score in scored[:top_k]
+    ]
 
 
 RAG_SYSTEM_PROMPT = (

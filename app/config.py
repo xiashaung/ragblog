@@ -97,6 +97,8 @@ class ProviderConfig(BaseModel):
     base_url: str | None = None
     chat_model: str = ""
     embedding_model: str = ""
+    # 图片向量化（文搜图）用的 VL 嵌入模型名；与文本 embedding_model 分开。
+    image_embedding_model: str = ""
 
 
 class Settings(BaseSettings):
@@ -244,6 +246,13 @@ class Settings(BaseSettings):
     # 换 embedding 模型导致维度变化时，改这里并重跑 ``alembic upgrade head``
     # （迁移会把维度不符的旧向量备份后置空，之后需要重建索引）。
     rag_vector_dim: int = 1024
+
+    # --- 图片向量化（文搜图）---
+    # ``knowledge_images.vector`` 的列维度：VL 嵌入模型（如 qwen3-vl-embedding）
+    # 把图片与文字嵌到同一向量空间，与上面的文本 chunk 向量列彼此独立、不可混用。
+    # 换图片嵌入模型导致维度变化时，改这里并重跑 ``alembic upgrade head``（迁移会把
+    # 维度不符的旧图片向量备份后置空，之后需重建）。默认 1536，按网关实测维度校正。
+    rag_image_vector_dim: int = 1536
 
     # RAG 后台队列的并发 Worker 数。单 Worker 时一个大文档会堵住整条队列；
     # 也不宜过大——向量化是外部 HTTP/本地模型调用，并行太多会打满下游。

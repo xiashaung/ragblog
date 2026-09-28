@@ -161,6 +161,21 @@ export interface KnowledgeStats {
   by_status: { status: string; docs: number; chunks: number }[];
 }
 
+/** 文搜图的一条命中：图片向量与查询文本在同一 VL 空间比对后的结果 */
+export interface ImageHit {
+  knowledge_id: string;
+  image_url: string;
+  title: string;
+  score: number;
+}
+
+/** POST /ai/knowledge/search-images 返回 */
+export interface ImageSearchResult {
+  query: string;
+  provider: string;
+  items: ImageHit[];
+}
+
 export interface UploadResult {
   status: 'success' | 'error';
   knowledge_id?: string | null;

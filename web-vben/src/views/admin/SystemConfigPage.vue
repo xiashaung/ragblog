@@ -45,6 +45,7 @@ async function loadProviderOptions() {
 const chatProvider = ref('');
 const ragProvider = ref('');
 const embeddingProvider = ref('');
+const imageEmbeddingProvider = ref('');
 const rerankEnabled = ref(false);
 const rerankProvider = ref('');
 
@@ -60,6 +61,7 @@ async function loadConfigs() {
     chatProvider.value = configs.chat_provider ?? '';
     ragProvider.value = configs.rag_provider ?? '';
     embeddingProvider.value = configs.embedding_provider ?? '';
+    imageEmbeddingProvider.value = configs.image_embedding_provider ?? '';
     rerankEnabled.value = configs.rerank_enabled === 'true';
     rerankProvider.value = configs.rerank_provider ?? '';
 
@@ -90,12 +92,16 @@ async function updateConfig(key: string, value: string) {
       await http.patch('/system/config/rerank-enabled', { value });
     } else if (key === 'embedding_provider') {
       await http.patch('/system/config/embedding_provider', { value });
+    } else if (key === 'image_embedding_provider') {
+      await http.patch('/system/config/image_embedding_provider', { value });
     } else if (key === 'rerank_provider') {
       await http.patch('/system/config/rerank-provider', { value });
     }
     // 换嵌入模型会触发全库重建（后端钩子已自动入队），提示用户关注文档状态推进
     if (key === 'embedding_provider') {
       message.success('已触发全库重建，文档将陆续从「待重建」变为「已学习」');
+    } else if (key === 'image_embedding_provider') {
+      message.success('已触发图片向量全库重建，稍后可在「文搜图」验证召回');
     } else {
       message.success('配置已更新');
     }
@@ -201,6 +207,26 @@ onMounted(() => {
             </a-tooltip>
           </div>
         </div>
+
+        <div class="config-item">
+          <div class="config-header">
+            <div class="config-info">
+              <span class="config-name">图片向量模型（文搜图）</span>
+              <span class="config-desc">用于多模态图片向量化，默认跟随向量嵌入模型；改动会触发图片向量全库重建</span>
+            </div>
+            <a-tooltip :title="lockedTip">
+              <a-select
+                v-model:value="imageEmbeddingProvider"
+                :options="providerOptions"
+                :disabled="!canManage"
+                :loading="saving"
+                placeholder="请选择已配置的模型"
+                style="width: min(240px, 100%)"
+                @change="(v: string) => updateConfig('image_embedding_provider', v)"
+              />
+            </a-tooltip>
+          </div>
+        </div>
       </div>
 
       <div class="config-category">
@@ -250,6 +276,7 @@ onMounted(() => {
           <li><strong>先接入后选择</strong>：本页下拉只展示「模型接入」中已配置的 provider</li>
           <li><strong>对话/问答模型</strong>：可分别选择不同 provider，互不影响</li>
           <li><strong>向量模型</strong>：用于文档向量化，本地部署推荐 ollama 或 mlx</li>
+          <li><strong>图片向量模型</strong>：用于文搜图的 VL 嵌入，默认跟随向量嵌入模型，改动会重建图片向量</li>
           <li><strong>重排序模型</strong>：启用后检索结果会经所选 provider 精排，提升相关性</li>
         </ul>
       </div>

@@ -23,6 +23,7 @@ class SystemConfig:
     KEY_CHAT_PROVIDER = "chat_provider"
     KEY_RAG_PROVIDER = "rag_provider"
     KEY_EMBEDDING_PROVIDER = "embedding_provider"
+    KEY_IMAGE_EMBEDDING_PROVIDER = "image_embedding_provider"
     KEY_RERANK_ENABLED = "rerank_enabled"
     KEY_RERANK_PROVIDER = "rerank_provider"
 
@@ -110,6 +111,11 @@ class SystemConfig:
                 cls.KEY_EMBEDDING_PROVIDER,
                 default_provider,
                 "向量嵌入使用的 embedding provider（用于知识库向量化）",
+            ),
+            (
+                cls.KEY_IMAGE_EMBEDDING_PROVIDER,
+                default_provider,
+                "图片向量化（文搜图）使用的 VL 嵌入 provider（默认跟随向量嵌入）",
             ),
             (
                 cls.KEY_RERANK_ENABLED,

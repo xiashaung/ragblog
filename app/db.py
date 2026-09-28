@@ -31,16 +31,52 @@ session_factory: async_sessionmaker[AsyncSession] | None = None
 
 # pgvector 余弦索引名（迁移与 init_models 共用一个名字，避免两处漂移）
 HNSW_INDEX_NAME = "ix_knowledge_chunks_vector_hnsw"
+# 图片向量表的 pgvector 余弦索引名（与文本 chunk 索引彼此独立）
+IMAGE_HNSW_INDEX_NAME = "ix_knowledge_images_vector_hnsw"
 # pg_trgm 词法索引名（混合检索的词法腿用它加速 similarity/word_similarity）
 TRGM_INDEX_NAME = "ix_knowledge_chunks_text_trgm"
 logger = logging.getLogger(__name__)
 
-_COLUMN_TYPE_SQL = """
+
+def _column_type_sql(table: str) -> str:
+    """按表名拼一段查 ``vector`` 列实际类型的 SQL（chunks / images 共用）。"""
+    return f"""
 select format_type(a.atttypid, a.atttypmod)
   from pg_attribute a
   join pg_class c on c.oid = a.attrelid
- where c.relname = 'knowledge_chunks' and a.attname = 'vector' and a.attnum > 0
+ where c.relname = '{table}' and a.attname = 'vector' and a.attnum > 0
 """
+
+
+def _ensure_vector_hnsw(
+    conn: Connection, *, table: str, index_name: str, wanted_dim: int
+) -> bool:
+    """为某张带 ``vector`` 列的表建 HNSW 余弦索引（幂等、best-effort）。
+
+    列还是旧的 ``json`` 类型时跳过（转换由迁移负责）；维度与 ``wanted_dim``
+    不一致时也跳过只记警告——这种情况下旧向量已不可信，需要重建而不是盲建。
+    """
+    declared = conn.execute(text(_column_type_sql(table))).scalar()
+    if not declared or not declared.startswith("vector"):
+        logger.warning("%s.vector 当前是 %s，HNSW 索引待迁移后再建", table, declared)
+        return False
+    stored_dim = declared.partition("(")[2].rstrip(")")
+    if stored_dim.isdigit() and int(stored_dim) != wanted_dim:
+        logger.warning(
+            "%s 列维度 vector(%s) 与期望 %s 不一致，对齐后重跑迁移",
+            table,
+            stored_dim,
+            wanted_dim,
+        )
+        return False
+    conn.execute(
+        text(
+            f"CREATE INDEX IF NOT EXISTS {index_name} ON {table}"
+            " USING hnsw (vector vector_cosine_ops)"
+            " WITH (m = 16, ef_construction = 64)"
+        )
+    )
+    return True
 
 
 def ensure_pgvector_schema(conn: Connection) -> bool:
@@ -60,30 +96,21 @@ def ensure_pgvector_schema(conn: Connection) -> bool:
     except Exception as exc:  # noqa: BLE001 - 没权限时降级启动，不拖垮服务
         logger.warning("跳过 pgvector 扩展创建：%s", exc)
         return False
-    declared = conn.execute(text(_COLUMN_TYPE_SQL)).scalar()
-    if not declared or not declared.startswith("vector"):
-        logger.warning(
-            "knowledge_chunks.vector 当前是 %s，HNSW 索引待迁移后再建", declared
-        )
-        return False
-    stored_dim = declared.partition("(")[2].rstrip(")")
-    wanted = get_settings().rag_vector_dim
-    if stored_dim.isdigit() and int(stored_dim) != wanted:
-        logger.warning(
-            "列维度 vector(%s) 与 APP_RAG_VECTOR_DIM=%s 不一致，对齐后重跑迁移",
-            stored_dim,
-            wanted,
-        )
-        return False
-    # 1024 维在 pgvector HNSW 的维度上限内；m / ef_construction 是建图参数
-    conn.execute(
-        text(
-            f"CREATE INDEX IF NOT EXISTS {HNSW_INDEX_NAME} ON knowledge_chunks"
-            " USING hnsw (vector vector_cosine_ops)"
-            " WITH (m = 16, ef_construction = 64)"
-        )
+    settings = get_settings()
+    # 文本 chunk 向量列（两张表各自建索引，互不影响：一张没建成功不拖累另一张）
+    ok_chunks = _ensure_vector_hnsw(
+        conn,
+        table="knowledge_chunks",
+        index_name=HNSW_INDEX_NAME,
+        wanted_dim=settings.rag_vector_dim,
     )
-    return True
+    _ensure_vector_hnsw(
+        conn,
+        table="knowledge_images",
+        index_name=IMAGE_HNSW_INDEX_NAME,
+        wanted_dim=settings.rag_image_vector_dim,
+    )
+    return ok_chunks
 
 
 def ensure_trgm_schema(conn: Connection) -> bool:
@@ -277,6 +304,7 @@ async def dispose_engine() -> None:
 __all__ = [
     "Base",
     "HNSW_INDEX_NAME",
+    "IMAGE_HNSW_INDEX_NAME",
     "TRGM_INDEX_NAME",
     "init_db",
     "get_engine",

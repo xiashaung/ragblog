@@ -205,6 +205,16 @@ class LLMBackend(Protocol):
         """
         ...
 
+    async def embed_images(
+        self, images: list[str], *, model: str | None = None
+    ) -> tuple[list[EmbeddingItem], Usage, str]:
+        """VL 图片嵌入：把图片（data URL / http URL）转向量，返同 :meth:`embed`。
+
+        供「文搜图」用：图片入库走这里算 ``knowledge_images.vector``，查询文本则
+        走 :meth:`embed`——两者必须落在同一 VL 模型、同一向量空间，跨模比对才成立。
+        """
+        ...
+
     async def embeddings(self, req: EmbeddingRequest) -> EmbeddingResponse:
         """协议里的默认实现：把 :meth:`embed` 的结果拼成对外的响应体。
 
@@ -452,6 +462,29 @@ class OpenAIBackend:
         )
         return items, usage, resp.model
 
+    async def embed_images(
+        self, images: list[str], *, model: str | None = None
+    ) -> tuple[list[EmbeddingItem], Usage, str]:
+        """VL 图片嵌入：与 :meth:`embed` 同走 OpenAI 兼容 ``/embeddings``。
+
+        网关把图片（data URL / http URL）当 ``input`` 的一项直接接受，所以这里
+        与文本嵌入共用 SDK 与重试。模型名取 provider 上的 ``image_embedding_model``，
+        没填则回落文本 ``embedding_model``（有些模型本就图文一体）。
+        """
+        cfg = self._current()
+        model = model or cfg.image_embedding_model or cfg.embedding_model
+        resp = await _with_retry(
+            f"embed_images({self.provider.value})",
+            lambda: self._client.embeddings.create(model=model, input=images),
+        )
+        items = [EmbeddingItem(index=d.index, embedding=list(d.embedding)) for d in resp.data]
+        usage = Usage(
+            prompt_tokens=resp.usage.prompt_tokens if resp.usage else 0,
+            completion_tokens=0,
+            total_tokens=resp.usage.total_tokens if resp.usage else 0,
+        )
+        return items, usage, resp.model
+
     async def embeddings(self, req: EmbeddingRequest) -> EmbeddingResponse:
         """沿用协议里的默认实现（把 :meth:`embed` 包成响应体）。"""
         items, usage, model = await self.embed(req.input, model=req.model)
@@ -553,6 +586,28 @@ class MockBackend:
         usage = Usage(prompt_tokens=prompt, completion_tokens=0, total_tokens=prompt)
         return items, usage, model
 
+    async def embed_images(
+        self, images: list[str], *, model: str | None = None
+    ) -> tuple[list[EmbeddingItem], Usage, str]:
+        """图片也走哈希派生，但维度对齐 ``rag_image_vector_dim``（图片列的维度）。
+
+        与 :meth:`embed` 共用哈希算法保证确定性，只是列维度不同：测试里图片向量
+        要能塞进 ``knowledge_images.vector``，不能拿文本维度去充。"""
+        cfg = _provider_cfg(self.provider)
+        model = model or cfg.image_embedding_model or cfg.embedding_model
+        dim = get_settings().rag_image_vector_dim
+
+        def _vec(text: str) -> list[float]:
+            digest = hashlib.sha256(text.encode("utf-8")).digest()
+            base = [digest[i % len(digest)] / 255 for i in range(dim)]
+            norm = sum(x * x for x in base) ** 0.5 or 1.0
+            return [round(x / norm, 6) for x in base]
+
+        items = [EmbeddingItem(index=i, embedding=_vec(t)) for i, t in enumerate(images)]
+        prompt = sum(len(t) for t in images)
+        usage = Usage(prompt_tokens=prompt, completion_tokens=0, total_tokens=prompt)
+        return items, usage, model
+
     async def embeddings(self, req: EmbeddingRequest) -> EmbeddingResponse:
         """沿用协议里的默认实现。"""
         items, usage, model = await self.embed(req.input, model=req.model)
@@ -625,6 +680,12 @@ class FallbackBackend:
     ) -> tuple[list[EmbeddingItem], Usage, str]:
         """嵌入不降级：换模型就换了向量空间，存与查互不认。"""
         return await self._primary.embed(inputs, model=model)
+
+    async def embed_images(
+        self, images: list[str], *, model: str | None = None
+    ) -> tuple[list[EmbeddingItem], Usage, str]:
+        """图片嵌入同嵌入一样不降级，直接透传主后端。"""
+        return await self._primary.embed_images(images, model=model)
 
     async def embeddings(self, req: EmbeddingRequest) -> EmbeddingResponse:
         """沿用协议里的默认实现（把 :meth:`embed` 包成响应体）。"""
@@ -716,6 +777,14 @@ def embedding_model(provider: Provider | str | None = None, *, feature: str = "e
     否则「概览」页会报一个 .env 里早已换掉的名字。
     """
     return _provider_cfg(resolve_name(provider, feature=feature)).embedding_model
+
+
+def image_embedding_model(
+    provider: Provider | str | None = None, *, feature: str = "image_embedding"
+) -> str:
+    """图片 VL 嵌入模型名（回落文本 embedding_model，都没配则空串）。"""
+    cfg = _provider_cfg(resolve_name(provider, feature=feature))
+    return cfg.image_embedding_model or cfg.embedding_model
 
 
 def reset_registry() -> None:

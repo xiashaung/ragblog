@@ -28,6 +28,7 @@ interface ProviderConfig {
   api_key: string;
   chat_model: string;
   embedding_model: string;
+  image_embedding_model: string;
   rerank_model: string;
 }
 
@@ -44,6 +45,7 @@ const formState = reactive({
   api_key: '',
   chat_model: '',
   embedding_model: '',
+  image_embedding_model: '',
   rerank_model: '',
 });
 
@@ -54,6 +56,7 @@ const tableColumns = [
   { title: '服务地址', dataIndex: 'base_url', key: 'base_url', width: 260, ellipsis: true },
   { title: '对话模型', dataIndex: 'chat_model', key: 'chat_model', width: 180, ellipsis: true },
   { title: '向量模型', dataIndex: 'embedding_model', key: 'embedding_model', width: 180, ellipsis: true },
+  { title: '图片向量模型', dataIndex: 'image_embedding_model', key: 'image_embedding_model', width: 180, ellipsis: true },
   { title: '重排序模型', dataIndex: 'rerank_model', key: 'rerank_model', width: 180, ellipsis: true },
   { title: '操作', key: 'actions', width: 130, fixed: 'right' as const },
 ];
@@ -71,6 +74,7 @@ async function loadProviderConfigs() {
       api_key: cfg?.api_key ?? '',
       chat_model: cfg?.chat_model ?? '',
       embedding_model: cfg?.embedding_model ?? '',
+      image_embedding_model: cfg?.image_embedding_model ?? '',
       rerank_model: cfg?.rerank_model ?? '',
     }));
   } catch (e: any) {
@@ -91,6 +95,7 @@ function openCreateModal() {
     api_key: '',
     chat_model: '',
     embedding_model: '',
+    image_embedding_model: '',
     rerank_model: '',
   });
   showModal.value = true;
@@ -106,6 +111,7 @@ function openEditModal(record: ProviderConfig) {
     api_key: record.api_key,
     chat_model: record.chat_model,
     embedding_model: record.embedding_model,
+    image_embedding_model: record.image_embedding_model,
     rerank_model: record.rerank_model,
   });
   showModal.value = true;
@@ -142,6 +148,7 @@ async function saveProvider() {
       api_key: formState.api_key,
       chat_model: formState.chat_model,
       embedding_model: formState.embedding_model,
+      image_embedding_model: formState.image_embedding_model,
       rerank_model: formState.rerank_model,
     };
 
@@ -213,7 +220,7 @@ onMounted(() => {
         :loading="loading"
         :pagination="false"
         row-key="provider"
-        :scroll="{ x: 1200 }"
+        :scroll="{ x: 1400 }"
         size="middle"
       >
         <template #bodyCell="{ column, record }">
@@ -297,6 +304,16 @@ onMounted(() => {
               v-model:value="formState.embedding_model"
               placeholder="text-embedding-3-small"
             />
+          </a-form-item>
+
+          <a-form-item label="图片向量模型 (Image Embedding Model)">
+            <a-input
+              v-model:value="formState.image_embedding_model"
+              placeholder="例如：qwen3-vl-embedding，用于文搜图的 VL 嵌入模型"
+            />
+            <template #help>
+              <span style="color: #999; font-size: 12px">多模态图片向量化（文搜图）使用的嵌入模型，需与文字查询同一向量空间</span>
+            </template>
           </a-form-item>
 
           <a-form-item label="重排序模型 (Rerank Model)">

@@ -25,6 +25,7 @@ import type {
     DataSourceItem,
     DataSourcePayload,
     DataSourceTestResult,
+    ImageSearchResult,
     KnowledgeDetail,
     KnowledgeDocItem,
     KnowledgeFetchResult,
@@ -101,6 +102,12 @@ export const adminApi = {
     // 设置向量嵌入 provider
     setEmbeddingProvider: (value: string) => httpAdmin.request<string>({
         url: '/v1/system/config/embedding_provider',
+        method: 'patch',
+        data: { value }
+    }).then(res => res.data),
+    // 设置图片向量（文搜图）provider：改动会触发图片向量全库重建
+    setImageEmbeddingProvider: (value: string) => httpAdmin.request<string>({
+        url: '/v1/system/config/image_embedding_provider',
         method: 'patch',
         data: { value }
     }).then(res => res.data),
@@ -246,6 +253,9 @@ export const ragApi = {
         }),
     search: (data: { query: string; top_k: number }) =>
         request<any>({url: '/ai/knowledge/search', method: 'post', data}),
+    // 文搜图：文字查询跨模态召回图片，返回 { query, provider, items: ImageHit[] }
+    searchImages: (data: { query: string; top_k: number }) =>
+        request<ImageSearchResult>({url: '/ai/knowledge/search-images', method: 'post', data}),
     // images：可选的多模态图片（http(s) 或 base64 data URL），仅在对话后端为视觉模型时生效
     answer: (data: { query: string; top_k: number; images?: string[] }) =>
         request<any>({url: '/ai/knowledge/answer', method: 'post', data}),

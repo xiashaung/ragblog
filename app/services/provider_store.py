@@ -31,6 +31,7 @@ FEATURE_KEYS: dict[str, str] = {
     "chat": "chat_provider",
     "rag": "rag_provider",
     "embedding": "embedding_provider",
+    "image_embedding": "image_embedding_provider",
     "rerank": "rerank_provider",
 }
 # 重排序开关的 config key（与 services.system_config 里的常量一致）
@@ -57,6 +58,7 @@ async def refresh(session: AsyncSession) -> None:
             "api_key": row.api_key or "",
             "chat_model": row.chat_model or "",
             "embedding_model": row.embedding_model or "",
+            "image_embedding_model": row.image_embedding_model or "",
             "rerank_model": row.rerank_model or "",
         }
 
@@ -137,7 +139,15 @@ def get_provider_config(name: str) -> ProviderConfig | None:
         base_url=row["base_url"] or fallback.base_url,
         chat_model=row["chat_model"] or fallback.chat_model,
         embedding_model=row["embedding_model"] or fallback.embedding_model,
+        image_embedding_model=row["image_embedding_model"]
+        or fallback.image_embedding_model,
     )
+
+
+def get_image_embedding_model(name: str) -> str:
+    """provider 上挂的图片 VL 嵌入模型名（没配置返回空串）。"""
+    row = _provider_rows.get(name.strip().lower())
+    return row["image_embedding_model"] if row else ""
 
 
 def get_rerank_model(name: str) -> str:

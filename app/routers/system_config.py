@@ -36,6 +36,7 @@ class ProviderConfigSchema(BaseModel):
     api_key: str = ""
     chat_model: str = ""
     embedding_model: str = ""
+    image_embedding_model: str = ""
     rerank_model: str = ""
 
 router = APIRouter(prefix="/system/config", tags=["系统配置"])
@@ -70,6 +71,9 @@ async def get_all_models(
         "chat_provider": all_configs.get(Cfg.KEY_CHAT_PROVIDER, fallback),
         "rag_provider": all_configs.get(Cfg.KEY_RAG_PROVIDER, fallback),
         "embedding_provider": all_configs.get(Cfg.KEY_EMBEDDING_PROVIDER, fallback),
+        "image_embedding_provider": all_configs.get(
+            Cfg.KEY_IMAGE_EMBEDDING_PROVIDER, fallback
+        ),
         "rerank_enabled": all_configs.get(
             Cfg.KEY_RERANK_ENABLED, str(settings.rag_rerank_enabled)
         ),
@@ -244,6 +248,7 @@ async def update_config_by_key(
     # 验证 key 是否在允许的列表中
     allowed_keys = [
         system_config.SystemConfig.KEY_EMBEDDING_PROVIDER,
+        system_config.SystemConfig.KEY_IMAGE_EMBEDDING_PROVIDER,
     ]
     
     if key not in allowed_keys:
@@ -255,6 +260,9 @@ async def update_config_by_key(
     descriptions = {
         system_config.SystemConfig.KEY_EMBEDDING_PROVIDER: (
             "向量嵌入使用的 embedding provider（用于知识库向量化）"
+        ),
+        system_config.SystemConfig.KEY_IMAGE_EMBEDDING_PROVIDER: (
+            "图片向量化（文搜图）使用的 VL 嵌入 provider"
         ),
     }
 
@@ -291,6 +299,24 @@ async def update_config_by_key(
                     created_at=time.time(),
                 ),
             )
+
+    # 图片 VL 嵌入 provider 变更：图片向量与新模型不再匹配，全库重建图片向量。
+    # 与文本重建互不牵连：只重算 knowledge_images，不动文档状态（文本向量仍可用）。
+    if (
+        key == system_config.SystemConfig.KEY_IMAGE_EMBEDDING_PROVIDER
+        and row.value != old_value
+    ):
+        if os.environ.get("APP_TEST_MODE", "false").lower() == "true":
+            await rag.reindex_all_images(session)
+        else:
+            await rag_queue.get_queue().enqueue(
+                session,
+                rag_queue.RAGTask(
+                    task_type=rag_queue.TaskType.REINDEX_ALL_IMAGES,
+                    payload={},
+                    created_at=time.time(),
+                ),
+            )
     return row.value
 
 
@@ -316,6 +342,7 @@ async def get_providers(
             "api_key": row.api_key or "",
             "chat_model": row.chat_model or "",
             "embedding_model": row.embedding_model or "",
+            "image_embedding_model": row.image_embedding_model or "",
             "rerank_model": row.rerank_model or "",
         }
     
@@ -330,6 +357,7 @@ async def get_providers(
                 "api_key": cfg.api_key or "",
                 "chat_model": cfg.chat_model or "",
                 "embedding_model": cfg.embedding_model or "",
+                "image_embedding_model": cfg.image_embedding_model or "",
                 "rerank_model": "",
             }
     
@@ -367,6 +395,7 @@ async def create_provider(
         api_key=data.api_key,
         chat_model=data.chat_model,
         embedding_model=data.embedding_model,
+        image_embedding_model=data.image_embedding_model or "",
         rerank_model=data.rerank_model or "",
     )
     session.add(new_config)
@@ -400,6 +429,7 @@ async def save_provider(
         existing.api_key = data.api_key
         existing.chat_model = data.chat_model
         existing.embedding_model = data.embedding_model
+        existing.image_embedding_model = data.image_embedding_model or ""
         existing.rerank_model = data.rerank_model or ""
     else:
         # 内置 provider 首次保存：新建记录
@@ -410,6 +440,7 @@ async def save_provider(
             api_key=data.api_key,
             chat_model=data.chat_model,
             embedding_model=data.embedding_model,
+            image_embedding_model=data.image_embedding_model or "",
             rerank_model=data.rerank_model or "",
         ))
 

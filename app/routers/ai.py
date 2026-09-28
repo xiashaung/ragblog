@@ -56,6 +56,8 @@ from ..schemas.ai import (
     KnowledgeDocUpdateRequest,
     KnowledgeFetchRequest,
     KnowledgeFetchResponse,
+    KnowledgeImageSearchRequest,
+    KnowledgeImageSearchResponse,
     KnowledgeIngestRequest,
     KnowledgeIngestResponse,
     KnowledgeListResponse,
@@ -147,6 +149,7 @@ async def list_providers(
                 "base_url": cfg.base_url,
                 "chat_model": cfg.chat_model,
                 "embedding_model": cfg.embedding_model,
+                "image_embedding_model": cfg.image_embedding_model,
                 "api_key_configured": bool(cfg.api_key)
                 or name in ("ollama", "mlx", "mock"),
             }
@@ -673,6 +676,24 @@ async def search(
 ) -> KnowledgeSearchResponse:
     """向量/混合检索：参数开关（融合、精排）都在请求体里，流程见 ``rag.search``。"""
     return await services.rag.search(session, req)
+
+
+@router.post("/knowledge/search-images", response_model=KnowledgeImageSearchResponse)
+async def search_images(
+    req: KnowledgeImageSearchRequest,
+    session: AsyncSession = Depends(get_db),
+    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_READ)),
+) -> KnowledgeImageSearchResponse:
+    """文搜图：拿一段文字去召回最相近的图片（跨模态），流程见 ``rag.search_images``。
+
+    只命「已学习」（indexed）图片文档；实际用的 VL provider 从后端回读，方便
+    前端展示“这张图是用哪个模型搜出来的”。
+    """
+    hits = await services.rag.search_images(
+        session, req.query, req.top_k, provider=req.provider
+    )
+    provider = get_llm(req.provider, feature="image_embedding").provider
+    return KnowledgeImageSearchResponse(query=req.query, provider=provider, items=hits)
 
 
 @router.post("/knowledge/answer", response_model=KnowledgeAnswerResponse)

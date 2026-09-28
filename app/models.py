@@ -73,6 +73,10 @@ class ItemRow(Base):
 # Postgres 用真 pgvector 列（距离在库内算、可建 HNSW 索引），SQLite 退化成
 # JSON（距离在 Python 算），所以 ORM 层代码不管跑在哪边都一致。
 _VECTOR_TYPE = Vector(get_settings().rag_vector_dim).with_variant(JSON(), "sqlite")
+# 图片向量列（VL 嵌入模型，维度独立于文本 chunk 的 ``_VECTOR_TYPE``）。
+_IMAGE_VECTOR_TYPE = Vector(get_settings().rag_image_vector_dim).with_variant(
+    JSON(), "sqlite"
+)
 
 
 class KnowledgeDoc(Base):
@@ -116,6 +120,32 @@ class KnowledgeChunk(Base):
     vector: Mapped[list[float] | None] = mapped_column(
         _VECTOR_TYPE, default=list, nullable=True
     )
+
+
+class KnowledgeImage(Base):
+    """一张图片及其 VL 向量，文搜图命中的就是这一行。
+
+    与 ``KnowledgeChunk`` 分属两个向量空间（图片用 VL 嵌入模型、文本用文本
+    嵌入模型），故单独建表，绝不混入 ``knowledge_chunks.vector``。一张图一行（
+    图片不切块）；``image_url`` 是落盘到媒体目录后的访问地址，与文档
+    ``meta["images"]`` 里的引用一致。无外键约束（与分片表同一取舍），删文档时
+    服务层先删本表行。``vector`` 为 NULL 表示「有图但没可用向量」（维度不符 /
+    重建到一半），文搜图会跳过它。
+    """
+
+    __tablename__ = "knowledge_images"
+
+    id: Mapped[str] = mapped_column(
+        String(80), primary_key=True, default=lambda: _uid("kbi")
+    )
+    knowledge_id: Mapped[str] = mapped_column(
+        String(64), index=True, nullable=False
+    )
+    image_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    vector: Mapped[list[float] | None] = mapped_column(
+        _IMAGE_VECTOR_TYPE, default=list, nullable=True
+    )
+    created_at: Mapped[float] = mapped_column(Float, default=_now)
 
 
 class RagTaskRow(Base):
@@ -351,6 +381,9 @@ class ProviderConfigRow(Base):
     api_key: Mapped[str] = mapped_column(String(500), default="")
     chat_model: Mapped[str] = mapped_column(String(200), default="")
     embedding_model: Mapped[str] = mapped_column(String(200), default="")
+    # 图片向量化（文搜图）用的 VL 嵌入模型名（如 qwen3-vl-embedding）；
+    # 与文本 embedding_model 分开，只有被选为图片嵌入 provider 时参与拼请求。
+    image_embedding_model: Mapped[str] = mapped_column(String(200), default="")
     rerank_model: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[float] = mapped_column(Float, default=_now)
     updated_at: Mapped[float] = mapped_column(Float, default=_now, onupdate=_now)
@@ -423,6 +456,7 @@ __all__ = [
     "ItemRow",
     "KnowledgeDoc",
     "KnowledgeChunk",
+    "KnowledgeImage",
     "RoleRow",
     "AdminRoleRow",
     "AdminUser",

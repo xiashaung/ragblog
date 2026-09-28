@@ -57,6 +57,7 @@ class TaskType(str, Enum):
     UPDATE = "update"  # 更新文档（含重建）
     REINDEX = "reindex"  # 单文档重建索引
     REINDEX_ALL = "reindex_all"  # 换嵌入模型后全库强制重建
+    REINDEX_ALL_IMAGES = "reindex_all_images"  # 换图片 VL 嵌入模型后全库重建图片向量
 
 
 @dataclass
@@ -218,6 +219,7 @@ class RAGQueue:
             TaskType.UPDATE.value: self._do_update,
             TaskType.REINDEX.value: self._do_reindex,
             TaskType.REINDEX_ALL.value: self._do_reindex_all,
+            TaskType.REINDEX_ALL_IMAGES.value: self._do_reindex_all_images,
         }
         handler = handlers.get(task_type)
         if handler is None:
@@ -287,6 +289,10 @@ class RAGQueue:
     async def _do_reindex_all(self, session: AsyncSession, payload: dict) -> dict:
         """执行换嵌入模型后的全库强制重建（逐文档推进状态）。"""
         return await rag.reindex_all_docs(session)
+
+    async def _do_reindex_all_images(self, session: AsyncSession, payload: dict) -> dict:
+        """执行换图片 VL 嵌入模型后的全库图片向量重建（与文本重建互不牵连）。"""
+        return await rag.reindex_all_images(session)
 
     async def enqueue(
         self,

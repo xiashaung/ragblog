@@ -630,6 +630,136 @@ async def test_upload_image_returns_media_url_without_ingesting(client, admin_he
     assert "不支持的图片格式" in resp.json()["message"]
 
 
+async def test_upload_image_creates_vector_and_is_searchable(client, admin_headers):
+    """图片入库两者共存：文字描述进 chunk，图片本体进 ``knowledge_images`` 并可文搜图。"""
+    from sqlalchemy import select
+
+    from app.config import get_settings
+    from app.db import get_session_factory
+    from app.models import KnowledgeImage
+
+    resp = await client.post(
+        "/api/v1/upload",
+        files={"file": ("cat.png", b"\x89PNG\r\n\x1a\nmeow-bytes", "image/png")},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = _ok(resp)
+    assert body["status"] == "success"
+    kb = body["knowledge_id"]
+
+    # 图片向量行落库：一张一行，维度对齐 ``rag_image_vector_dim``
+    image_dim = get_settings().rag_image_vector_dim
+    async with get_session_factory()() as s:
+        rows = (
+            await s.scalars(select(KnowledgeImage).where(KnowledgeImage.knowledge_id == kb))
+        ).all()
+    assert len(rows) == 1
+    assert rows[0].vector is not None and len(rows[0].vector) == image_dim
+    assert rows[0].image_url.startswith("/media/uploads/")
+
+    # 文搜图：查询文本进 VL 空间后能召回这张图（mock 下无语义，只验链路）
+    hits = _ok(
+        await client.post(
+            "/api/v1/ai/knowledge/search-images",
+            json={"query": "一张猫的图", "top_k": 5},
+            headers=admin_headers,
+        )
+    )
+    assert hits["provider"] == "mock"
+    assert {h["knowledge_id"] for h in hits["items"]} == {kb}
+
+    # 删文档级联清掉图片向量行（不留孤儿）
+    await client.delete(f"/api/v1/ai/knowledge/{kb}", headers=admin_headers)
+    async with get_session_factory()() as s:
+        left = (
+            await s.scalars(select(KnowledgeImage).where(KnowledgeImage.knowledge_id == kb))
+        ).all()
+    assert left == []
+
+
+async def test_image_vector_failure_keeps_text_chunks(client, admin_headers, monkeypatch):
+    """图片向量失败（维度不符）不阻断文本入库：文档仍 ``indexed``，只记 ``image_index_error``。"""
+    from sqlalchemy import select
+
+    from app.db import get_session_factory
+    from app.models import KnowledgeDoc, KnowledgeImage
+    from app.services import rag
+
+    # 把图片列维度改成一个 mock 给不出的值：embed_images 仍返 rag_image_vector_dim 长向量，
+    # 与 64 不符 → 写向量时报错，但被 SAVEPOINT 兜住，文本 chunk 不受牵连。
+    monkeypatch.setattr(rag, "_image_vector_dim", lambda: 64)
+
+    resp = await client.post(
+        "/api/v1/upload",
+        files={"file": ("err.png", b"\x89PNG\r\n\x1a\nbytes", "image/png")},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = _ok(resp)
+    assert body["status"] == "success"  # 文本入库成功
+    kb = body["knowledge_id"]
+
+    async with get_session_factory()() as s:
+        doc = await s.get(KnowledgeDoc, kb)
+        imgs = (
+            await s.scalars(select(KnowledgeImage).where(KnowledgeImage.knowledge_id == kb))
+        ).all()
+        status_value = doc.status
+        image_error = (doc.meta or {}).get("image_index_error")
+    assert status_value == "indexed"  # 状态不因图片失败而翻转
+    assert imgs == []  # 维度不符的图片向量被回滚
+    assert image_error and "64" in image_error
+
+    await client.delete(f"/api/v1/ai/knowledge/{kb}", headers=admin_headers)
+
+
+async def test_image_embedding_provider_change_reindexes_images(client, admin_headers):
+    """改 ``image_embedding_provider`` 触发图片向量全库重建（同步模式直接跑完）。"""
+    from sqlalchemy import select
+
+    from app.db import get_session_factory
+    from app.models import KnowledgeImage
+
+    resp = await client.post(
+        "/api/v1/upload",
+        files={"file": ("dog.png", b"\x89PNG\r\n\x1a\nbark-bytes", "image/png")},
+        headers=admin_headers,
+    )
+    kb = _ok(resp)["knowledge_id"]
+
+    async def image_count() -> int:
+        async with get_session_factory()() as s:
+            return len(
+                (
+                    await s.scalars(
+                        select(KnowledgeImage).where(KnowledgeImage.knowledge_id == kb)
+                    )
+                ).all()
+            )
+
+    assert await image_count() == 1
+
+    resp = await client.patch(
+        "/api/v1/system/config/image_embedding_provider",
+        json={"value": "deepseek"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    # 重建后图片向量仍在（确定性 mock，行数不变），且文档仍可被文搜图
+    assert await image_count() == 1
+    hits = _ok(
+        await client.post(
+            "/api/v1/ai/knowledge/search-images",
+            json={"query": "狗", "top_k": 5},
+            headers=admin_headers,
+        )
+    )
+    assert kb in {h["knowledge_id"] for h in hits["items"]}
+
+    await client.delete(f"/api/v1/ai/knowledge/{kb}", headers=admin_headers)
+
+
 async def test_knowledge_status_filter_and_full_rebuild(client, admin_headers):
     """列表可按状态过滤；全库重建把文档拉回 indexed；换嵌入模型触发重建。"""
     from sqlalchemy import update
