@@ -97,7 +97,9 @@ def _sync_mode() -> bool:
 
 
 @router.get("/providers", response_model=list[dict])
-async def list_providers() -> list[dict]:
+async def list_providers(
+    _admin_id: str = Depends(deps.require_admin_session),
+) -> list[dict]:
     """把各 provider 的默认值透出去，让前端预选下拉框、并在真 provider 没配
     API Key 时能提醒用户。
 
@@ -137,6 +139,7 @@ async def list_providers() -> list[dict]:
 async def chat(
     req: ChatRequest,
     _session: AsyncSession = Depends(get_db),
+    _admin_id: str = Depends(deps.require_admin_session),
 ) -> ChatResponse:
     """对话入口：``stream=true`` 走 NDJSON 流，否则一次返完整响应。
 
@@ -471,7 +474,10 @@ async def get_rag_task(
 @router.get("/knowledge", response_model=KnowledgeListResponse)
 async def list_knowledge(
     keyword: str | None = Query(default=None, description="按标题 / 正文模糊匹配"),
-    status: str | None = Query(default=None, description="按向量化状态过滤：indexed/pending/processing/failed"),
+    status: str | None = Query(
+        default=None,
+        description="按向量化状态过滤：indexed/pending/processing/failed",
+    ),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=200),
     session: AsyncSession = Depends(get_db),

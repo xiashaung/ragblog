@@ -543,7 +543,7 @@ def _lines(body: str) -> list[dict]:
     return [json.loads(line) for line in body.splitlines() if line.strip()]
 
 
-async def test_chat_endpoint_streams_tool_events(client, monkeypatch):
+async def test_chat_endpoint_streams_tool_events(client, admin_headers, monkeypatch):
     """走一遍真实 HTTP：工具调用与命中链接要以 NDJSON 事件到达前端。"""
 
     async def fake_search(query, count=None):
@@ -563,6 +563,7 @@ async def test_chat_endpoint_streams_tool_events(client, monkeypatch):
     res = await client.post(
         "/api/v1/ai/chat",
         json={"messages": [{"role": "user", "content": "今天天气"}], "stream": True},
+        headers=admin_headers,
     )
     assert res.status_code == HTTPStatus.OK, res.text
     lines = _lines(res.text)
@@ -577,7 +578,7 @@ async def test_chat_endpoint_streams_tool_events(client, monkeypatch):
     assert all(isinstance(c.get("content") or "", str) for c in lines)
 
 
-async def test_non_stream_chat_also_supports_tools(client, monkeypatch):
+async def test_non_stream_chat_also_supports_tools(client, admin_headers, monkeypatch):
     """非流式与流式共用一份循环：别让「联网」只在一条路径上可用。
 
     顺手拿两轮工具验证引用去重：两次搜索命中同一篇时，链接只能列一次。
@@ -602,6 +603,7 @@ async def test_non_stream_chat_also_supports_tools(client, monkeypatch):
     res = await client.post(
         "/api/v1/ai/chat",
         json={"messages": [{"role": "user", "content": "说说北京饮食"}]},
+        headers=admin_headers,
     )
     assert res.status_code == HTTPStatus.OK, res.text
     body = res.json()["data"]
@@ -615,7 +617,7 @@ async def test_non_stream_chat_also_supports_tools(client, monkeypatch):
     ]
 
 
-async def test_backend_without_tools_support_still_streams(client, monkeypatch):
+async def test_backend_without_tools_support_still_streams(client, admin_headers, monkeypatch):
     """未实现 tools 参数的后端（如 mock）不该因为多传了关键字参数就挂。"""
 
     res = await client.post(
@@ -626,6 +628,7 @@ async def test_backend_without_tools_support_still_streams(client, monkeypatch):
             "stream": True,
             "web_mode": "auto",
         },
+        headers=admin_headers,
     )
     assert res.status_code == HTTPStatus.OK, res.text
     lines = _lines(res.text)

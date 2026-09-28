@@ -39,6 +39,14 @@ def _lines(body: str) -> list[dict]:
 async def test_chat_session_endpoints_require_login(client):
     res = await client.get("/api/v1/ai/chat/sessions")
     assert res.status_code == HTTPStatus.UNAUTHORIZED
+    # 对话本体与 provider 目录也需登录（与文档口径一致）
+    res = await client.post(
+        "/api/v1/ai/chat",
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert res.status_code == HTTPStatus.UNAUTHORIZED
+    res = await client.get("/api/v1/ai/providers")
+    assert res.status_code == HTTPStatus.UNAUTHORIZED
 
 
 async def test_session_round_trip_with_auto_title(client, console):
@@ -167,7 +175,7 @@ async def test_append_to_missing_session_is_404(client, console):
     assert res.status_code == HTTPStatus.NOT_FOUND
 
 
-async def test_chat_stream_emits_ndjson_chunks(client):
+async def test_chat_stream_emits_ndjson_chunks(client, admin_headers):
     res = await client.post(
         "/api/v1/ai/chat",
         json={
@@ -175,6 +183,7 @@ async def test_chat_stream_emits_ndjson_chunks(client):
             "messages": [{"role": "user", "content": "说点什么"}],
             "stream": True,
         },
+        headers=admin_headers,
     )
     assert res.status_code == 200, res.text
     chunks = _lines(res.text)
@@ -187,7 +196,7 @@ async def test_chat_stream_emits_ndjson_chunks(client):
 
 
 async def test_chat_stream_reports_upstream_error_as_last_chunk(
-    client, monkeypatch
+    client, admin_headers, monkeypatch
 ):
     """上游中途断流：已发的内容保留，报错作为最后一行 chunk 到达。"""
 
@@ -210,6 +219,7 @@ async def test_chat_stream_reports_upstream_error_as_last_chunk(
             "messages": [{"role": "user", "content": "x"}],
             "stream": True,
         },
+        headers=admin_headers,
     )
     assert res.status_code == 200, res.text  # 流已开始，状态码改不了
     chunks = _lines(res.text)
