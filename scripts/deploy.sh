@@ -50,6 +50,26 @@ echo "==> 5/5 重启服务"
 ./scripts/stop.sh
 ./scripts/start.sh
 
+# start.sh 只探活（/health，进程能应答即过）；这里再跑一遍就绪探针（/health/ready
+# 真查主库 SELECT 1 + RAG 队列 Worker），任一依赖没通就让部署以非零退出——
+# 避免「进程起来了但库/队列没就绪」被当成部署成功。
+# curl -f 遇 503 非 2xx 会失败，因此只有真的 ready 才跳出。
+echo "==> 就绪检查（/health/ready）"
+HEALTH_PORT="${PORT:-8000}"
+ready=0
+for _ in $(seq 1 15); do
+  if curl -sf "http://127.0.0.1:${HEALTH_PORT}/api/v1/health/ready" > /dev/null; then
+    ready=1
+    echo "    OK：主库与 RAG 队列均就绪"
+    break
+  fi
+  sleep 2
+done
+if [ "$ready" != "1" ]; then
+  echo "!! 就绪检查超时：/health/ready 未通过，排查看日志：tail -n 30 logs/app.log" >&2
+  exit 1
+fi
+
 cat << 'TIP'
 
 部署完成。速查：
