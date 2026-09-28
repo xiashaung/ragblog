@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import db
 from ..config import get_settings
+from ..metrics import rag_tasks_finished_total
 from ..models import KnowledgeDoc, RagTaskRow
 from ..schemas.ai import (
     KnowledgeDocUpdateRequest,
@@ -190,6 +191,7 @@ class RAGQueue:
         error: str | None,
     ) -> None:
         """把终态（success/failed）与结果/错误写回任务行。"""
+        rag_tasks_finished_total.inc((status_,))
         async with db.get_session_factory()() as session:
             row = await session.get(RagTaskRow, task_id)
             if row is None:

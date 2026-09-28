@@ -25,12 +25,14 @@ import openai
 from openai import AsyncOpenAI
 from tenacity import (
     AsyncRetrying,
+    RetryCallState,
     retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
 
 from ..config import ProviderConfig, get_settings
+from ..metrics import llm_fallback_total, llm_retries_total
 from ..schemas.ai import (
     ChatChunk,
     ChatMessage,
@@ -119,6 +121,16 @@ async def _with_retry(what: str, call: Callable[[], Awaitable[T]]) -> T:
         # 直接传「返回协程的 lambda」会把协程对象当成返回值原样交出。
         return await call()
 
+    def _note_retry(state: RetryCallState) -> None:
+        # 每次退避重试都计一次指标再留日志（指标给告警，日志给现场）
+        llm_retries_total.inc()
+        logger.warning(
+            "LLM %s 第 %s 次尝试失败，退避后重试：%s",
+            what,
+            state.attempt_number,
+            state.outcome.exception() if state.outcome else None,
+        )
+
     retryer = AsyncRetrying(
         stop=stop_after_attempt(max(1, settings.llm_retry_max_attempts)),
         wait=wait_exponential(
@@ -127,12 +139,7 @@ async def _with_retry(what: str, call: Callable[[], Awaitable[T]]) -> T:
         ),
         retry=retry_if_exception(_is_retryable),
         reraise=True,
-        before_sleep=lambda state: logger.warning(
-            "LLM %s 第 %s 次尝试失败，退避后重试：%s",
-            what,
-            state.attempt_number,
-            state.outcome.exception() if state.outcome else None,
-        ),
+        before_sleep=_note_retry,
     )
     return await retryer(attempt)
 
@@ -590,6 +597,7 @@ class FallbackBackend:
         except Exception as exc:
             if not _is_retryable(exc):
                 raise
+            llm_fallback_total.inc()
             logger.warning(
                 "LLM 主端 %s 重试耗尽，降级到 %s：%s",
                 self._primary.provider,

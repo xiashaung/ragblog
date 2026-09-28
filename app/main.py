@@ -32,6 +32,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from . import db, services
 from .config import get_settings
 from .logging_setup import RequestIdMiddleware, setup_logging
+from .metrics import MetricsMiddleware
 from .responses import (
     _http_exception_handler,
     _validation_exception_handler,
@@ -48,6 +49,9 @@ from .routers import (
     system_config,
     upload,
     users,
+)
+from .routers import (
+    metrics as metrics_router,
 )
 from .schemas.envelope import ApiResponse
 from .services import rag_queue
@@ -215,8 +219,14 @@ def create_app() -> FastAPI:
     # 请求 ID 中间件最后注册 = 最外层执行：不管响应最内层是谁发的，
     # X-Request-ID 头都能补上；contextvar 也从这里开始覆盖整个请求周期。
     application.add_middleware(RequestIdMiddleware)
+    # 指标中间件再套一层（最外层）：耗时与状态码统计覆盖包括信封、
+    # CORS 预检在内的完整 ASGI 路径。
+    application.add_middleware(MetricsMiddleware)
 
     application.include_router(health.router, prefix="/api/v1", tags=["health"])
+    # /metrics 挂根路径（不在 /api/v1 下）：Prometheus 抓取配置惯例路径，
+    # 也方便反代层单独给抓取器开白名单。
+    application.include_router(metrics_router.router)
     application.include_router(ai.router, prefix="/api/v1/ai", tags=["ai"])
     application.include_router(
         analytics.router, prefix="/api/v1/analytics", tags=["analytics"]

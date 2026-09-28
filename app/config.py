@@ -124,6 +124,9 @@ class Settings(BaseSettings):
     # 全局日志级别（app 与 uvicorn 共用一套格式，见 logging_setup）。
     # 设成 DEBUG 会连带放大所有未单独设级别的三方库日志，线上慎开。
     log_level: str = "INFO"
+    # /metrics 的访问令牌（Authorization: Bearer <token> 或 X-Metrics-Token）；
+    # 留空 = 不鉴权直接暴露（仅限内网抓取；公网部署务必配）。
+    metrics_token: str = ""
     # 默认通配——此时 main.py 会强制关闭 CORS 凭据模式（浏览器本来也不接受
     # 通配 + credentials 的组合）。需要 cookie/Authorization 跨域携带时，
     # 把具体来源逐个列进来。

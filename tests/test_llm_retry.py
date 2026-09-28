@@ -6,6 +6,7 @@ import httpx
 import openai
 import pytest
 
+from app import metrics as app_metrics
 from app.config import Settings
 from app.schemas.ai import ChatMessage, Provider
 from app.services import llm
@@ -75,10 +76,13 @@ async def test_chat_retries_transient_then_succeeds(monkeypatch: pytest.MonkeyPa
         [_status_error(openai.RateLimitError, 429), _completion("hi")]
     )
     backend._client = client
+    before = app_metrics.llm_retries_total.value()
     content, _, _, model = await backend.chat([ChatMessage(role="user", content="q")])
     assert content == "hi"
     assert model == "test-model"
     assert state["calls"] == 2
+    # 重试埋点：失败一次 = 重试计数 +1
+    assert app_metrics.llm_retries_total.value() == before + 1
 
 
 async def test_chat_gives_up_after_max_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,10 +188,12 @@ async def test_fallback_switches_on_transient_failure(
     _patch_settings(monkeypatch)
     primary = _FailingPrimary(_status_error(openai.RateLimitError, 429))
     backend = llm.FallbackBackend(primary, llm.MockBackend(Provider.MOCK))  # type: ignore[arg-type]
+    before = app_metrics.llm_fallback_total.value()
     content, _, _, _ = await backend.chat([ChatMessage(role="user", content="q")])
     # MockBackend 的回复以「[provider:模型]」开头，说明确实换到备胎答的
     assert content.startswith("[mock:")
     assert backend.provider is Provider.OPENAI
+    assert app_metrics.llm_fallback_total.value() == before + 1
 
 
 async def test_fallback_not_triggered_on_client_error(
