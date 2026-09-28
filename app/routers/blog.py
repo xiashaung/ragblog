@@ -22,6 +22,8 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import deps, services
+from ..audit import Actor
+from ..audit import event as audit_event
 from ..config import get_settings
 from ..db import get_db
 from ..rbac import Permission
@@ -87,10 +89,12 @@ async def list_posts(
 async def create_post(
     req: BlogPostCreate,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.BLOG_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.BLOG_MANAGE)),
 ) -> dict:
     """新建文章（先落草稿；发布是显式动作，见 publish）。"""
-    return await services.blog.create_post(session, req)
+    data = await services.blog.create_post(session, req)
+    audit_event(Actor.from_principal(principal), "blog.create", data["slug"])
+    return data
 
 
 # 分类路由要注在 /{post_id} 之前：GET /admin/blogs/categories 会被
@@ -160,12 +164,13 @@ async def update_post(
     post_id: str,
     req: BlogPostUpdate,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.BLOG_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.BLOG_MANAGE)),
 ) -> dict:
     """局部更新；已发布文章改了标题 / 正文会自动重同步索引。"""
     data = await services.blog.update_post(session, post_id, req)
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文章不存在")
+    audit_event(Actor.from_principal(principal), "blog.update", data["slug"])
     return data
 
 
@@ -173,23 +178,25 @@ async def update_post(
 async def delete_post(
     post_id: str,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.BLOG_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.BLOG_MANAGE)),
 ) -> None:
     """删文章，连带清掉它同步出的知识文档。"""
     if not await services.blog.delete_post(session, post_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文章不存在")
+    audit_event(Actor.from_principal(principal), "blog.delete", post_id)
 
 
 @admin_router.post("/{post_id}/publish", response_model=BlogPostItem)
 async def publish_post(
     post_id: str,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.BLOG_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.BLOG_MANAGE)),
 ) -> dict:
     """发布：正文同步进知识库（要调嵌入模型），前台可见、可被 AI 检索。"""
     data = await services.blog.publish_post(session, post_id)
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文章不存在")
+    audit_event(Actor.from_principal(principal), "blog.publish", data["slug"])
     return data
 
 
@@ -197,12 +204,13 @@ async def publish_post(
 async def unpublish_post(
     post_id: str,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.BLOG_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.BLOG_MANAGE)),
 ) -> dict:
     """下线：从知识库摘掉索引，回到草稿状态。"""
     data = await services.blog.unpublish_post(session, post_id)
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文章不存在")
+    audit_event(Actor.from_principal(principal), "blog.unpublish", data["slug"])
     return data
 
 

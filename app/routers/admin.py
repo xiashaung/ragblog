@@ -17,7 +17,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import deps, services
+from .. import audit, deps, services
 from ..config import get_settings
 from ..db import get_db
 from ..models import AdminUser
@@ -116,9 +116,11 @@ async def onboard(
             session, payload.username, payload.password, payload.name
         )
     except ValueError as exc:
+        audit.event(None, "account.bootstrap", payload.username, result="fail")
         raise HTTPException(
             status.HTTP_409_CONFLICT, str(exc)
         ) from exc
+    audit.event(None, "account.bootstrap", payload.username)
     return {"admin_created": True, "username": payload.username}
 
 
@@ -142,10 +144,15 @@ async def login(
         result = await services.admin_service.login(session, payload.username, payload.password)
     except ValueError as exc:
         login_limiter.record_failure(key)
+        audit.event(None, "auth.login", payload.username, result="fail")
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, str(exc)
         ) from exc
     login_limiter.record_success(key)
+    admin = result.admin
+    audit.event(
+        audit.Actor(admin.id, admin.username), "auth.login", admin.id
+    )
     expires_in = int((result.expires_at - time.time()) or 0)
     response.set_cookie(
         "admin_token",
@@ -163,13 +170,14 @@ async def logout(
     response: Response,
     request: Request,
     session: AsyncSession = Depends(get_db),
-    admin_id: str = Depends(deps.require_admin_session),
+    principal: Principal = Depends(deps.require_admin_principal),
 ) -> dict:
     """登出：删掉本次 token 对应的会话行，并抹掉 cookie。"""
     token = _extract_token(request)
     await services.admin_service.logout(session, token)
     response.delete_cookie("admin_token")
-    return {"logged_out": True, "admin_id": admin_id}
+    audit.event(audit.Actor.from_principal(principal), "auth.logout", principal.admin_id)
+    return {"logged_out": True, "admin_id": principal.admin_id}
 
 
 @router.post("/refresh", response_model=AdminToken)
@@ -237,8 +245,20 @@ async def change_my_password(
         )
     except ValueError as exc:
         login_limiter.record_failure(key)
+        audit.event(
+            audit.Actor.from_principal(principal),
+            "account.password_change",
+            principal.admin_id,
+            result="fail",
+        )
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     login_limiter.record_success(key)
+    audit.event(
+        audit.Actor.from_principal(principal),
+        "account.password_change",
+        principal.admin_id,
+        revoked_sessions=revoked,
+    )
     return {"changed": True, "revoked_sessions": revoked}
 
 
@@ -255,12 +275,13 @@ async def list_live_sessions(
 async def revoke_live_session(
     session_id: str,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.SESSION_REVOKE)),
+    principal: Principal = Depends(deps.require_permission(Permission.SESSION_REVOKE)),
 ) -> dict:
     """强制下线某个会话（token 立即失效）。"""
     ok = await services.admin_service.revoke_session(session, session_id)
     if not ok:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "会话不存在或已失效")
+    audit.event(audit.Actor.from_principal(principal), "session.revoke", session_id)
     return {"revoked": True}
 
 
@@ -299,6 +320,7 @@ async def create_role(
         permissions=payload.permissions,
         actor=principal,
     )
+    audit.event(audit.Actor.from_principal(principal), "role.create", role.code)
     return await services.rbac_service.role_payload(session, role)
 
 
@@ -318,6 +340,7 @@ async def update_role(
         permissions=payload.permissions,
         actor=principal,
     )
+    audit.event(audit.Actor.from_principal(principal), "role.update", role.code)
     return await services.rbac_service.role_payload(session, role)
 
 
@@ -325,10 +348,11 @@ async def update_role(
 async def delete_role(
     role_id: str,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.ROLE_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.ROLE_MANAGE)),
 ) -> dict:
     """删角色（内置角色 / 还有成员时拒删）。"""
     await services.rbac_service.delete_role(session, role_id)
+    audit.event(audit.Actor.from_principal(principal), "role.delete", role_id)
     return {"deleted": True}
 
 
@@ -372,6 +396,13 @@ async def create_account(
         role_codes=payload.roles,
         actor=principal,
     )
+    audit.event(
+        audit.Actor.from_principal(principal),
+        "account.create",
+        admin.id,
+        username=payload.username,
+        roles=payload.roles,
+    )
     return await _account_payload(session, admin)
 
 
@@ -391,6 +422,13 @@ async def update_account(
         password=payload.password,
         actor=principal,
     )
+    # 只记改了哪些字段（字段名），password 只作为键名出现、绝不落口令值
+    audit.event(
+        audit.Actor.from_principal(principal),
+        "account.update",
+        admin.id,
+        changed=sorted(payload.model_dump(exclude_unset=True)),
+    )
     return await _account_payload(session, admin)
 
 
@@ -405,6 +443,12 @@ async def set_account_roles(
     admin = await services.rbac_service.set_account_roles(
         session, account_id, payload.roles, actor=principal
     )
+    audit.event(
+        audit.Actor.from_principal(principal),
+        "account.roles",
+        admin.id,
+        roles=payload.roles,
+    )
     return await _account_payload(session, admin)
 
 
@@ -416,4 +460,5 @@ async def delete_account(
 ) -> dict:
     """删账号（不能自删、不能删最后一个可用超管）；``actor`` 用于这两项判定。"""
     await services.rbac_service.delete_account(session, account_id, actor=principal)
+    audit.event(audit.Actor.from_principal(principal), "account.delete", account_id)
     return {"deleted": True}

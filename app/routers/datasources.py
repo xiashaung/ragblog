@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import deps, services
+from .. import audit, deps, services
 from ..db import get_db
 from ..rbac import Permission
 from ..schemas.datasource import (
@@ -37,7 +37,7 @@ async def list_data_sources(
 async def create_data_source(
     payload: DataSourceCreate,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(
+    principal: Principal = Depends(
         deps.require_permission(Permission.DATASOURCE_MANAGE)
     ),
 ) -> DataSourceOut:
@@ -51,6 +51,9 @@ async def create_data_source(
         enabled=payload.enabled,
         description=payload.description,
     )
+    audit.event(
+        audit.Actor.from_principal(principal), "datasource.create", row.name
+    )
     return services.datasource.to_out(row)
 
 
@@ -59,7 +62,7 @@ async def update_data_source(
     source_id: str,
     payload: DataSourceUpdate,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(
+    principal: Principal = Depends(
         deps.require_permission(Permission.DATASOURCE_MANAGE)
     ),
 ) -> DataSourceOut:
@@ -74,6 +77,13 @@ async def update_data_source(
         enabled=payload.enabled,
         description=payload.description,
     )
+    # 只记改了哪些字段（如 url 会改动口令，但字段名不含值）
+    audit.event(
+        audit.Actor.from_principal(principal),
+        "datasource.update",
+        row.name,
+        changed=sorted(payload.model_dump(exclude_unset=True)),
+    )
     return services.datasource.to_out(row)
 
 
@@ -81,12 +91,13 @@ async def update_data_source(
 async def delete_data_source(
     source_id: str,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(
+    principal: Principal = Depends(
         deps.require_permission(Permission.DATASOURCE_MANAGE)
     ),
 ) -> dict:
     """删数据源（连带释放它的连接池）；id 不存在由服务层抛 400。"""
     await services.datasource.delete(session, source_id)
+    audit.event(audit.Actor.from_principal(principal), "datasource.delete", source_id)
     return {"deleted": True}
 
 

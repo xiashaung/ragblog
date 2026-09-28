@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import deps, services
+from .. import audit, deps, services
 from ..config import Provider, get_settings
 from ..db import get_db
 from ..rbac import Permission
@@ -634,11 +634,12 @@ async def replace_vectors(
 async def delete_knowledge(
     knowledge_id: str,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.KNOWLEDGE_MANAGE)),
 ) -> dict[str, int]:
     """删一篇文档（连带它的分块）；id 不存在返 404。"""
     if not await services.rag.delete_knowledge(session, knowledge_id):
         raise HTTPException(status_code=404, detail="知识文档不存在")
+    audit.event(audit.Actor.from_principal(principal), "knowledge.delete", knowledge_id)
     return {"deleted": 1}
 
 

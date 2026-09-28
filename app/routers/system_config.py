@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import deps
+from .. import audit, deps
 from ..config import Provider, get_settings
 from ..db import get_db
 from ..models import ProviderConfigRow
@@ -116,7 +116,7 @@ async def get_rag_provider(
 async def set_chat_provider(
     req: ConfigUpdateRequest,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> str:
     """设置 AI 对话的默认 LLM provider。
     
@@ -131,6 +131,9 @@ async def set_chat_provider(
         req.value,
         description="AI 对话使用的 LLM provider（如：openai, deepseek, qwen, ollama, mlx）",
     )
+    audit.event(
+        audit.Actor.from_principal(principal), "config.update", row.key, value=req.value
+    )
     return row.value
 
 
@@ -138,7 +141,7 @@ async def set_chat_provider(
 async def set_rag_provider(
     req: ConfigUpdateRequest,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> str:
     """设置知识库问答的默认 LLM provider。
     
@@ -153,6 +156,9 @@ async def set_rag_provider(
         req.value,
         description="知识库问答使用的 LLM provider（可独立于对话模型）",
     )
+    audit.event(
+        audit.Actor.from_principal(principal), "config.update", row.key, value=req.value
+    )
     return row.value
 
 
@@ -160,7 +166,7 @@ async def set_rag_provider(
 async def toggle_rerank(
     req: ConfigUpdateRequest,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> bool:
     """启用/禁用重排序服务。"""
     enabled = req.value.lower() == "true"
@@ -170,6 +176,12 @@ async def toggle_rerank(
         system_config.SystemConfig.KEY_RERANK_ENABLED,
         str(enabled),
         description="是否启用重排序服务",
+    )
+    audit.event(
+        audit.Actor.from_principal(principal),
+        "config.update",
+        system_config.SystemConfig.KEY_RERANK_ENABLED,
+        value=str(enabled),
     )
     return enabled
 
@@ -195,7 +207,7 @@ async def get_rerank_provider(
 async def set_rerank_provider(
     req: ConfigUpdateRequest,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> str:
     """设置重排序服务的默认 provider。
     
@@ -210,6 +222,9 @@ async def set_rerank_provider(
         req.value,
         description="重排序服务使用的 LLM provider",
     )
+    audit.event(
+        audit.Actor.from_principal(principal), "config.update", row.key, value=req.value
+    )
     return row.value
 
 
@@ -218,7 +233,7 @@ async def update_config_by_key(
     key: str,
     req: ConfigUpdateRequest,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> str:
     """通过 key 更新任意系统配置。
     
@@ -247,6 +262,7 @@ async def update_config_by_key(
         req.value,
         description=descriptions.get(key),
     )
+    audit.event(audit.Actor.from_principal(principal), "config.update", row.key, value=req.value)
     return row.value
 
 
@@ -296,7 +312,7 @@ async def get_providers(
 async def create_provider(
     data: ProviderConfigSchema,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> dict:
     """创建新的提供者配置。
     """
@@ -328,6 +344,10 @@ async def create_provider(
     session.add(new_config)
     await session.commit()
     await provider_store.refresh(session)
+    # 审计只记 provider id，绝不落 base_url / api_key 等敏感值
+    audit.event(
+        audit.Actor.from_principal(principal), "provider.create", provider_id, name=data.name
+    )
     return {"status": "success", "message": f"{data.name} 配置已创建"}
 
 
@@ -336,7 +356,7 @@ async def save_provider(
     provider: str,
     data: ProviderConfigSchema,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> dict:
     """保存指定提供者的配置到数据库（upsert：内置 provider 首次保存时落库）。
     """
@@ -367,6 +387,11 @@ async def save_provider(
 
     await session.commit()
     await provider_store.refresh(session)
+    # 审计只记 provider id，绝不落 base_url / api_key 等敏感值
+    audit.event(
+        audit.Actor.from_principal(principal), "provider.update", provider,
+        name=data.name or provider,
+    )
     return {"status": "success", "message": f"{data.name or provider} 配置已更新"}
 
 
@@ -374,7 +399,7 @@ async def save_provider(
 async def delete_provider(
     provider: str,
     session: AsyncSession = Depends(get_db),
-    _principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
+    principal: Principal = Depends(deps.require_permission(Permission.SYSTEM_MANAGE)),
 ) -> dict:
     """删除指定的提供者配置。
     """
@@ -391,4 +416,7 @@ async def delete_provider(
     await session.delete(existing)
     await session.commit()
     await provider_store.refresh(session)
+    audit.event(
+        audit.Actor.from_principal(principal), "provider.delete", provider, name=name
+    )
     return {"status": "success", "message": f"{name} 配置已删除"}
