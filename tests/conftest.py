@@ -35,7 +35,6 @@ def _mock_settings() -> Settings:
         debug=True,  # 打开示例 users/items 路由（生产默认不挂，见 main.create_app）
         llm_default_provider="mock",
         admin_api_key="admin-test-key",
-        default_request_quota=3,
     )
 
 
@@ -73,7 +72,7 @@ async def client(
     - A file-backed SQLite database in ``tmp_path`` (fresh per test).
     - Mock LLM backend (all providers; only ``mock`` is truly offline in
       production).
-    - Admin key "admin-test-key" and default quota 3.
+    - Admin bootstrap key "admin-test-key".
     - Test mode: synchronous RAG queue execution for backward compatibility.
     """
     test_settings = _mock_settings()

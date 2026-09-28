@@ -98,7 +98,7 @@ pip install -e ".[dev]"
 # 复制配置模板并按需修改
 cp .env.example .env
 
-# 启动开发服务器（run.py 固定 :8011 + reload）
+# 启动开发服务器（默认 :8011 + reload；APP_HOST/APP_PORT/APP_RELOAD 可覆盖）
 python run.py
 ```
 
@@ -173,7 +173,38 @@ APP_LLM_QWEN_API_KEY=sk-xxx
 # RAG：混合检索与精排开关（详见 docs/RAG技术方案.md）
 # APP_RAG_HYBRID_ENABLED=true
 # APP_RAG_RERANK_ENABLED=true
+
+# 可观测性：统一日志（带请求 ID）与 /metrics 拉取令牌
+# APP_LOG_LEVEL=INFO
+# APP_METRICS_TOKEN=            # 公网暴露 /metrics 时必配
+
+# LLM 瞬时故障重试与降级（只影响非流式对话；留空备胎 = 关闭）
+# APP_LLM_RETRY_MAX_ATTEMPTS=3
+# APP_LLM_FALLBACK_PROVIDER=deepseek
+
+# 数据源连接串落盘加密（生产显式配；换 key 后存量密文需重录）
+# APP_DATASOURCE_SECRET_KEY=
+
+# 登录限流（IP+用户名滑窗；login 与 onboard 都受护）
+# APP_LOGIN_MAX_ATTEMPTS=10
+# APP_LOGIN_LOCK_THRESHOLD=5
+# APP_LOGIN_LOCKOUT_SECONDS=900
 ```
+
+### 安全与可观测默认值
+
+- **健康与指标**：`/api/v1/health`（存活）、`/api/v1/health/ready`（真探 DB 与
+  RAG Worker，不就绪返 503）、`/metrics`（Prometheus 文本格式，配了
+  `APP_METRICS_TOKEN` 则需 `Authorization: Bearer`）。
+- **请求追踪**：每个请求发 `X-Request-ID`（入站已带则沿用），日志行同字段可检索。
+- **鉴权防线**：口令 argon2id；数据源连接串 Fernet 加密；登录/引导限流
+  （超限 429 + `Retry-After`）；全响应带安全头（nosniff / X-Frame-Options /
+  Referrer-Policy，HTTPS 下加 HSTS）。
+- **SSRF 闸门**：URL 录入与 `fetch_page` 工具共用一道闸：只放 http(s)，
+  DNS 解析后验 IP，重定向逐跳复检，内网/元数据地址请求根本不会发出。
+- **上传上限**：单文档 20MB（分块读、超限即中止）、单图 5MB、批量一次≤20 件。
+- **LLM 容错**：超时/断连/429/5xx 指数退避重试（SDK 内置重试已关，单层）；
+  非流式对话主端打穿后可降级到备胎 provider；流式/嵌入不降级（语义上不能换）。
 
 > 配置 `@lru_cache` 缓存，改 `.env` 后需重启进程；且「模型接入 / 系统配置」在
 > 数据库里有运行时选择（后台改完即生效，不需要重启），`.env` 只是没配置时的兜底。
@@ -194,7 +225,8 @@ POST /api/v1/admin/login  {username, password}
 ```
 
 登录失效返回 `401`，权限不足返回 `403`（message 为中文，形如
-`权限不足，需要：管理角色（role:manage）`）。
+`权限不足，需要：管理角色（role:manage）`），尝试过频返回 `429`（带
+`Retry-After` 秒数：同 IP+用户名连错 5 次锁 15 分钟，引导密钥猜测同样受护）。
 
 ### 权限码与内置角色
 

@@ -325,7 +325,6 @@ class Settings(BaseSettings):
     # RBAC 后不再有任何管理接口旁路：它只用作 ``POST /admin/onboard`` 的首次引导密钥
     # （置空则关闭 HTTP 引导，改用 python -m app.bootstrap seed）。
     admin_api_key: str = "admin-dev-key"
-    default_request_quota: int = 100  # 每 Key 每小时请求数上限
     admin_session_ttl_seconds: int = 86_400  # 控制台 Bearer token 的有效期（秒）
 
     # --- 登录限流（进程内滑窗，见 app/rate_limit.py）---
