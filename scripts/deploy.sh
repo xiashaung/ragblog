@@ -18,11 +18,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# 迁移目标：钉住主线最新 head，不能用裸 `alembic upgrade head`——
-# 库里有两个 head，g6h7i8j9k0l1（system_configs）是从 c2a3b4d5e6f7 分出的孤儿分支，
-# 表实际由应用启动的 create_all 建，从未 apply；`upgrade head` 会报歧义，
-# `upgrade heads` 会去重建已存在的表。新增迁移后把这里的版本号推进。
-MIGRATION_REVISION="${MIGRATION_REVISION:-l1m2n3o4p5q6}"
+# 迁移目标：钉住最新 head。曾经库里有个孤儿 head（g6h7i8j9k0l1 孤挂在
+# c2a3b4d5e6f7，导致裸 `upgrade head` 报歧义）；现已把 g6h7 重挂到主线尾部
+# 收敛回单 head，且它对存量库幂等（表存在即跳过）。继续钉版本号是显式
+# 控制手段：新增迁移后把这里的版本号推进，部署时能看见它没跟上。
+MIGRATION_REVISION="${MIGRATION_REVISION:-g6h7i8j9k0l1}"
 
 echo "==> 1/5 拉取代码（分支 $(git rev-parse --abbrev-ref HEAD)）"
 git pull --ff-only
