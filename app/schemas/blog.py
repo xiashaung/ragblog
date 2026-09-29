@@ -236,11 +236,6 @@ class BlogSearchResponse(BaseModel):
     items: list[BlogCitation] = Field(default_factory=list)
 
 
-class BlogAnswerRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=500)
-    top_k: int = Field(default=5, ge=1, le=10)
-
-
 class BlogAnswerResponse(BaseModel):
     """一次性 AI 问答：完整回答 + 引用文章。"""
 

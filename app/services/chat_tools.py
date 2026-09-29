@@ -127,16 +127,6 @@ class ToolResult:
     sources: list[dict[str, str]] = field(default_factory=list)
     error: str | None = None
 
-    def as_chunk_payload(self) -> dict:
-        """给前端的工具事件体（只给状态与链接，不含喂模型的 ``content``）。"""
-        return {
-            "name": self.name,
-            "ok": self.ok,
-            "error": self.error,
-            "sources": self.sources,
-        }
-
-
 def assert_public_url(url: str, *, allow_private: bool | None = None) -> str:
     """拒绝内网/回环地址，挡住被模型诱导的 SSRF。
 

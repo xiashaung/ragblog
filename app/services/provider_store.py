@@ -97,16 +97,6 @@ def reset() -> None:
     _config_values = {}
     _loaded = False
 
-
-def is_loaded() -> bool:
-    """内存缓存是否已从数据库刷过。
-
-    没刷过时各 getter 会全部回落 .env（启动前 / 测试里直接调服务层就是这样），
-    可用它区分「真没配」与「还没读库」。
-    """
-    return _loaded
-
-
 def known_providers() -> list[str]:
     """数据库里配置过的 provider（按名称排序）。"""
     return sorted(_provider_rows)
@@ -144,21 +134,10 @@ def get_provider_config(name: str) -> ProviderConfig | None:
     )
 
 
-def get_image_embedding_model(name: str) -> str:
-    """provider 上挂的图片 VL 嵌入模型名（没配置返回空串）。"""
-    row = _provider_rows.get(name.strip().lower())
-    return row["image_embedding_model"] if row else ""
-
-
 def get_rerank_model(name: str) -> str:
     """provider 上挂的重排序模型名（没配置返回空串）。"""
     row = _provider_rows.get(name.strip().lower())
     return row["rerank_model"] if row else ""
-
-
-def get_config(key: str) -> str | None:
-    """任意 system_configs 的值；没配置返回 None（调用方回落 ``.env``）。"""
-    return _config_values.get(key) or None
 
 
 @dataclass(frozen=True)

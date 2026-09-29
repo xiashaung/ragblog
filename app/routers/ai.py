@@ -80,14 +80,6 @@ from ..services.rbac_service import Principal
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-
-def _resolve_provider(name: Provider | str | None) -> Provider:
-    """把入参里的 provider 字符串归一成枚举（已是枚举或空值则原样返）。"""
-    if name is None:
-        return None
-    return name if isinstance(name, Provider) else Provider(name)
-
-
 def _enforce_admin_ai_limit(admin_id: str) -> None:
     """控制台昂贵 AI 端点的成本闸：按登录账号滑窗，超限 429 + Retry-After。
 

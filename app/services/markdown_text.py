@@ -14,11 +14,6 @@ import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 
-#: 录入接口接受的 content_format 取值。
-#: ``text`` 与 ``markdown`` 都不加工（Markdown 本来就是纯文本的超集），
-#: 只有 ``html`` 会走 :func:`html_to_markdown`。
-CONTENT_FORMATS = ("text", "markdown", "html")
-
 #: 这些标签连同子树一起丢掉：脚本/样式/表单/媒体都不算正文
 _SKIP_TAGS = {
     "script",
@@ -394,15 +389,6 @@ def html_to_markdown(html: str) -> str:
         _render(child, out, buf)
     _flush(buf, out)
     return "\n\n".join(out).strip()
-
-
-def looks_like_html(content: str) -> bool:
-    """内容是否更像 HTML 而不是 Markdown（给「前端没标格式」时兜底判断）。"""
-    head = content[:2000].lower()
-    return any(
-        token in head
-        for token in ("<html", "<body", "<p>", "<div", "<table", "<h1", "<span")
-    )
 
 
 def normalize_content(content: str, fmt: str = "text") -> str:

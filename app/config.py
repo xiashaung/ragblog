@@ -39,11 +39,6 @@ def register_custom_providers(names: Iterable[str]) -> None:
     _custom_providers.update(str(n).strip().lower() for n in names if str(n).strip())
 
 
-def custom_providers() -> set[str]:
-    """已登记的自定义 provider 名（只读快照）。"""
-    return set(_custom_providers)
-
-
 def custom_provider_member(cls: type[StrEnum], value: object) -> StrEnum | None:
     """把已登记的自定义 provider 变成枚举成员；未登记（如拼错）返回 None。
 

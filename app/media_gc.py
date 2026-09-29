@@ -103,11 +103,6 @@ def doc_image_urls(meta: dict | None) -> list[str]:
     return list(images) if isinstance(images, list) else []
 
 
-async def release_doc_media(session: AsyncSession, meta: dict | None) -> int:
-    """删文档路径的便捷入口：metadata 里引用的图片文件按引用计数回收。"""
-    return await release_urls(session, doc_image_urls(meta))
-
-
 async def sweep_orphans(session: AsyncSession, *, grace_seconds: float = 3600.0) -> dict:
     """全目录兜底：逐个文件查引用，无人引用即删。给管理端点/巡检用。
 
