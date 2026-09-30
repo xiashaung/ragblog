@@ -446,21 +446,36 @@ class OpenAIBackend:
         """走 OpenAI 兼容的 ``/embeddings`` 接口，把 ``input`` 批量转向量。
 
         返回项里带 ``index``，上层按它对齐输入顺序（SDK 不保证回得有序）。
+        网关对单批 ``input`` 数普遍有限制（DashScope/qwen 系列不超过 25，
+        OpenAI 官方 2048），超出会抛 400；故按 ``embedding_max_batch`` 分批
+        顺序请求，再按原序号拼回，保证输出与输入一一对应且顺序不变。
         """
         cfg = self._current()
-        resp = await _with_retry(
-            f"embed({self.provider.value})",
-            lambda: self._client.embeddings.create(
-                model=model or cfg.embedding_model, input=inputs
-            ),
-        )
-        items = [EmbeddingItem(index=d.index, embedding=list(d.embedding)) for d in resp.data]
-        usage = Usage(
-            prompt_tokens=resp.usage.prompt_tokens if resp.usage else 0,
-            completion_tokens=0,
-            total_tokens=resp.usage.total_tokens if resp.usage else 0,
-        )
-        return items, usage, resp.model
+        batch = max(1, get_settings().embedding_max_batch)
+        items: list[EmbeddingItem | None] = [None] * len(inputs)
+        usage = Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+        actual_model = None
+        # 按 batch 分片，但同一批内部仍整批投递给网关，避免切得太碎徒增往返。
+        for start in range(0, len(inputs), batch):
+            resp = await _with_retry(
+                f"embed({self.provider.value})",
+                lambda i=start: self._client.embeddings.create(
+                    model=model or cfg.embedding_model,
+                    input=inputs[i : i + batch],
+                ),
+            )
+            actual_model = resp.model
+            sub = [EmbeddingItem(index=d.index, embedding=list(d.embedding)) for d in resp.data]
+            # 把子批次填回它自己的位置，防网关重排导致错位。
+            for slot in sub:
+                items[slot.index] = slot
+            if resp.usage:
+                usage = Usage(
+                    prompt_tokens=usage.prompt_tokens + resp.usage.prompt_tokens,
+                    completion_tokens=0,
+                    total_tokens=usage.total_tokens + resp.usage.total_tokens,
+                )
+        return items, usage, actual_model
 
     async def embed_images(
         self, images: list[str], *, model: str | None = None
@@ -473,17 +488,29 @@ class OpenAIBackend:
         """
         cfg = self._current()
         model = model or cfg.image_embedding_model or cfg.embedding_model
-        resp = await _with_retry(
-            f"embed_images({self.provider.value})",
-            lambda: self._client.embeddings.create(model=model, input=images),
-        )
-        items = [EmbeddingItem(index=d.index, embedding=list(d.embedding)) for d in resp.data]
-        usage = Usage(
-            prompt_tokens=resp.usage.prompt_tokens if resp.usage else 0,
-            completion_tokens=0,
-            total_tokens=resp.usage.total_tokens if resp.usage else 0,
-        )
-        return items, usage, resp.model
+        batch = max(1, get_settings().embedding_max_batch)
+        items: list[EmbeddingItem | None] = []
+        usage = Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+        actual_model = None
+        for start in range(0, len(images), batch):
+            resp = await _with_retry(
+                f"embed_images({self.provider.value})",
+                lambda i=start: self._client.embeddings.create(
+                    model=model, input=images[i : i + batch],
+                ),
+            )
+            actual_model = resp.model
+            for slot in (
+                EmbeddingItem(index=d.index, embedding=list(d.embedding)) for d in resp.data
+            ):
+                items[slot.index] = slot
+            if resp.usage:
+                usage = Usage(
+                    prompt_tokens=usage.prompt_tokens + resp.usage.prompt_tokens,
+                    completion_tokens=0,
+                    total_tokens=usage.total_tokens + resp.usage.total_tokens,
+                )
+        return items, usage, actual_model
 
     async def embeddings(self, req: EmbeddingRequest) -> EmbeddingResponse:
         """沿用协议里的默认实现（把 :meth:`embed` 包成响应体）。"""

@@ -249,6 +249,12 @@ class Settings(BaseSettings):
     # 维度不符的旧图片向量备份后置空，之后需重建）。默认 1536，按网关实测维度校正。
     rag_image_vector_dim: int = 1536
 
+    # 单次嵌入请求最多喂多少条（网关对单批 ``input`` 数普遍有限制：
+    # DashScope/qwen 系列不超过 25，OpenAI 官方上限 2048）。超出会直接抛
+    # 400（batch size is invalid），故 ``OpenAIBackend.embed`` 会把超出部分
+    # 拆成多批顺序请求后按序拼回，绝不打乱原输入顺序。生产可按网关实测上限放宽。
+    embedding_max_batch: int = 25
+
     # RAG 后台队列的并发 Worker 数。单 Worker 时一个大文档会堵住整条队列；
     # 也不宜过大——向量化是外部 HTTP/本地模型调用，并行太多会打满下游。
     rag_queue_workers: int = 2
