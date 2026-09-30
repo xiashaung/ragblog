@@ -250,6 +250,60 @@ def _delta_reasoning(delta: object) -> str:
     return ""
 
 
+def _place_embedding_batch(
+    items: list[EmbeddingItem | None], data: Any, *, start: int, size: int
+) -> None:
+    """把一批网关回包按**全局**位置写回 ``items``（原位修改，只填本分片的格子）。
+
+    ``data[i].index`` 是「本次请求 ``input`` 里第几段」，每批都从 0 重新排（OpenAI
+    规范如此，各家兼容网关一致），它不是跨批次的全局序号。早先直接拿它当全局下标
+    写回，第 2 批就把第 1 批覆盖一遍，而 ``items[batch:]`` 永远是 ``None``，最后
+    拼响应体时 pydantic 炸在 ``items.25``（= ``embedding_max_batch``）。
+
+    少数网关会直接回全局序号，或对批内顺序乱排：先按 ``start + index`` 落位，越界
+    就试 ``index`` 本身是否落在本分片区间内，再不行按返回顺序落位；仍越界的丢弃，
+    宁缺勿错位（错位的向量会把 A 段的语义塞进 B 段的检索结果里，比缺一条更难查）。
+    """
+    for offset, d in enumerate(data):
+        pos = start + d.index
+        if not start <= pos < start + size:
+            pos = d.index if start <= d.index < start + size else start + offset
+        if not start <= pos < start + size:
+            continue
+        items[pos] = EmbeddingItem(index=pos, embedding=list(d.embedding))
+
+
+def _require_all_items(items: list[EmbeddingItem | None], *, what: str) -> list[EmbeddingItem]:
+    """把 ``items`` 收紧成无洞列表；有洞就报一条说得清的错。
+
+    洞只可能来自网关少回／回错下标。让它流到 ``EmbeddingResponse`` 里，上层收到的
+    是 ``input_value=None`` 的校验错误，看不出「是谁少回了多少条」，所以在这里拦截。
+    """
+    filled = [item for item in items if item is not None]
+    if len(filled) != len(items):
+        missing = [i for i, item in enumerate(items) if item is None]
+        raise ValueError(
+            f"{what}：网关回向量不全，缺 {len(missing)}/{len(items)} 条"
+            f"（下标 {missing[:5]}{'…' if len(missing) > 5 else ''}）。"
+            "多半是单批 input 超过网关上限或上游异常，可把 "
+            "APP_EMBEDDING_MAX_BATCH 调小（或调大网关的批量上限）后重试。"
+        )
+    return filled
+
+
+def _embed_call(client: Any, model: str, part: list[str]) -> Callable[[], Awaitable[Any]]:
+    """``_with_retry`` 要的一次性调用：把这一批 input 整批发给 ``/embeddings``。
+
+    写成闭包工厂而不是 ``lambda i=part: ...``——后者 mypy 推不出参数类型，
+    而且默认参数绑定分片这件事本身就该有个说清楚的地方。
+    """
+
+    async def call() -> Any:
+        return await client.embeddings.create(model=model, input=part)
+
+    return call
+
+
 class OpenAIBackend:
     """单个 provider 的 OpenAI 兼容异步客户端。
 
@@ -452,30 +506,30 @@ class OpenAIBackend:
         """
         cfg = self._current()
         batch = max(1, get_settings().embedding_max_batch)
+        model_name = model or cfg.embedding_model
         items: list[EmbeddingItem | None] = [None] * len(inputs)
         usage = Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
-        actual_model = None
+        actual_model = model_name
         # 按 batch 分片，但同一批内部仍整批投递给网关，避免切得太碎徒增往返。
         for start in range(0, len(inputs), batch):
+            part = inputs[start : start + batch]
             resp = await _with_retry(
                 f"embed({self.provider.value})",
-                lambda i=start: self._client.embeddings.create(
-                    model=model or cfg.embedding_model,
-                    input=inputs[i : i + batch],
-                ),
+                _embed_call(self._client, model_name, part),
             )
-            actual_model = resp.model
-            sub = [EmbeddingItem(index=d.index, embedding=list(d.embedding)) for d in resp.data]
-            # 把子批次填回它自己的位置，防网关重排导致错位。
-            for slot in sub:
-                items[slot.index] = slot
+            actual_model = resp.model or actual_model
+            _place_embedding_batch(items, resp.data, start=start, size=len(part))
             if resp.usage:
                 usage = Usage(
                     prompt_tokens=usage.prompt_tokens + resp.usage.prompt_tokens,
                     completion_tokens=0,
                     total_tokens=usage.total_tokens + resp.usage.total_tokens,
                 )
-        return items, usage, actual_model
+        return (
+            _require_all_items(items, what=f"{self.provider.value} 文本嵌入"),
+            usage,
+            actual_model,
+        )
 
     async def embed_images(
         self, images: list[str], *, model: str | None = None
@@ -487,30 +541,32 @@ class OpenAIBackend:
         没填则回落文本 ``embedding_model``（有些模型本就图文一体）。
         """
         cfg = self._current()
-        model = model or cfg.image_embedding_model or cfg.embedding_model
+        model_name = model or cfg.image_embedding_model or cfg.embedding_model
         batch = max(1, get_settings().embedding_max_batch)
-        items: list[EmbeddingItem | None] = []
+        # 与 :meth:`embed` 同样的分批 + 全局落位口径：这里早先是拿批内序号往一个
+        # 空 list 上做下标赋值，任何非空调用都直接 IndexError。
+        items: list[EmbeddingItem | None] = [None] * len(images)
         usage = Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
-        actual_model = None
+        actual_model = model_name
         for start in range(0, len(images), batch):
+            part = images[start : start + batch]
             resp = await _with_retry(
                 f"embed_images({self.provider.value})",
-                lambda i=start: self._client.embeddings.create(
-                    model=model, input=images[i : i + batch],
-                ),
+                _embed_call(self._client, model_name, part),
             )
-            actual_model = resp.model
-            for slot in (
-                EmbeddingItem(index=d.index, embedding=list(d.embedding)) for d in resp.data
-            ):
-                items[slot.index] = slot
+            actual_model = resp.model or actual_model
+            _place_embedding_batch(items, resp.data, start=start, size=len(part))
             if resp.usage:
                 usage = Usage(
                     prompt_tokens=usage.prompt_tokens + resp.usage.prompt_tokens,
                     completion_tokens=0,
                     total_tokens=usage.total_tokens + resp.usage.total_tokens,
                 )
-        return items, usage, actual_model
+        return (
+            _require_all_items(items, what=f"{self.provider.value} 图片嵌入"),
+            usage,
+            actual_model,
+        )
 
     async def embeddings(self, req: EmbeddingRequest) -> EmbeddingResponse:
         """沿用协议里的默认实现（把 :meth:`embed` 包成响应体）。"""
