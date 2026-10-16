@@ -94,7 +94,7 @@ def _join_sentences(current: str, sent: str) -> str:
     return f"{current} {sent}"
 
 
-def _split_long_paragraph(para: str, width: int, overlap: int) -> list[str]:
+def _split_long_paragraph(para: str, width: int, overlap: int, chunk_size: int = 500) -> list[str]:
     """把超长段落按句子边界打包成不超过 ``width`` 的 piece。
 
     先按中英句末标点切句再 packing；只有单个句子仍超宽（整段没标点，
@@ -109,7 +109,7 @@ def _split_long_paragraph(para: str, width: int, overlap: int) -> list[str]:
             if current:
                 pieces.append(current)
                 current = ""
-            step = max(1, width - overlap)
+            step = max(1, max(width - overlap, chunk_size // 10))
             pieces.extend(
                 sent[start : start + width] for start in range(0, len(sent), step)
             )
@@ -146,7 +146,7 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int | None = None) -> 
         if len(para) <= width:
             pieces.append(para)
             continue
-        pieces.extend(_split_long_paragraph(para, width, overlap))
+        pieces.extend(_split_long_paragraph(para, width, overlap, chunk_size))
 
     chunks: list[str] = []
     buffer = ""
@@ -159,7 +159,7 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int | None = None) -> 
             buffer = f"{buffer}\n{piece}".strip() if buffer else piece
     if buffer:
         chunks.append(buffer)
-    return chunks or [text[:chunk_size]]
+    return chunks
 
 
 def split_markdown_sections(text: str) -> list[tuple[list[str], str]]:
@@ -229,6 +229,10 @@ def chunk_document(
             pieces = chunk_text(body, chunk_size=budget)
             chunks.extend(f"{prefix}\n{p}" for p in pieces)
         else:
+            # 前缀太长，正文预算不够，退化为不加前缀
+            logger.warning(
+                "document chunking: title prefix too long (len=%d) too much for budget %d, skipping prefix)",
+                len(prefix), budget)
             chunks.extend(chunk_text(body, chunk_size=chunk_size))
     return chunks
 
@@ -448,7 +452,7 @@ async def replace_vectors(
     await session.execute(
         delete(KnowledgeChunk).where(KnowledgeChunk.knowledge_id == doc.id)
     )
-    for i, (text, item) in enumerate(zip(chunks, emb_resp.items, strict=False)):
+    for i, (text, item) in enumerate(zip(chunks, emb_resp.items, strict=True)):
         session.add(
             KnowledgeChunk(
                 id=f"{doc.id}-c{i:03d}",
