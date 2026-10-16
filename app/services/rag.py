@@ -76,9 +76,12 @@ def _chunk_size_of(
     return stored if isinstance(stored, int) and stored > 0 else fallback
 
 
-# 句末标点：中英混合都认；前引号/括号跟随句子走，后引号并入句尾，
-# 第二个分支兜住没有任何标点的长串（整段交给定长硬切）。
-_SENTENCE_RE = re.compile(r"[^。！？；.!?]+[。！？；.!?]+[""'）)】」』]*|[^。！？；.!?]+")
+# 句末标点：中英混合都认；前引号/括号跟随句子走，后引号并入句尾。
+# 英文点号后若紧跟字母/数字（URL域名、版本号如 www.example.com、v2.0），则不切分。
+_SENTENCE_RE = re.compile(
+    r"""[^。！？；]+[。！？；]+[""'')）】」'']*|"""
+    r"""[^。！？；.!?]+\.(?![a-zA-Z0-9])|[^。！？；.!?]+[!?]+[""'')）】」'']*|[^。！？；.!?]+"""
+)
 _CJK_RE = re.compile(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]")
 # ATX 标题与代码围栏（围栏里的 ``#`` 不是标题）。
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
@@ -110,9 +113,7 @@ def _split_long_paragraph(para: str, width: int, overlap: int, chunk_size: int =
                 pieces.append(current)
                 current = ""
             step = max(1, max(width - overlap, chunk_size // 10))
-            pieces.extend(
-                sent[start : start + width] for start in range(0, len(sent), step)
-            )
+            pieces.extend(sent[start : start + width] for start in range(0, len(sent), step))
             continue
         if current and len(current) + len(sent) > width:
             pieces.append(current)
@@ -231,8 +232,11 @@ def chunk_document(
         else:
             # 前缀太长，正文预算不够，退化为不加前缀
             logger.warning(
-                "document chunking: title prefix too long (len=%d) too much for budget %d, skipping prefix)",
-                len(prefix), budget)
+                "document chunking: title prefix too long (len=%d) too much for "
+                "budget %d, skipping prefix)",
+                len(prefix),
+                budget,
+            )
             chunks.extend(chunk_text(body, chunk_size=chunk_size))
     return chunks
 
@@ -304,8 +308,10 @@ def _image_embed_source(image_url: str) -> str | None:
     """
     if not image_url:
         return None
-    if image_url.startswith("data:") or image_url.startswith("http://") or image_url.startswith(
-        "https://"
+    if (
+        image_url.startswith("data:")
+        or image_url.startswith("http://")
+        or image_url.startswith("https://")
     ):
         return image_url
     settings = get_settings()
@@ -391,18 +397,20 @@ async def _first_snippets(session: AsyncSession, doc_ids: list[str]) -> dict[str
     if not doc_ids:
         return {}
     heads = (
-        await session.execute(
-            select(func.min(KnowledgeChunk.id))
-            .where(KnowledgeChunk.knowledge_id.in_(doc_ids))
-            .group_by(KnowledgeChunk.knowledge_id)
+        (
+            await session.execute(
+                select(func.min(KnowledgeChunk.id))
+                .where(KnowledgeChunk.knowledge_id.in_(doc_ids))
+                .group_by(KnowledgeChunk.knowledge_id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if not heads:
         return {}
     rows = await session.execute(
-        select(KnowledgeChunk.knowledge_id, KnowledgeChunk.text).where(
-            KnowledgeChunk.id.in_(heads)
-        )
+        select(KnowledgeChunk.knowledge_id, KnowledgeChunk.text).where(KnowledgeChunk.id.in_(heads))
     )
     return {doc_id: text for doc_id, text in rows.all()}
 
@@ -440,18 +448,19 @@ async def replace_vectors(
         fmt=_doc_format(meta),
         title=doc.title,
     )
-    emb_resp = await backend.embeddings(
-        EmbeddingRequest(provider=backend.provider, input=chunks)
-    )
-    # 先算出新向量再删旧分片：维度不符（或 embedding 失败）时，文档不会
-    # 被削成一个没有向量的空壳。定长 vector 列装不下其他维度，这里提前报错。
+    emb_resp = await backend.embeddings(EmbeddingRequest(provider=backend.provider, input=chunks))
+    # 先校验完再删旧分片：数量对不上 / 维度不符（或 embedding 失败）时抛错回滚，
+    # 文档不会被削成没有向量的空壳，也不会静默少建分片（定长 vector 列装不下其他维度）。
+    if len(emb_resp.items) != len(chunks):
+        raise ValueError(
+            f"{backend.provider.value}返回的向量数({len(emb_resp.items)})"
+            f"与分片数({len(chunks)})不一致，已放弃重建"
+        )
     dim = _vector_dim()
     for item in emb_resp.items:
         if len(item.embedding) != dim:
             raise _dim_error(backend.provider.value, len(item.embedding), dim)
-    await session.execute(
-        delete(KnowledgeChunk).where(KnowledgeChunk.knowledge_id == doc.id)
-    )
+    await session.execute(delete(KnowledgeChunk).where(KnowledgeChunk.knowledge_id == doc.id))
     for i, (text, item) in enumerate(zip(chunks, emb_resp.items, strict=True)):
         session.add(
             KnowledgeChunk(
@@ -546,9 +555,7 @@ async def upsert_document(
     )
 
 
-async def ingest(
-    session: AsyncSession, payload: KnowledgeIngestRequest
-) -> KnowledgeIngestResponse:
+async def ingest(session: AsyncSession, payload: KnowledgeIngestRequest) -> KnowledgeIngestResponse:
     """裸文本录入：只负责拆请求字段，真活在 :func:`upsert_document`。"""
     return await upsert_document(
         session,
@@ -568,8 +575,7 @@ def pairs_to_text(pairs: list[tuple[str, str]]) -> str:
     措辞决定（答案往往很长，会把手头的关键词稀释掉）。
     """
     return "\n\n".join(
-        f"{FAQ_ASK_PREFIX}{question}\n{FAQ_ANSWER_PREFIX}{answer}"
-        for question, answer in pairs
+        f"{FAQ_ASK_PREFIX}{question}\n{FAQ_ANSWER_PREFIX}{answer}" for question, answer in pairs
     )
 
 
@@ -641,16 +647,12 @@ async def list_knowledge(
     stmt = select(KnowledgeDoc)
     if keyword and keyword.strip():
         like = f"%{keyword.strip()}%"
-        stmt = stmt.where(
-            or_(KnowledgeDoc.title.ilike(like), KnowledgeDoc.content.ilike(like))
-        )
+        stmt = stmt.where(or_(KnowledgeDoc.title.ilike(like), KnowledgeDoc.content.ilike(like)))
     if status:
         stmt = stmt.where(KnowledgeDoc.status == status)
 
     total = (
-        await session.execute(
-            select(func.count()).select_from(stmt.order_by(None).subquery())
-        )
+        await session.execute(select(func.count()).select_from(stmt.order_by(None).subquery()))
     ).scalar_one()
     rows = (
         await session.scalars(
@@ -664,9 +666,7 @@ async def list_knowledge(
         "offset": offset,
         "limit": limit,
         "default_provider": default,
-        "items": [
-            _doc_item(r, *stats.get(r.id, (0, 0)), snippets.get(r.id, "")) for r in rows
-        ],
+        "items": [_doc_item(r, *stats.get(r.id, (0, 0)), snippets.get(r.id, "")) for r in rows],
     }
 
 
@@ -758,9 +758,7 @@ async def update_knowledge(
         meta = dict(doc.meta or {})
         meta["format"] = stored_format(fmt)
         doc.meta = meta
-        await replace_vectors(
-            session, doc, body, backend=llm.get_llm(feature="embedding")
-        )
+        await replace_vectors(session, doc, body, backend=llm.get_llm(feature="embedding"))
 
     chunks, size = (await _chunk_stats(session, [doc.id])).get(doc.id, (0, 0))
     snippets = await _first_snippets(session, [doc.id])
@@ -827,9 +825,7 @@ async def reindex_all_docs(session: AsyncSession) -> dict:
     targets = (
         await session.scalars(
             select(KnowledgeDoc).where(
-                KnowledgeDoc.status.in_(
-                    [DocStatus.PENDING.value, DocStatus.FAILED.value]
-                )
+                KnowledgeDoc.status.in_([DocStatus.PENDING.value, DocStatus.FAILED.value])
             )
         )
     ).all()
@@ -879,9 +875,7 @@ async def index_image_vectors(
     维度不符抛 ``ValueError``（与 :func:`replace_vectors` 同一取向：宁可不写也不写脏向量）。
     返回写入的行数。
     """
-    await session.execute(
-        delete(KnowledgeImage).where(KnowledgeImage.knowledge_id == knowledge_id)
-    )
+    await session.execute(delete(KnowledgeImage).where(KnowledgeImage.knowledge_id == knowledge_id))
     pairs = [(url, src) for url, src in items if src]
     if not pairs:
         await session.flush()
@@ -896,9 +890,7 @@ async def index_image_vectors(
         if len(embedding) != dim:
             raise _dim_error("图片", len(embedding), dim)
         session.add(
-            KnowledgeImage(
-                knowledge_id=knowledge_id, image_url=image_url, vector=embedding
-            )
+            KnowledgeImage(knowledge_id=knowledge_id, image_url=image_url, vector=embedding)
         )
         count += 1
     await session.flush()
@@ -939,12 +931,14 @@ async def refresh_doc_images(session: AsyncSession, knowledge_id: str) -> int:
     不该让整篇重建失败）。没有任何图片行时直接返回 0，不去构造图片后端。
     """
     urls = (
-        await session.execute(
-            select(KnowledgeImage.image_url).where(
-                KnowledgeImage.knowledge_id == knowledge_id
+        (
+            await session.execute(
+                select(KnowledgeImage.image_url).where(KnowledgeImage.knowledge_id == knowledge_id)
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if not urls:
         return 0
     count, _err = await _index_images_safe(session, knowledge_id, list(urls))
@@ -959,18 +953,18 @@ async def reindex_all_images(session: AsyncSession) -> dict:
     ``failed`` 并继续下一篇，不因一篇报错中断全库。返回处理计数。
     """
     backend = llm.get_llm(feature="image_embedding")
-    doc_ids = (
-        await session.scalars(select(KnowledgeImage.knowledge_id).distinct())
-    ).all()
+    doc_ids = (await session.scalars(select(KnowledgeImage.knowledge_id).distinct())).all()
     reindexed, failed = 0, 0
     for doc_id in doc_ids:
         urls = (
-            await session.execute(
-                select(KnowledgeImage.image_url).where(
-                    KnowledgeImage.knowledge_id == doc_id
+            (
+                await session.execute(
+                    select(KnowledgeImage.image_url).where(KnowledgeImage.knowledge_id == doc_id)
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         items = [(url, _image_embed_source(url)) for url in urls]
         try:
             await index_image_vectors(session, doc_id, items, backend=backend)
@@ -993,13 +987,9 @@ async def delete_knowledge(session: AsyncSession, knowledge_id: str) -> bool:
     if doc is None:
         return False
     image_urls = media_gc.doc_image_urls(doc.meta)
-    await session.execute(
-        delete(KnowledgeChunk).where(KnowledgeChunk.knowledge_id == knowledge_id)
-    )
+    await session.execute(delete(KnowledgeChunk).where(KnowledgeChunk.knowledge_id == knowledge_id))
     # 图片向量行与分片同为「按文档归属」的子表，删文档必须一并清掉，否则留下孤儿向量。
-    await session.execute(
-        delete(KnowledgeImage).where(KnowledgeImage.knowledge_id == knowledge_id)
-    )
+    await session.execute(delete(KnowledgeImage).where(KnowledgeImage.knowledge_id == knowledge_id))
     await session.delete(doc)
     await session.flush()
     # 行已删才轮得到文件：此刻 metadata 里的 URL 不会再被本行命中
@@ -1007,9 +997,7 @@ async def delete_knowledge(session: AsyncSession, knowledge_id: str) -> bool:
     return True
 
 
-async def delete_knowledge_many(
-    session: AsyncSession, ids: list[str]
-) -> tuple[int, list[str]]:
+async def delete_knowledge_many(session: AsyncSession, ids: list[str]) -> tuple[int, list[str]]:
     """批量删除，返 ``(删掉数, 找不到的 id)``——不整批回滚，得逐个给结果。"""
     deleted, failed = 0, []
     for kid in ids:
@@ -1024,9 +1012,7 @@ async def _vectorless_chunks(session: AsyncSession) -> int:
     """没可用向量（NULL）的分片数：重建索引前对检索完全隐形。"""
     return (
         await session.execute(
-            select(func.count())
-            .select_from(KnowledgeChunk)
-            .where(KnowledgeChunk.vector.is_(None))
+            select(func.count()).select_from(KnowledgeChunk).where(KnowledgeChunk.vector.is_(None))
         )
     ).scalar_one()
 
@@ -1222,10 +1208,7 @@ def _rrf_fuse(
             else:
                 display.setdefault(key, leg_score)  # 没有余弦时才退到三元组分
     ordered = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[: max(pool, 0)]
-    return [
-        (*text_of[key], display.get(key, fused_score))
-        for key, fused_score in ordered
-    ]
+    return [(*text_of[key], display.get(key, fused_score)) for key, fused_score in ordered]
 
 
 async def _rerank_hits(
@@ -1251,8 +1234,8 @@ async def _rerank_hits(
         out.append(hits[idx])
         if len(out) >= keep:
             break
-    # 阈值抬得过高可能全部过滤掉，这本身是合法结果（确实没有好匹配）；
-    # 但宁可留一条也不让「召回里其实有可用内容」被全滤光而不为人知。
+    # 阈值抬得过高可能把精排结果全部滤掉，这本身是合法结果（确实没有好匹配）：
+    # 宁缺毋滥返回空，由问答模型明说「知识库中未找到相关内容」。
     return out[:keep]
 
 
@@ -1281,8 +1264,16 @@ async def search(
     backend = llm.get_llm(payload.provider, feature="embedding")
     provider = backend.provider
     query_emb = (
-        await backend.embeddings(EmbeddingRequest(provider=provider, input=[payload.query]))
-    ).items[0].embedding
+        (await backend.embeddings(EmbeddingRequest(provider=provider, input=[payload.query])))
+        .items[0]
+        .embedding
+    )
+    # 查询向量维度与库列不符直接报错，不做近似匹配：_search_pgvector 内部亦有同样
+    # 检查，这里统一前置到两条召回路径（pgvector / 内存 cosine）分叉之前，避免
+    # Postgres 报错而 SQLite 静默全 0 分的口径不一致。
+    dim = _vector_dim()
+    if len(query_emb) != dim:
+        raise _dim_error("查询", len(query_emb), dim)
 
     # 只检「已学习」（indexed）的文档：它们才是用当前嵌入模型建好、可比的向量；
     # pending/processing/failed 的向量属于旧模型或尚未建好，搜了也没意义。
@@ -1345,9 +1336,7 @@ async def search(
     if matched_ids:
         meta_rows = (
             await session.execute(
-                select(KnowledgeDoc.id, KnowledgeDoc.meta).where(
-                    KnowledgeDoc.id.in_(matched_ids)
-                )
+                select(KnowledgeDoc.id, KnowledgeDoc.meta).where(KnowledgeDoc.id.in_(matched_ids))
             )
         ).all()
         for did, meta in meta_rows:
@@ -1434,9 +1423,9 @@ async def search_images(
                 KnowledgeImage.image_url,
                 KnowledgeImage.vector,
                 KnowledgeDoc.title,
-            ).join(KnowledgeDoc, KnowledgeDoc.id == KnowledgeImage.knowledge_id).where(
-                KnowledgeDoc.status == DocStatus.INDEXED.value
             )
+            .join(KnowledgeDoc, KnowledgeDoc.id == KnowledgeImage.knowledge_id)
+            .where(KnowledgeDoc.status == DocStatus.INDEXED.value)
         )
     ).all()
     scored = [
@@ -1467,9 +1456,7 @@ RAG_SYSTEM_PROMPT = (
 )
 
 
-async def answer(
-    session: AsyncSession, payload: KnowledgeAnswerRequest
-) -> KnowledgeAnswerResponse:
+async def answer(session: AsyncSession, payload: KnowledgeAnswerRequest) -> KnowledgeAnswerResponse:
     """知识库问答：先 :func:`search` 取片段，拼 Context 后交给对话模型。"""
     backend = llm.get_llm(payload.provider, feature="rag")
     provider = backend.provider
@@ -1478,9 +1465,7 @@ async def answer(
         # 检索用的是向量 provider，不能跟着回答模型走：把请求里显式指定的那个传下去，
         # 没指定时由 search() 自己按 embedding_provider 解析（否则改了 rag_provider
         # 就会查不到任何文档——向量不在同一个 provider 命名空间里）。
-        KnowledgeSearchRequest(
-            query=payload.query, top_k=payload.top_k, provider=payload.provider
-        ),
+        KnowledgeSearchRequest(query=payload.query, top_k=payload.top_k, provider=payload.provider),
     )
     context = "\n".join(f"[{c.index}] {c.snippet}" for c in search_resp.items)
     question = f"Context:\n{context}\n\nQuestion: {payload.query}"
@@ -1489,11 +1474,7 @@ async def answer(
     if payload.images:
         user_content = [
             {"type": "text", "text": question},
-            *(
-                {"type": "image_url", "image_url": {"url": url}}
-                for url in payload.images
-                if url
-            ),
+            *({"type": "image_url", "image_url": {"url": url}} for url in payload.images if url),
         ]
     else:
         user_content = question

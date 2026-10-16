@@ -20,3 +20,5 @@ web-blog/node_modules
 
 # 生产启动脚本（scripts/start.sh）的运行日志与 pid
 logs/
+# Codex 应用个人设置
+.vscode/

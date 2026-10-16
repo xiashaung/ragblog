@@ -187,9 +187,7 @@ def test_chunk_document_falls_back_for_plain_text_and_headingless():
     from app.services import rag
 
     text = "问：怎么重启？\n答：执行 systemctl restart。"
-    assert rag.chunk_document(text, chunk_size=500, fmt="text", title="FAQ") == [
-        text
-    ]
+    assert rag.chunk_document(text, chunk_size=500, fmt="text", title="FAQ") == [text]
     assert rag.chunk_document("没有标题的正文。", chunk_size=500, fmt="markdown", title="X") == [
         "没有标题的正文。"
     ]
@@ -266,9 +264,7 @@ async def test_rag_status_scopes_search(client, admin_headers):
     from app.models import KnowledgeDoc
 
     async with get_session_factory()() as s:
-        await s.execute(
-            update(KnowledgeDoc).where(KnowledgeDoc.id == kb).values(status="pending")
-        )
+        await s.execute(update(KnowledgeDoc).where(KnowledgeDoc.id == kb).values(status="pending"))
         await s.commit()
 
     assert kb not in await hit_ids("Paris")
@@ -279,9 +275,7 @@ async def test_rag_status_scopes_search(client, admin_headers):
 
 async def test_stats_reports_vector_setup(client, admin_headers):
     """统计要能说清：向量存在哪、多少维、有没有拿不到向量的分片。"""
-    body = _ok(
-        await client.get("/api/v1/ai/knowledge/stats", headers=admin_headers)
-    )
+    body = _ok(await client.get("/api/v1/ai/knowledge/stats", headers=admin_headers))
     assert body["vector_backend"] in {"pgvector", "json"}
     assert body["vector_dim"] == _dim()
     assert body["vectorless_chunks"] >= 0
@@ -310,9 +304,7 @@ async def test_dimension_mismatch_is_rejected_before_chunks_are_wiped(
     message = resp.json()["message"]
     assert "64" in message and str(_dim()) in message
 
-    detail = _ok(
-        await client.get(f"/api/v1/ai/knowledge/{kb_id}", headers=admin_headers)
-    )
+    detail = _ok(await client.get(f"/api/v1/ai/knowledge/{kb_id}", headers=admin_headers))
     assert detail["chunk_total"] >= 1
     assert all(chunk["dim"] == _dim() for chunk in detail["chunks"])
 
@@ -356,9 +348,15 @@ async def test_pgvector_native_scoring_matches_python_cosine():
                 doc_ids.append(resp.knowledge_id)
 
             backend = llm.get_llm("mock")
-            query = (await backend.embeddings(
-                EmbeddingRequest(provider=backend.provider, input=["巴黎"])
-            )).items[0].embedding
+            query = (
+                (
+                    await backend.embeddings(
+                        EmbeddingRequest(provider=backend.provider, input=["巴黎"])
+                    )
+                )
+                .items[0]
+                .embedding
+            )
 
             native = await rag._search_pgvector(session, doc_ids, query, 5)
             python = await rag._search_in_python(session, doc_ids, query, 5)
@@ -370,9 +368,7 @@ async def test_pgvector_native_scoring_matches_python_cosine():
 
             index_def = (
                 await session.execute(
-                    text(
-                        "select indexdef from pg_indexes where indexname = :name"
-                    ),
+                    text("select indexdef from pg_indexes where indexname = :name"),
                     {"name": HNSW_INDEX_NAME},
                 )
             ).scalar()
@@ -481,16 +477,12 @@ async def test_knowledge_management(client, admin_headers):
     assert {p["status"] for p in body["by_status"]} >= {"indexed"}
 
     # --- reindex rebuilds vectors with the configured provider ---
-    resp = await client.post(
-        f"/api/v1/ai/knowledge/{kb_id}/reindex", headers=admin_headers
-    )
+    resp = await client.post(f"/api/v1/ai/knowledge/{kb_id}/reindex", headers=admin_headers)
     body = _ok(resp)
     assert body["status"] == "indexed" and body["chunks"] == 1
 
     # --- empty patch is rejected ---
-    resp = await client.patch(
-        f"/api/v1/ai/knowledge/{kb_id}", json={}, headers=admin_headers
-    )
+    resp = await client.patch(f"/api/v1/ai/knowledge/{kb_id}", json={}, headers=admin_headers)
     assert resp.status_code == status.HTTP_400_BAD_REQUEST
 
     # --- missing document: 404 on every detail route ---
@@ -501,9 +493,7 @@ async def test_knowledge_management(client, admin_headers):
         ("post", f"/api/v1/ai/knowledge/{missing}/reindex"),
         ("delete", f"/api/v1/ai/knowledge/{missing}"),
     ):
-        resp = await client.request(
-            method.upper(), url, headers=admin_headers, json={"title": "x"}
-        )
+        resp = await client.request(method.upper(), url, headers=admin_headers, json={"title": "x"})
         assert resp.status_code == status.HTTP_404_NOT_FOUND, f"{method} {url}"
         assert "不存在" in resp.json()["message"]
 
@@ -517,13 +507,11 @@ async def test_knowledge_management(client, admin_headers):
     assert body["deleted"] == 1 and body["failed"] == [missing]
 
 
-async def test_knowledge_html_ingest_is_normalized_to_markdown(
-    client, admin_headers
-):
+async def test_knowledge_html_ingest_is_normalized_to_markdown(client, admin_headers):
     """富文本录入：HTML 在入口转成 Markdown 才入库，列表/详情都回显 markdown 格式。"""
     html = (
-        '<h2>退款说明</h2>'
-        '<p>请在<strong>7 天</strong>内申请，详见'
+        "<h2>退款说明</h2>"
+        "<p>请在<strong>7 天</strong>内申请，详见"
         '<a href="https://a.cn/r">退款页</a>。</p>'
         "<ul><li>保留小票</li><li>原路退回</li></ul>"
         "<table><tr><th>渠道</th><th>时效</th></tr>"
@@ -537,9 +525,7 @@ async def test_knowledge_html_ingest_is_normalized_to_markdown(
     created = _ok(resp)
     kb_id = created["knowledge_id"]
 
-    detail = _ok(
-        await client.get(f"/api/v1/ai/knowledge/{kb_id}", headers=admin_headers)
-    )
+    detail = _ok(await client.get(f"/api/v1/ai/knowledge/{kb_id}", headers=admin_headers))
     body = detail["content"]
     assert "## 退款说明" in body
     assert "请在**7 天**内申请" in body
@@ -732,9 +718,7 @@ async def test_image_embedding_provider_change_reindexes_images(client, admin_he
         async with get_session_factory()() as s:
             return len(
                 (
-                    await s.scalars(
-                        select(KnowledgeImage).where(KnowledgeImage.knowledge_id == kb)
-                    )
+                    await s.scalars(select(KnowledgeImage).where(KnowledgeImage.knowledge_id == kb))
                 ).all()
             )
 
@@ -789,9 +773,7 @@ async def test_knowledge_status_filter_and_full_rebuild(client, admin_headers):
     # 手动把 DocX 打回 pending，可按 status=pending 只筛出它
     async with get_session_factory()() as s:
         await s.execute(
-            update(KnowledgeDoc)
-            .where(KnowledgeDoc.id == ids[0])
-            .values(status="pending")
+            update(KnowledgeDoc).where(KnowledgeDoc.id == ids[0]).values(status="pending")
         )
         await s.commit()
     items = _ok(
@@ -832,9 +814,7 @@ async def test_knowledge_status_filter_and_full_rebuild(client, admin_headers):
         await client.delete(f"/api/v1/ai/knowledge/{kid}", headers=admin_headers)
 
 
-async def test_mark_docs_for_full_rebuild_sets_failed_without_content(
-    client, admin_headers
-):
+async def test_mark_docs_for_full_rebuild_sets_failed_without_content(client, admin_headers):
     """无原文的老文档无法重建：全库标记时直接置 failed 并写原因。"""
     from app.db import get_session_factory
     from app.models import KnowledgeDoc
@@ -852,9 +832,7 @@ async def test_mark_docs_for_full_rebuild_sets_failed_without_content(
         await s.commit()
     assert affected >= 1
 
-    row = _ok(
-        await client.get(f"/api/v1/ai/knowledge/{doc_id}", headers=admin_headers)
-    )["doc"]
+    row = _ok(await client.get(f"/api/v1/ai/knowledge/{doc_id}", headers=admin_headers))["doc"]
     assert row["status"] == "failed"
     assert "无原文" in (row["reindex_error"] or "")
 
@@ -1040,9 +1018,7 @@ async def test_upload_batch_reports_per_file(client, admin_headers):
     assert "不支持" in bad["error"]
 
     listed = _ok(
-        await client.get(
-            "/api/v1/ai/knowledge", params={"limit": 50}, headers=admin_headers
-        )
+        await client.get("/api/v1/ai/knowledge", params={"limit": 50}, headers=admin_headers)
     )["items"]
     by_title = {i["title"]: i for i in listed}
     # 标题默认取文件名主干，同源重传会覆盖而不是重复
@@ -1155,9 +1131,7 @@ async def test_upload_image_ingests_description_and_saves_file(
     assert body["status"] == "success", body
     kb_id = body["knowledge_id"]
 
-    detail = _ok(
-        await client.get(f"/api/v1/ai/knowledge/{kb_id}", headers=admin_headers)
-    )
+    detail = _ok(await client.get(f"/api/v1/ai/knowledge/{kb_id}", headers=admin_headers))
     assert detail["doc"]["kind"] == "image"
     assert "埃菲尔铁塔" in detail["content"]
     image_ref = detail["doc"]["metadata"]["images"][0]
@@ -1189,9 +1163,7 @@ async def test_parse_docx_full_extracts_text_and_images():
     assert parsed.images[0].ext == "png"
 
 
-async def test_upload_docx_describes_embedded_images(
-    client, admin_headers, monkeypatch, tmp_path
-):
+async def test_upload_docx_describes_embedded_images(client, admin_headers, monkeypatch, tmp_path):
     """文档内嵌图片：抽出→视觉模型描述并入正文，原图落盘、meta.images 存 URL。"""
     import base64
     import io
@@ -1224,8 +1196,7 @@ async def test_upload_docx_describes_embedded_images(
             "file": (
                 "回顾.docx",
                 buf.getvalue(),
-                "application/vnd.openxmlformats-officedocument"
-                ".wordprocessingml.document",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
         },
         data={"title": "季度回顾图文"},
@@ -1245,9 +1216,7 @@ async def test_upload_docx_describes_embedded_images(
     assert (tmp_path / "uploads" / ref.rsplit("/", 1)[-1]).is_file()
 
 
-async def test_upload_pdf_describes_embedded_images(
-    client, admin_headers, monkeypatch, tmp_path
-):
+async def test_upload_pdf_describes_embedded_images(client, admin_headers, monkeypatch, tmp_path):
     """PDF：文字层与内嵌图片一起抽取，图片转描述并入正文、原图落盘存 URL。"""
     import pymupdf
 
@@ -1350,6 +1319,93 @@ async def test_rerank_hits_falls_back_when_unavailable(monkeypatch):
     assert [h[0] for h in out] == ["d1", "d2"]
 
 
+async def test_search_query_dim_mismatch_raises(client, monkeypatch):
+    """查询向量维度与库列不符：直接报错，pgvector / 内存 cosine 两条召回路口径一致。"""
+    from app import db
+    from app.config import get_settings
+    from app.schemas.ai import (
+        EmbeddingItem,
+        EmbeddingRequest,
+        EmbeddingResponse,
+        KnowledgeSearchRequest,
+        Provider,
+    )
+    from app.services import rag
+
+    wanted = get_settings().rag_vector_dim
+
+    class _WrongDimBackend:
+        provider = Provider.MOCK
+
+        async def embeddings(self, req: EmbeddingRequest) -> EmbeddingResponse:
+            return EmbeddingResponse(
+                provider=self.provider,
+                model="wrong-dim",
+                items=[EmbeddingItem(index=0, embedding=[0.0] * (wanted + 1))],
+            )
+
+    monkeypatch.setattr(rag.llm, "get_llm", lambda provider, feature: _WrongDimBackend())
+
+    async with db.session_factory() as session:
+        with pytest.raises(ValueError, match="维度"):
+            await rag.search(session, KnowledgeSearchRequest(query="什么是 RAG？"))
+
+
+async def test_replace_vectors_aborts_when_counts_mismatch(client):
+    """embedding 返回向量数与分片数对不上：删旧分片前就抛错，文档不被削成空壳。"""
+    from sqlalchemy import select
+
+    from app import db
+    from app.config import get_settings
+    from app.models import KnowledgeChunk, KnowledgeDoc
+    from app.schemas.ai import (
+        EmbeddingItem,
+        EmbeddingRequest,
+        EmbeddingResponse,
+        Provider,
+    )
+    from app.services import rag
+
+    dim = get_settings().rag_vector_dim
+    content = "段落正文，足够长以切出多个分片。" * 300
+
+    class _ShortBackend:
+        provider = Provider.MOCK
+
+        async def embeddings(self, req: EmbeddingRequest) -> EmbeddingResponse:
+            assert len(req.input) >= 2, "正文应切出至少两个分片"
+            return EmbeddingResponse(
+                provider=self.provider,
+                model="short",
+                items=[EmbeddingItem(index=0, embedding=[0.0] * dim)],
+            )
+
+    async with db.session_factory() as session:
+        doc = KnowledgeDoc(id="kb-count-check", title="数量校验", content=content)
+        session.add(doc)
+        await session.flush()
+        session.add(
+            KnowledgeChunk(
+                id="kb-count-check-c000",
+                knowledge_id=doc.id,
+                source="数量校验",
+                text="旧分片",
+                vector=[0.0] * dim,
+            )
+        )
+        await session.flush()
+
+        with pytest.raises(ValueError, match="不一致"):
+            await rag.replace_vectors(session, doc, content, backend=_ShortBackend())
+
+        remaining = (
+            await session.scalars(
+                select(KnowledgeChunk).where(KnowledgeChunk.knowledge_id == doc.id)
+            )
+        ).all()
+        assert len(remaining) == 1
+
+
 def test_rrf_fuse_accumulates_shared_chunk_and_prefers_cosine():
     """RRF：两腿都命中的分片累加排第一；展示分优先用向量 cosine。"""
     from app.services import rag
@@ -1362,9 +1418,7 @@ def test_rrf_fuse_accumulates_shared_chunk_and_prefers_cosine():
         ("d1", "S1", "shared text", 0.70),
         ("d3", "S3", "only-lexical", 0.60),
     ]
-    out = rag._rrf_fuse(
-        vector_hits, lexical_hits, k=60, vector_weight=0.5, pool=10
-    )
+    out = rag._rrf_fuse(vector_hits, lexical_hits, k=60, vector_weight=0.5, pool=10)
     ids = [h[0] for h in out]
     # d1 两腿累加→第一；d2/d3 分别只在单腿 rank1→并列，按插入序 d2 在前
     assert ids == ["d1", "d2", "d3"]
@@ -1379,9 +1433,7 @@ def test_rrf_fuse_pool_truncates():
     from app.services import rag
 
     vector_hits = [(f"d{i}", f"S{i}", f"t{i}", 1.0 - i / 10) for i in range(5)]
-    out = rag._rrf_fuse(
-        vector_hits, [], k=60, vector_weight=0.5, pool=2
-    )
+    out = rag._rrf_fuse(vector_hits, [], k=60, vector_weight=0.5, pool=2)
     assert [h[0] for h in out] == ["d0", "d1"]
 
 
@@ -1394,9 +1446,7 @@ def test_rrf_fuse_zero_vector_weight_uses_lexical_only():
         ("d1", "S1", "shared", 0.70),
         ("d3", "S3", "only-lexical", 0.60),
     ]
-    out = rag._rrf_fuse(
-        vector_hits, lexical_hits, k=60, vector_weight=0.0, pool=10
-    )
+    out = rag._rrf_fuse(vector_hits, lexical_hits, k=60, vector_weight=0.0, pool=10)
     assert [h[0] for h in out] == ["d1", "d3"]
 
 
@@ -1417,9 +1467,7 @@ async def test_rag_task_persisted_and_queryable(client, admin_headers):
     async with db.session_factory() as session:
         task_id = await rag_queue.get_queue().enqueue(session, task, sync=True)
     # 查询单个任务状态
-    resp = await client.get(
-        f"/api/v1/ai/knowledge/tasks/{task_id}", headers=admin_headers
-    )
+    resp = await client.get(f"/api/v1/ai/knowledge/tasks/{task_id}", headers=admin_headers)
     assert resp.status_code == 200
     data = _ok(resp)
     assert data["status"] == "success"
@@ -1433,9 +1481,7 @@ async def test_rag_task_persisted_and_queryable(client, admin_headers):
 
 async def test_rag_task_status_404_for_unknown(client, admin_headers):
     """未知 task_id 返回 404。"""
-    resp = await client.get(
-        "/api/v1/ai/knowledge/tasks/rag-nonexistent", headers=admin_headers
-    )
+    resp = await client.get("/api/v1/ai/knowledge/tasks/rag-nonexistent", headers=admin_headers)
     assert resp.status_code == 404
 
 
@@ -1461,9 +1507,7 @@ async def test_rag_task_list_pagination(client, admin_headers):
     assert len(data["items"]) == 5
 
     # offset/limit 生效
-    resp = await client.get(
-        "/api/v1/ai/knowledge/tasks?offset=2&limit=2", headers=admin_headers
-    )
+    resp = await client.get("/api/v1/ai/knowledge/tasks?offset=2&limit=2", headers=admin_headers)
     assert resp.status_code == 200
     data = _ok(resp)
     assert data["total"] == 5
