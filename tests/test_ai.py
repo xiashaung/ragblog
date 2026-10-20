@@ -1334,6 +1334,22 @@ async def test_search_query_dim_mismatch_raises(client, monkeypatch):
 
     wanted = get_settings().rag_vector_dim
 
+    # 库里得真有可检索（indexed）的文档，search 才会走到 embedding 维度校验那一步；
+    # 文档集为空会提前返空结果，不触达查询嵌入。
+    from app.models import KnowledgeDoc
+    from app.schemas.ai import DocStatus
+
+    async with db.session_factory() as session:
+        session.add(
+            KnowledgeDoc(
+                id="kb-dim-check",
+                title="维度校验",
+                content="占位正文",
+                status=DocStatus.INDEXED.value,
+            )
+        )
+        await session.commit()
+
     class _WrongDimBackend:
         provider = Provider.MOCK
 

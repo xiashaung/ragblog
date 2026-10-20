@@ -20,6 +20,7 @@ provider，改用一个 ``status`` 状态机描述它相对当前模型的向量
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import logging
@@ -28,7 +29,7 @@ import re
 import time
 from collections.abc import Sequence
 
-from sqlalchemy import delete, desc, func, or_, select, update
+from sqlalchemy import delete, desc, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import media_gc
@@ -298,13 +299,33 @@ _IMAGE_EXT_MIME = {
 }
 
 
-def _image_embed_source(image_url: str) -> str | None:
+def _media_data_url(rel: str) -> str | None:
+    """相对媒体路径读回磁盘拼 data URL（同步）。
+
+    读文件是阻塞 I/O，由 ``asyncio.to_thread`` 调进来跑，免得重建全库图片时
+    卡事件循环；越界 / 文件不存在返 ``None``。
+    """
+    root = get_settings().media_root.resolve()
+    path = (root / rel).resolve()
+    try:
+        path.relative_to(root)  # 防目录穿越：还原后的路径必须仍在媒体根目录内
+    except ValueError:
+        return None
+    if not path.is_file():
+        return None
+    mime = _IMAGE_EXT_MIME.get(path.suffix.lstrip(".").lower(), "image/png")
+    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+
+async def _image_embed_source(image_url: str) -> str | None:
     """把库里存的图片地址还原成能喂 VL 模型的源（data URL）。
 
     绝对 ``http(s)`` 地址与 ``data:`` URL 原样返回（网关自己能取）；本服务的相对媒体
     地址（``/media/uploads/x.png``）读回磁盘字节拼成 data URL——重建图片向量时手上
     只有当初落库的 URL，没有原始字节，只能这样还原。读不到（文件已删 / 越界）返
     ``None``，调用方据此跳过该图，不把空源喂给模型。
+
+    纯字符串判断不碰盘；命中媒体前缀后才读文件，读盘丢 ``asyncio.to_thread``。
     """
     if not image_url:
         return None
@@ -319,16 +340,7 @@ def _image_embed_source(image_url: str) -> str | None:
     if not image_url.startswith(prefix):
         return None
     rel = image_url[len(prefix) :].lstrip("/")
-    root = settings.media_root.resolve()
-    path = (root / rel).resolve()
-    try:
-        path.relative_to(root)  # 防目录穿越：还原后的路径必须仍在媒体根目录内
-    except ValueError:
-        return None
-    if not path.is_file():
-        return None
-    mime = _IMAGE_EXT_MIME.get(path.suffix.lstrip(".").lower(), "image/png")
-    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+    return await asyncio.to_thread(_media_data_url, rel)
 
 
 def _uses_pgvector(session: AsyncSession) -> bool:
@@ -461,16 +473,19 @@ async def replace_vectors(
         if len(item.embedding) != dim:
             raise _dim_error(backend.provider.value, len(item.embedding), dim)
     await session.execute(delete(KnowledgeChunk).where(KnowledgeChunk.knowledge_id == doc.id))
-    for i, (text, item) in enumerate(zip(chunks, emb_resp.items, strict=True)):
-        session.add(
-            KnowledgeChunk(
-                id=f"{doc.id}-c{i:03d}",
-                knowledge_id=doc.id,
-                source=doc.title,
-                text=text,
-                vector=item.embedding,
-            )
-        )
+    values = [
+        {
+            "id": f"{doc.id}-c{i:03d}",
+            "knowledge_id": doc.id,
+            "source": doc.title,
+            "text": text,
+            "vector": item.embedding,
+        }
+        for i, (text, item) in enumerate(zip(chunks, emb_resp.items, strict=True))
+    ]
+    # 一次多行 INSERT 代替逐条 add：flush 少 N-1 条语句、不占身份映射
+    if values:
+        await session.execute(insert(KnowledgeChunk).values(values))
     doc.status = DocStatus.INDEXED.value
     # 重建成功即抹掉上次的失败原因（若有），避免 failed 残影混在已学习文档上。
     if doc.meta and doc.meta.get("reindex_error"):
@@ -800,9 +815,7 @@ async def mark_docs_for_full_rebuild(session: AsyncSession) -> int:
     """
     now = time.time()
     docs = (await session.scalars(select(KnowledgeDoc))).all()
-    count = 0
     for doc in docs:
-        count += 1
         if doc.content:
             doc.status = DocStatus.PENDING.value
         else:
@@ -812,7 +825,7 @@ async def mark_docs_for_full_rebuild(session: AsyncSession) -> int:
             doc.meta = meta
         doc.updated_at = now
     await session.flush()
-    return count
+    return len(docs)
 
 
 async def reindex_all_docs(session: AsyncSession) -> dict:
@@ -910,7 +923,8 @@ async def _index_images_safe(
     返 ``(写入行数, 错误摘要或 None)``：全部图都回源不到（文件丢失）时静默跳过（重建场景
     常态，不当错误）；但维度不符 / 后端未配等真异常会记一条供后台排障。
     """
-    items = [(url, _image_embed_source(url)) for url in urls]
+    sources = await asyncio.gather(*[_image_embed_source(url) for url in urls])
+    items = list(zip(urls, sources, strict=True))
     if not any(src for _u, src in items):
         return 0, None
     try:
@@ -965,7 +979,8 @@ async def reindex_all_images(session: AsyncSession) -> dict:
             .scalars()
             .all()
         )
-        items = [(url, _image_embed_source(url)) for url in urls]
+        sources = await asyncio.gather(*[_image_embed_source(url) for url in urls])
+        items = list(zip(urls, sources, strict=True))
         try:
             await index_image_vectors(session, doc_id, items, backend=backend)
             await session.commit()
@@ -1020,13 +1035,23 @@ async def _vectorless_chunks(session: AsyncSession) -> int:
 async def knowledge_stats(session: AsyncSession) -> dict:
     """管理页页头的总量统计 + 按向量化状态的分布。
 
-    刻意把全表捞到内存里累加：文档量级在百级，而多表聚合在 SQLite
-    上反而写不出一句兼容两边的 SQL。量大了再改成单条 GROUP BY。
+    文档只投影状态 / 时间戳 / 正文长度（字数由库里 ``length()`` 算，SQLite 与
+    Postgres 口径一致），正文本身不进内存；百级量级足够，量大了再改单条 GROUP BY。
     """
     settings = get_settings()
     default = _default_provider()
-    docs = (await session.scalars(select(KnowledgeDoc))).all()
-    stats = await _chunk_stats(session, [d.id for d in docs])
+    doc_rows = (
+        await session.execute(
+            select(
+                KnowledgeDoc.id,
+                KnowledgeDoc.status,
+                KnowledgeDoc.updated_at,
+                KnowledgeDoc.ingested_at,
+                func.length(KnowledgeDoc.content),
+            )
+        )
+    ).all()
+    stats = await _chunk_stats(session, [doc_id for doc_id, *_ in doc_rows])
 
     by_status: dict[str, tuple[int, int]] = {}
     total_chunks = 0
@@ -1034,20 +1059,20 @@ async def knowledge_stats(session: AsyncSession) -> dict:
     missing_content = 0
     latest = 0.0
     counts = {s.value: 0 for s in DocStatus}
-    for d in docs:
-        chunks, size = stats.get(d.id, (0, 0))
-        chars = len(d.content) if d.content else size
+    for doc_id, status, updated_at, ingested_at, content_len in doc_rows:
+        chunks, size = stats.get(doc_id, (0, 0))
+        chars = content_len if content_len else size
         total_chunks += chunks
         total_chars += chars
-        missing_content += not d.content
-        latest = max(latest, d.updated_at or d.ingested_at or 0.0)
-        status = d.status or DocStatus.PENDING.value
+        missing_content += not content_len
+        latest = max(latest, updated_at or ingested_at or 0.0)
+        status = status or DocStatus.PENDING.value
         counts[status] = counts.get(status, 0) + 1
         count, size_old = by_status.get(status, (0, 0))
         by_status[status] = (count + 1, size_old + chunks)
 
     return {
-        "docs": len(docs),
+        "docs": len(doc_rows),
         "chunks": total_chunks,
         "chars": total_chars,
         "default_provider": default,
@@ -1252,9 +1277,23 @@ async def search(
     两个开关都没开时行为与单段式完全一致。
 
     ``restrict_doc_ids`` 把召回限定在一批文档内（博客前台用它只检已发布文章，
-    不混入其他知识文档）；传空列表直接返空结果，不发 embedding 请求。
+    不混入其他知识文档）；可检索文档集为空（含传空列表）直接返空结果，不发 embedding 请求。
     """
     if restrict_doc_ids is not None and not restrict_doc_ids:
+        return KnowledgeSearchResponse(
+            query=payload.query,
+            provider=_resolved_provider(payload.provider),
+            items=[],
+        )
+
+    # 只检「已学习」（indexed）的文档：它们才是用当前嵌入模型建好、可比的向量；
+    # pending/processing/failed 的向量属于旧模型或尚未建好，搜了也没意义。可检索集
+    # 为空就在此直接返空，省掉一次白付的 embedding 请求。
+    doc_stmt = select(KnowledgeDoc.id).where(KnowledgeDoc.status == DocStatus.INDEXED.value)
+    if restrict_doc_ids is not None:
+        doc_stmt = doc_stmt.where(KnowledgeDoc.id.in_(list(restrict_doc_ids)))
+    doc_ids = (await session.scalars(doc_stmt)).all()
+    if not doc_ids:
         return KnowledgeSearchResponse(
             query=payload.query,
             provider=_resolved_provider(payload.provider),
@@ -1274,15 +1313,6 @@ async def search(
     dim = _vector_dim()
     if len(query_emb) != dim:
         raise _dim_error("查询", len(query_emb), dim)
-
-    # 只检「已学习」（indexed）的文档：它们才是用当前嵌入模型建好、可比的向量；
-    # pending/processing/failed 的向量属于旧模型或尚未建好，搜了也没意义。
-    doc_stmt = select(KnowledgeDoc.id).where(KnowledgeDoc.status == DocStatus.INDEXED.value)
-    if restrict_doc_ids is not None:
-        doc_stmt = doc_stmt.where(KnowledgeDoc.id.in_(list(restrict_doc_ids)))
-    doc_ids = (await session.scalars(doc_stmt)).all()
-    if not doc_ids:
-        return KnowledgeSearchResponse(query=payload.query, provider=provider, items=[])
 
     settings = get_settings()
     on_pg = _uses_pgvector(session)
@@ -1378,6 +1408,21 @@ async def search_images(
     title, score}]``，按分数从高到低。
     """
     if top_k <= 0 or not query.strip():
+        return []
+    # 库里没有可召回的图片向量（无已学习文档 / 向量全空）就提前返空，
+    # 省掉一次白付的 VL embedding 请求。
+    any_image = (
+        await session.execute(
+            select(KnowledgeImage.knowledge_id)
+            .join(KnowledgeDoc, KnowledgeDoc.id == KnowledgeImage.knowledge_id)
+            .where(
+                KnowledgeDoc.status == DocStatus.INDEXED.value,
+                KnowledgeImage.vector.is_not(None),
+            )
+            .limit(1)
+        )
+    ).first()
+    if any_image is None:
         return []
     backend = llm.get_llm(provider, feature="image_embedding")
     # 查询走图片嵌入通道：与图片向量同模型同端点同维度（mock 下也对齐 rag_image_vector_dim）。
