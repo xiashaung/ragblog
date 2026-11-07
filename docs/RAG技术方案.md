@@ -70,7 +70,7 @@ FastAPI 接口层 (app/routers/)
 
 ## 四、建库（录入）流程 —— 内容怎么变成卡片
 
-**四种录入方式，最后都汇到同一个函数 `upsert_document`（rag.py:258）**，殊途同归不会走偏：
+**四种录入方式，最后都汇到同一个函数 `upsert_document`（rag.py:511）**，殊途同归不会走偏：
 
 ```
 上传文件 / 纯文本 / Markdown / HTML 富文本 / 问答对 / 抓网页
@@ -179,7 +179,8 @@ System 提示词（RAG_SYSTEM_PROMPT）要求 AI：
 
 | 接口 | 作用 |
 |------|------|
-| `POST /upload`、`/upload/batch` | 上传文件建库（单个 / 批量 ≤ 20） |
+| `POST /upload`、`/upload/batch` | 上传文件建库（单个 / 批量 ≤ 20 个、总字节 ≤ 60MB）；生产环境落盘后进后台队列，返回 `queued` + `task_id` |
+| `GET /knowledge/tasks`、`/knowledge/tasks/{task_id}` | 轮询后台任务状态（`pending`/`running`/`success`/`failed`） |
 | `POST /upload/image` | 编辑器插图：只落盘返地址，不建文档 |
 | `POST /knowledge/ingest` | 文本录入（`format`：text / markdown / html，html 入库前转 Markdown） |
 | `POST /knowledge/ingest-pairs` | 问答对批量录入 |

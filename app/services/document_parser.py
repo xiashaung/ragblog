@@ -1,7 +1,7 @@
 """RAG 知识录入的文件解析：把各种格式统一成「文本 + 内嵌图片」。
 
 支持：
-- 纯文本（.txt / .md / .csv / .log）
+- 纯文本（.txt / .md / .csv / .log / .html / .htm）
 - PDF（.pdf）：文字用 pdfminer.six，内嵌位图用 PyMuPDF
 - Word（.docx）：段落 + 表格文字与行内图片都用 python-docx
 
@@ -25,6 +25,49 @@ logger = logging.getLogger(__name__)
 # 录入流程能交给视觉模型处理的位图格式；矢量 / 冷门格式（wmf、emf、jpx）直接跳过，
 # 而不是让整次解析失败
 _DOC_IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "bmp", "webp"}
+
+# 文本类扩展名：.html/.htm 的正文由 ``markdown_text.normalize_content`` 转成 Markdown，
+# 解析层只负责把字节解成字符串，所以这里只列出「能读到文本」的格式。
+TEXT_EXTENSIONS = {"txt", "md", "csv", "log", "html", "htm"}
+IMAGE_EXTENSIONS = set(_DOC_IMAGE_EXTS)
+DOCUMENT_EXTENSIONS = {"pdf", "docx"}
+SUPPORTED_EXTENSIONS = TEXT_EXTENSIONS | IMAGE_EXTENSIONS | DOCUMENT_EXTENSIONS
+
+# 文本文件的编码探测顺序：先 BOM/UTF-8，再中文常见的 GB18030（GBK 的超集），
+# 最后 latin-1 兜底——它一定能解，至少不会把整篇变成 U+FFFD 噪声。
+_TEXT_ENCODINGS = ("utf-8-sig", "gb18030", "latin-1")
+
+
+def is_supported(filename: str) -> bool:
+    """这个文件名能不能录入？路由层用它在读字节之前快速拒绝。"""
+    return pathlib.Path(filename).suffix.lstrip(".").lower() in SUPPORTED_EXTENSIONS
+
+
+def unsupported_message(filename: str) -> str:
+    """不支持的扩展名 → 中文报错文案（前端逐条展示）。"""
+    ext = pathlib.Path(filename).suffix.lstrip(".").lower() or "未知"
+    return (
+        f"不支持的文件类型 .{ext}，支持 "
+        + " / ".join(sorted(TEXT_EXTENSIONS))
+        + " / "
+        + " / ".join(sorted(DOCUMENT_EXTENSIONS))
+        + " 与图片 "
+        + " / ".join(sorted(IMAGE_EXTENSIONS))
+    )
+
+
+def _decode_text(data: bytes) -> str:
+    """按常见编码依次试解，绝不静默把中文变成 ``U+FFFD``。
+
+    固定 ``decode("utf-8", errors="replace")`` 会把 GBK/GB18030 存的老文档
+    （中文 Windows 上导出的 txt/csv）整篇变成乱码，正文再长也检索不到内容。
+    """
+    for encoding in _TEXT_ENCODINGS:
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")  # pragma: no cover - latin-1 不会失败
 
 
 @dataclass
@@ -59,9 +102,9 @@ async def parse_document_full(file: IO[bytes], filename: str) -> ParsedDocument:
     """按扩展名分发，把文件解析成「文字 + 内嵌图片」。"""
     ext = pathlib.Path(filename).suffix.lstrip(".").lower()
 
-    # --- 纯文本家族 -----------------------------------------------
-    if ext in {"txt", "md", "csv", "log"}:
-        text = file.read().decode("utf-8", errors="replace")
+    # --- 纯文本家族（含 .html：正文在下游按 HTML 归一化）-----------
+    if ext in TEXT_EXTENSIONS:
+        text = _decode_text(file.read())
         if ext == "csv":
             text = _read_csv(io.StringIO(text))
         return ParsedDocument(text=text)
@@ -74,9 +117,7 @@ async def parse_document_full(file: IO[bytes], filename: str) -> ParsedDocument:
     if ext == "docx":
         return await _parse_docx_full(file)
 
-    raise ValueError(
-        f"不支持的文件类型 .{ext or '未知'}，支持 txt / md / csv / log / pdf / docx"
-    )
+    raise ValueError(unsupported_message(filename))
 
 
 # ------------------------------------------------------------------

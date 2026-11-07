@@ -116,6 +116,8 @@ export interface KnowledgeIngestResult {
   status: KnowledgeDocStatus;
   chunks: number;
   chars: number;
+  /** 异步录入时返回的后台任务 ID；status 为 pending 时靠它轮询终态 */
+  task_id?: string | null;
 }
 
 export interface KnowledgeReindexResult {
@@ -177,11 +179,13 @@ export interface ImageSearchResult {
 }
 
 export interface UploadResult {
-  status: 'success' | 'error';
+  /** 生产模式解析+向量化在后台队列执行，先返回 queued，终态靠 task_id 轮询 */
+  status: 'success' | 'error' | 'queued';
   knowledge_id?: string | null;
   chunks: number;
   chars?: number;
   error?: string | null;
+  task_id?: string | null;
 }
 
 export interface UploadBatchItem extends UploadResult {
@@ -193,6 +197,20 @@ export interface UploadBatchResult {
   total: number;
   succeeded: number;
   failed: number;
+  queued: number;
+}
+
+/** GET /ai/knowledge/tasks/{task_id} —— 后台录入任务的状态 */
+export interface RagTaskStatus {
+  task_id: string;
+  task_type: string;
+  status: 'pending' | 'running' | 'success' | 'failed';
+  knowledge_id?: string | null;
+  result?: Record<string, any> | null;
+  error?: string | null;
+  created_at: number;
+  started_at?: number | null;
+  finished_at?: number | null;
 }
 
 /** 编辑器插图：只落盘返地址，不建文档 */

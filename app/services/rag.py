@@ -497,9 +497,15 @@ async def replace_vectors(
     return len(chunks)
 
 
-def _doc_id_for(title: str) -> str:
-    """标题派生出固定 ID：同标题 = 同 ID，所以重复录入是「替换」而不是堆一份新的。"""
-    return f"kb-{hashlib.md5(title.encode()).hexdigest()[:12]}"
+def _doc_id_for(title: str, *, source_file: str | None = None) -> str:
+    """标题派生出固定 ID：同标题 = 同 ID，所以重复录入是「替换」而不是堆一份新的。
+
+    同名但来源文件不同（上传的 ``notes.txt`` 与 ``notes.md``）时，只看标题会让
+    后者静默覆盖前者；带上 ``source_file`` 后两篇各自独立，重传同一个文件
+    仍然是替换。
+    """
+    seed = title if not source_file else f"{title}\x00{source_file.strip().lower()}"
+    return f"kb-{hashlib.md5(seed.encode()).hexdigest()[:12]}"
 
 
 async def upsert_document(
@@ -526,18 +532,32 @@ async def upsert_document(
         raise ValueError(
             "正文归一化后为空（HTML 里可能只有样式标签），请检查内容或改用 Markdown 录入"
         )
+    limit = get_settings().max_ingest_chars
+    if limit and len(body) > limit:
+        raise ValueError(
+            f"正文过长（归一化后 {len(body)} 字符），单次录入上限 {limit} 字符；"
+            "请拆分文档或调大 APP_MAX_INGEST_CHARS"
+        )
 
     backend = llm.get_llm(provider, feature="embedding")
-    doc_id = _doc_id_for(title)
-
-    existing = await session.get(KnowledgeDoc, doc_id)
-    if existing is not None:
-        await delete_knowledge(session, existing.id)
-
     meta = dict(metadata or {})
     if chunk_size:
         meta["chunk_size"] = chunk_size
     meta.setdefault("format", stored_format(fmt))
+
+    source_file = str(meta.get("source_file") or "").strip()
+    doc_id = _doc_id_for(title)
+    existing = await session.get(KnowledgeDoc, doc_id)
+    if existing is not None and source_file:
+        existing_source = str((existing.meta or {}).get("source_file") or "").strip().lower()
+        # 两边都来自文件且不是同一个文件：两篇同名文档各自独立，不互相覆盖。
+        # 另一篇是手工录入的纯文本（没有 source_file）时沿用「按标题替换」的老语义。
+        if existing_source and existing_source != source_file.lower():
+            doc_id = _doc_id_for(title, source_file=source_file)
+            meta["title_collision"] = existing.id
+            existing = await session.get(KnowledgeDoc, doc_id)
+    if existing is not None:
+        await delete_knowledge(session, existing.id)
     doc = KnowledgeDoc(
         id=doc_id,
         title=title,

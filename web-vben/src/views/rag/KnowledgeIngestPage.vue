@@ -10,7 +10,7 @@
  * 样式全部走 global.css 的 --app-* 变量（明暗两套都能看），只用 #2563eb 这一个品牌色
  * 做「当前方式」的描边；不再往模板里塞内联 style。
  */
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { message } from 'ant-design-vue';
 import {
@@ -24,15 +24,19 @@ import {
 import { ragApi, uploadApi } from '@/api';
 import MarkdownEditor from '@/components/MarkdownEditor.vue';
 import { useBusinessStore } from '@/store/modules/business';
-import type { ContentFormat, KnowledgePair, UploadBatchItem } from '@/typings';
+import type { ContentFormat, KnowledgePair, RagTaskStatus, UploadBatchItem } from '@/typings';
 
 const router = useRouter();
 const business = useBusinessStore();
 
 type AddMode = 'file' | 'text' | 'pairs' | 'url';
 
-const allowedExts = ['pdf', 'docx', 'txt', 'md', 'csv', 'log', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'];
-const supportedFormats = '支持 PDF / DOCX / TXT / MD / CSV / LOG，以及图片 PNG / JPG / GIF / WEBP / BMP';
+const allowedExts = [
+  'pdf', 'docx', 'txt', 'md', 'csv', 'log', 'html', 'htm',
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp',
+];
+const supportedFormats =
+  '支持 PDF / DOCX / TXT / MD / CSV / LOG / HTML，以及图片 PNG / JPG / GIF / WEBP / BMP';
 const MAX_BATCH_FILES = 20;
 
 /** 左侧导航一项 = 图标 + 名称 + 一句话适用场景；hint 是右栏头部的展开说明 */
@@ -47,28 +51,28 @@ const modeItems: {
     value: 'file',
     label: '上传文件',
     desc: '已有文档，批量入库',
-    hint: '多选时逐文件入库，标题取文件名主干（同名覆盖）；.md 文件会按 Markdown 记录格式',
+    hint: '多选时逐文件入库，标题取文件名主干（同名覆盖）；解析与向量化在后台队列执行，页面自动轮询结果',
     icon: FileTextOutlined,
   },
   {
     value: 'text',
     label: '文本录入',
     desc: 'Markdown / 富文本 / 纯文本',
-    hint: '正文只存一种格式：Markdown 源码，或按原样保存的纯文本；HTML 会在入库时转成 Markdown',
+    hint: '正文只存一种格式：Markdown 源码，或按原样保存的纯文本；HTML 会在入库时转成 Markdown；长正文切分与向量化在后台队列执行，页面自动轮询结果',
     icon: AlignLeftOutlined,
   },
   {
     value: 'pairs',
     label: '问答对',
     desc: '客服口径、短条规则',
-    hint: '一批问答对合成一篇 FAQ 文档，分片长度建议 800 以上，让一条问答对尽量落在同一分片里',
+    hint: '一批问答对合成一篇 FAQ 文档，分片长度建议 800 以上，让一条问答对尽量落在同一分片里；入库结果在下方面板轮询',
     icon: QuestionCircleOutlined,
   },
   {
     value: 'url',
     label: 'URL 抓取',
     desc: '在线文档 / 公告页',
-    hint: '后端抓取网页并剔除导航与脚本，只留正文入库；动态渲染或需要登录的页面抓不到内容',
+    hint: '后端抓取网页并剔除导航与脚本，只留正文入库；动态渲染或需要登录的页面抓不到内容；抓取与向量化在后台队列执行，页面自动轮询结果',
     icon: GlobalOutlined,
   },
 ];
@@ -126,7 +130,7 @@ function onModeChange() {
   files.value = [];
   pairs.value = [{ question: '', answer: '' }];
   pairPaste.value = '';
-  batchResults.value = [];
+  clearResults();
 }
 
 function resetAll() {
@@ -163,7 +167,7 @@ function acceptFiles(picked: File[]) {
     message.warning(`一次最多 ${MAX_BATCH_FILES} 个，多余的已忽略`);
   }
   files.value = merged.slice(0, MAX_BATCH_FILES);
-  batchResults.value = [];
+  clearResults();
   // 单文件时允许自定义标题；多选时标题只能取文件名（一个请求对应多个文档）
   if (files.value.length === 1 && !form.title) {
     form.title = files.value[0].name.replace(/\.[^.]+$/, '');
@@ -194,12 +198,12 @@ function onDragLeave(ev: DragEvent) {
 
 function removeFile(index: number) {
   files.value.splice(index, 1);
-  batchResults.value = [];
+  clearResults();
 }
 
 function clearFiles() {
   files.value = [];
-  batchResults.value = [];
+  clearResults();
 }
 
 function fmtSize(bytes: number): string {
@@ -262,13 +266,121 @@ function onApplyPaste() {
 
 /* ---------------- 提交 ---------------- */
 const batchErrors = computed(() => batchResults.value.filter((r) => r.status === 'error'));
+const batchSuccess = computed(() => batchResults.value.filter((r) => r.status === 'success').length);
+const batchQueued = computed(() => batchResults.value.filter((r) => r.status === 'queued').length);
+
+/* ---------------- 后台队列轮询 ----------------
+ * 生产模式上传只落盘 + 登记任务，立即返回 queued；真正的解析与向量化在
+ * worker 里做。页面每 2 秒查一次 task 状态，直到 success / failed。
+ * 轮询有上限（约 4 分钟），超过后不再追问，避免后端挂死时无限请求 —— 行内
+ * 改为「稍后在文档列表查看」，因为任务本身可能还在队列里推进。
+ */
+const POLL_INTERVAL_MS = 2000;
+const MAX_POLL_ATTEMPTS = 120;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+const pollAttempts = new Map<string, number>();
+
+function rowMeta(item: UploadBatchItem): string {
+  if (item.status === 'success') return `${item.chunks || 0} 分片 / ${item.chars || 0} 字`;
+  if (item.status === 'error') return item.error || '未入库';
+  return pollAttempts.get(item.task_id ?? '') >= MAX_POLL_ATTEMPTS
+    ? '仍在后台处理，稍后可在文档列表查看'
+    : '后台解析与向量化中…';
+}
+
+function hasQueued(): boolean {
+  return batchResults.value.some(
+    (r) => r.status === 'queued' && r.task_id && (pollAttempts.get(r.task_id) ?? 0) < MAX_POLL_ATTEMPTS,
+  );
+}
+
+function syncPolling() {
+  if (hasQueued()) {
+    if (!pollTimer) pollTimer = setInterval(() => pollQueued().then(syncPolling), POLL_INTERVAL_MS);
+  } else if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function updateRow(taskId: string, patch: Partial<UploadBatchItem>) {
+  batchResults.value = batchResults.value.map((r) => (r.task_id === taskId ? {...r, ...patch} : r));
+}
+
+async function pollQueued() {
+  for (const row of [...batchResults.value]) {
+    const taskId = row.task_id;
+    if (row.status !== 'queued' || !taskId) continue;
+    const attempts = (pollAttempts.get(taskId) ?? 0) + 1;
+    pollAttempts.set(taskId, attempts);
+    if (attempts > MAX_POLL_ATTEMPTS) continue;
+    let task: RagTaskStatus;
+    try {
+      task = await ragApi.task(taskId);
+    } catch (e: any) {
+      updateRow(taskId, {status: 'error', error: e?.detail || e?.message || '查询后台任务状态失败'});
+      continue;
+    }
+    if (task.status === 'success') {
+      const result = task.result ?? {};
+      const chunks = result.chunks ?? 0;
+      const chars = result.chars ?? 0;
+      updateRow(taskId, {
+        status: 'success',
+        knowledge_id: task.knowledge_id ?? result.knowledge_id ?? null,
+        chunks,
+        chars,
+        error: null,
+      });
+      message.success(`《${row.filename}》已入库，共 ${chunks} 个分片 / ${chars} 字`);
+      business.pollHealth();
+    } else if (task.status === 'failed') {
+      const detail = task.error || '后台处理失败';
+      updateRow(taskId, {status: 'error', error: detail});
+      message.error(`《${row.filename}》未入库：${detail}`);
+    }
+  }
+}
+
+function clearResults() {
+  batchResults.value = [];
+  pollAttempts.clear();
+  syncPolling();
+}
 
 function summarizeBatch(results: UploadBatchItem[]) {
   batchResults.value = results;
-  const ok = results.filter((r) => r.status === 'success');
-  const bad = results.filter((r) => r.status === 'error');
-  if (ok.length) message.success(`已入库 ${ok.length} 个文件`);
-  if (bad.length) message.warning(`${bad.length} 个文件未入库，详见下方列表`);
+  pollAttempts.clear();
+  const ok = results.filter((r) => r.status === 'success').length;
+  const bad = results.filter((r) => r.status === 'error').length;
+  const queued = results.filter((r) => r.status === 'queued').length;
+  if (ok) message.success(`已入库 ${ok} 个文件`);
+  if (queued) message.info(`${queued} 个文件已排队，后台处理中…`);
+  if (bad) message.warning(`${bad} 个文件未入库，详见下方列表`);
+  syncPolling();
+}
+
+/**
+ * 文本 / 问答对 / URL 在生产模式也走后台队列：后端立刻返回 pending + task_id，
+ * 真正的切分与向量化在 worker 里做。这里把这一行写进结果面板，复用轮询。
+ */
+function noteQueued(label: string, taskId: string | null) {
+  if (!taskId) {
+    message.warning('已提交，但后端没有返回任务 ID，请到文档列表确认入库状态');
+    return;
+  }
+  batchResults.value = [{
+    filename: label,
+    status: 'queued',
+    knowledge_id: null,
+    chunks: 0,
+    chars: 0,
+    error: null,
+    task_id: taskId,
+  }];
+  pollAttempts.clear();
+  message.info(`《${label}》已提交，后台切分与向量化中…`);
+  syncPolling();
 }
 
 function goDocs() {
@@ -297,19 +409,33 @@ async function onSubmit() {
     if (mode.value === 'file') {
       if (files.value.length === 1) {
         const only = files.value[0];
-        const res: any = await uploadApi.uploadFile(
+        const data = await uploadApi.uploadFile(
           only,
           title || only.name.replace(/\.[^.]+$/, ''),
           form.chunkSize,
         );
-        const data = (res?.data ?? res) as any;
         if (!data || data.status === 'error') throw new Error(data?.error || '解析入库失败');
+        if (data.status === 'queued') {
+          // 后台队列处理：把这一行留在结果面板，轮询到终态再提示
+          batchResults.value = [{...data, filename: only.name}];
+          pollAttempts.clear();
+          message.info(`《${only.name}》已提交，后台解析与向量化中…`);
+          syncPolling();
+          files.value = [];
+          form.title = '';
+          return;
+        }
         message.success(`已入库，共 ${data.chunks || 0} 个分片 / ${data.chars || 0} 字`);
+        business.pollHealth();
       } else {
         const result = await uploadApi.uploadBatch(files.value, form.chunkSize);
         summarizeBatch(result?.results || []);
         if (result?.succeeded) business.pollHealth();
-        if (!result?.failed) resetAll();
+        // 排队中的文件也算「已接受」，清空选择条但保留结果面板供轮询
+        if (!result?.failed) {
+          files.value = [];
+          form.title = '';
+        }
         return;
       }
     } else if (mode.value === 'text') {
@@ -319,6 +445,12 @@ async function onSubmit() {
         format: form.format,
         chunk_size: form.chunkSize,
       });
+      if (data.task_id) {
+        // 后台队列处理：清空输入、保留结果面板轮询，别报「已入库 0 分片」
+        noteQueued(title, data.task_id);
+        resetAll();
+        return;
+      }
       message.success(`已入库，共 ${data.chunks} 个分片 / ${data.chars} 字`);
     } else if (mode.value === 'pairs') {
       const data = await ragApi.ingestPairs({
@@ -326,17 +458,28 @@ async function onSubmit() {
         pairs: validPairs.value,
         chunk_size: form.chunkSize,
       });
+      if (data.task_id) {
+        noteQueued(title, data.task_id);
+        resetAll();
+        return;
+      }
       message.success(
         `已录入 ${validPairs.value.length} 条问答对，切为 ${data.chunks} 个分片`
           + (droppedPairs.value ? `（${droppedPairs.value} 条不完整已忽略）` : ''),
       );
     } else {
+      const url = form.url.trim();
       const data = await ragApi.fetchUrl({
-        url: form.url.trim(),
+        url,
         title: form.urlTitle.trim() || undefined,
         chunk_size: form.chunkSize,
         max_chars: form.maxChars,
       });
+      if (data.task_id) {
+        noteQueued(data.title || url, data.task_id);
+        resetAll();
+        return;
+      }
       message.success(
         `已抓取《${data.title}》，${data.chars} 字 / ${data.chunks} 个分片`
           + (data.truncated ? '（超长已截断）' : ''),
@@ -352,6 +495,13 @@ async function onSubmit() {
 
 onMounted(() => {
   business.pollHealth();
+});
+
+onUnmounted(() => {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
 });
 </script>
 
@@ -570,29 +720,28 @@ onMounted(() => {
     <!-- ========== 批量结果 ========== -->
     <div v-if="batchResults.length" class="result-panel">
       <div class="result-head">
-        <span class="result-title">批量入库结果</span>
+        <span class="result-title">入库结果</span>
         <span class="result-sum">
-          成功 {{ batchResults.length - batchErrors.length }} / {{ batchResults.length }}
+          成功 {{ batchSuccess }} / {{ batchResults.length }}
+          <template v-if="batchQueued"> · 排队中 {{ batchQueued }}</template>
+          <template v-if="batchErrors.length"> · 失败 {{ batchErrors.length }}</template>
         </span>
-        <a-button type="link" size="small" class="nav-link" @click="batchResults = []">收起</a-button>
+        <a-button type="link" size="small" class="nav-link" @click="clearResults">收起</a-button>
       </div>
       <div
-        v-for="item in batchResults"
-        :key="item.filename"
+        v-for="(item, i) in batchResults"
+        :key="`${item.filename}-${i}`"
         class="result-row"
-        :class="{ 'is-error': item.status === 'error' }"
+        :class="{ 'is-error': item.status === 'error', 'is-queued': item.status === 'queued' }"
       >
-        <a-tag :color="item.status === 'success' ? 'green' : 'red'" class="result-tag">
-          {{ item.status === 'success' ? '成功' : '失败' }}
+        <a-tag
+          :color="item.status === 'success' ? 'green' : item.status === 'queued' ? 'blue' : 'red'"
+          class="result-tag"
+        >
+          {{ item.status === 'success' ? '成功' : item.status === 'queued' ? '排队中' : '失败' }}
         </a-tag>
         <span class="result-name">{{ item.filename }}</span>
-        <span class="result-meta">
-          {{
-            item.status === 'success'
-              ? `${item.chunks} 分片 / ${item.chars} 字`
-              : item.error
-          }}
-        </span>
+        <span class="result-meta">{{ rowMeta(item) }}</span>
       </div>
     </div>
   </div>
@@ -871,6 +1020,7 @@ onMounted(() => {
 }
 .result-row:last-child { border-bottom: none; }
 .result-row.is-error { background: rgba(220, 38, 38, 0.04); }
+.result-row.is-queued { background: rgba(37, 99, 235, 0.05); }
 .result-tag { flex: 0 0 auto; margin: 0; }
 .result-name { flex: 0 0 auto; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-meta { flex: 1 1 auto; font-size: 12px; color: var(--app-muted); word-break: break-all; }

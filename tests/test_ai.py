@@ -1110,15 +1110,15 @@ async def test_upload_image_ingests_description_and_saves_file(
 ):
     """图片上传：视觉模型生成描述入库，原图落盘、meta 只存 URL（非 blob）。"""
     from app.config import get_settings
-    from app.routers import upload as upload_mod
+    from app.services import file_ingest
 
     monkeypatch.setattr(get_settings(), "media_dir", str(tmp_path))
 
-    async def fake_describe(data_url, provider):
+    async def fake_describe(data_url, provider=None):
         assert data_url.startswith("data:image/png;base64,")
         return "这是一张埃菲尔铁塔的照片，背景是蓝天，前景矗立着铁塔的钢架结构。"
 
-    monkeypatch.setattr(upload_mod, "_describe_image", fake_describe)
+    monkeypatch.setattr(file_ingest, "describe_image", fake_describe)
 
     resp = await client.post(
         "/api/v1/upload",
@@ -1171,15 +1171,15 @@ async def test_upload_docx_describes_embedded_images(client, admin_headers, monk
     from docx import Document
 
     from app.config import get_settings
-    from app.routers import upload as upload_mod
+    from app.services import file_ingest
 
     monkeypatch.setattr(get_settings(), "media_dir", str(tmp_path))
 
-    async def fake_describe(data_url, provider):
+    async def fake_describe(data_url, provider=None):
         assert data_url.startswith("data:image/")
         return "这是一张销售趋势折线图，2024 年逐季度稳步上升。"
 
-    monkeypatch.setattr(upload_mod, "_describe_image", fake_describe)
+    monkeypatch.setattr(file_ingest, "describe_image", fake_describe)
 
     png = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -1221,15 +1221,15 @@ async def test_upload_pdf_describes_embedded_images(client, admin_headers, monke
     import pymupdf
 
     from app.config import get_settings
-    from app.routers import upload as upload_mod
+    from app.services import file_ingest
 
     monkeypatch.setattr(get_settings(), "media_dir", str(tmp_path))
 
-    async def fake_describe(data_url, provider):
+    async def fake_describe(data_url, provider=None):
         assert data_url.startswith("data:image/")
         return "图中是一张系统架构图，展示了各模块之间的调用关系。"
 
-    monkeypatch.setattr(upload_mod, "_describe_image", fake_describe)
+    monkeypatch.setattr(file_ingest, "describe_image", fake_describe)
 
     # 100x100 的图才能通过“小图标过滤”（PDF 路径会带真实尺寸）
     pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 100, 100))

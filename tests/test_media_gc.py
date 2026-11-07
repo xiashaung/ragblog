@@ -20,7 +20,7 @@ PNG = b"\x89PNG\r\n\x1a\nfake"
 def media_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """把媒体目录指到 tmp，返回 uploads 路径。"""
     uploads = tmp_path / "media" / "uploads"
-    uploads.mkdir(parents=True)
+    uploads.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(get_settings(), "media_dir", str(tmp_path / "media"))
     return uploads
 
@@ -74,12 +74,12 @@ async def test_delete_doc_releases_image(
     client, admin_headers, media_home, monkeypatch
 ) -> None:
     """图片入库建文档 → 删文档 → 磁盘文件被回收。"""
-    from app.routers import upload as upload_mod
+    from app.services import file_ingest
 
-    async def fake_describe(data_url, provider):
+    async def fake_describe(data_url, provider=None):
         return "图表展示销售趋势，逐季度稳步上升。"
 
-    monkeypatch.setattr(upload_mod, "_describe_image", fake_describe)
+    monkeypatch.setattr(file_ingest, "describe_image", fake_describe)
     resp = await client.post(
         "/api/v1/upload",
         files={"file": ("chart.png", PNG, "image/png")},

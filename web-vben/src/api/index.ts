@@ -37,8 +37,10 @@ import type {
     PermissionDef,
     RoleItem,
     SessionItem,
+    RagTaskStatus,
     UploadBatchResult,
     UploadImageResult,
+    UploadResult,
     WebMode,
 } from '@/typings';
 
@@ -251,6 +253,9 @@ export const ragApi = {
             method: 'post',
             timeout: LLM_TIMEOUT,
         }),
+    // 后台录入任务状态（异步上传后轮询 task_id 直到 success / failed）
+    task: (id: string) =>
+        request<RagTaskStatus>({url: `/ai/knowledge/tasks/${id}`, method: 'get'}),
     search: (data: { query: string; top_k: number }) =>
         request<any>({url: '/ai/knowledge/search', method: 'post', data}),
     // 文搜图：文字查询跨模态召回图片，返回 { query, provider, items: ImageHit[] }
@@ -347,8 +352,10 @@ export const uploadApi = {
         if (chunkSize) {
             formData.append('chunk_size', String(chunkSize));
         }
-        // 走同一个 axios 实例：拦截器已把 envelope.data 平移到 res.data
-        return http.post('/upload', formData, {
+        return request<UploadResult>({
+            url: '/upload',
+            method: 'post',
+            data: formData,
             headers: {'Content-Type': 'multipart/form-data'},
             timeout: LLM_TIMEOUT,
         });

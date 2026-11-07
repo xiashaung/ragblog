@@ -258,6 +258,24 @@ class Settings(BaseSettings):
     # RAG 后台队列的并发 Worker 数。单 Worker 时一个大文档会堵住整条队列；
     # 也不宜过大——向量化是外部 HTTP/本地模型调用，并行太多会打满下游。
     rag_queue_workers: int = 2
+    # 进程重启丢掉内存队列时，是否把库里仍 pending 的任务重新投回队列执行。
+    # 关掉则只告警，由管理员在后台手工重新发起（见 rag_queue._recover_orphans）。
+    rag_queue_requeue_orphans: bool = True
+
+    # --- 文档录入的闸门 ---
+    # 归一化后的正文字符上限：一篇超大文档会把分块与嵌入请求撑到不可控
+    # （几千个分片 = 几百次嵌入调用），超限直接拒录入而不是慢慢跑。
+    max_ingest_chars: int = 1_000_000
+    # 批量上传的总字节上限（单文件仍受上传路由里的 20 MB 上限）：
+    # 20 个 20 MB 的文件 = 400 MB 全量进内存，必须再加一道总闸。
+    upload_batch_max_bytes: int = 60 * 1024 * 1024
+    # 每篇文档最多描述几张内嵌图（每张一次视觉调用）。
+    max_embedded_images: int = 6
+    # 内嵌图低于这个像素数视为装饰图标，跳过（80x80 = 6400）。
+    min_embedded_pixels: int = 6_400
+    # 单篇文档内嵌图「尝试描述」的总次数上限：只数成功次数会让
+    # 图多且每张都失败的文档调模型上百次，把上传时间拉成不可控。
+    max_image_description_attempts: int = 12
 
     # --- RAG 精排（cross-encoder rerank）---
     # 启用后检索变成两段式：向量宽召回 → 调 rerank 模型精排取 top_k。

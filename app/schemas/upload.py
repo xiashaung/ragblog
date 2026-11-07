@@ -33,13 +33,18 @@ class UploadStatusResponse(BaseModel):
 
     status: str = Field(
         ...,
-        description="success 或 error",
-        pattern="^(success|error)$",
+        description=(
+            "success 已入库；error 未入库（原因在 error）；"
+            "queued 已落盘并入后台队列，结果靠 /ai/knowledge/tasks/{task_id} 查"
+        ),
+        pattern="^(success|error|queued)$",
     )
     knowledge_id: str | None = None
     chunks: int = 0
     chars: int = 0
     error: str | None = None
+    # queued 时给后台任务 id，前端轮询用；其他状态为 None
+    task_id: str | None = None
 
 
 class UploadBatchItem(UploadStatusResponse):
@@ -55,3 +60,5 @@ class UploadBatchResponse(BaseModel):
     total: int = 0
     succeeded: int = 0
     failed: int = 0
+    # 走后台队列的文件数（生产模式）；同步执行时为 0
+    queued: int = 0

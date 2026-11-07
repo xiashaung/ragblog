@@ -9,7 +9,9 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app import db
+from app import main as app_main
 from app.config import Settings
+from app.config import get_settings as config_get_settings
 from app.routers import admin as admin_router
 from app.services import (
     admin_service,
@@ -76,6 +78,12 @@ async def client(
     - Test mode: synchronous RAG queue execution for backward compatibility.
     """
     test_settings = _mock_settings()
+    # 媒体目录指向临时目录：上传件落盘不该污染仓库的 media/uploads，每个用例
+    # 也从空目录开始。路由层读的是 get_settings() 的缓存单例，所以两边都指到
+    # 同一个 tmp 目录，磁盘断言才不会互相串门。
+    media_home = str(tmp_path / "media")
+    test_settings.media_dir = media_home
+    monkeypatch.setattr(config_get_settings(), "media_dir", media_home)
 
     monkeypatch.setattr(llm, "get_settings", lambda: test_settings)
     monkeypatch.setattr(admin_service, "get_settings", lambda: test_settings)
@@ -84,6 +92,9 @@ async def client(
     # 会把本机 .env 里的默认 provider（如 mlx）写进测试库，改变实际选用的模型。
     monkeypatch.setattr(system_config_service, "get_settings", lambda: test_settings)
     monkeypatch.setattr(provider_store, "get_settings", lambda: test_settings)
+    # create_app() 自身也读 settings：不 patch 这里的话，debug 开关取自本机
+    # .env（生产默认 False），示例 users/items 路由就不会挂载，相关测试 404。
+    monkeypatch.setattr(app_main, "get_settings", lambda: test_settings)
     llm.reset_registry()
     
     # 测试模式：路由层的 RAG 写入走同步执行（见 ai._sync_mode），不依赖后台消费；

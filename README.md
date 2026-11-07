@@ -202,7 +202,9 @@ APP_LLM_QWEN_API_KEY=sk-xxx
   Referrer-Policy，HTTPS 下加 HSTS）。
 - **SSRF 闸门**：URL 录入与 `fetch_page` 工具共用一道闸：只放 http(s)，
   DNS 解析后验 IP，重定向逐跳复检，内网/元数据地址请求根本不会发出。
-- **上传上限**：单文档 20MB（分块读、超限即中止）、单图 5MB、批量一次≤20 件。
+- **上传上限**：单文档 20MB（分块读、超限即中止）、单图 5MB、批量一次 ≤20 件且
+  总字节 ≤60MB；归一化后正文超过 100 万字符直接拒录入（不静默截断）；文档内嵌图
+  最多描述 6 张、小于 6400 像素的跳过，单篇描述尝试总次数上限 12 次。
 - **LLM 容错**：超时/断连/429/5xx 指数退避重试（SDK 内置重试已关，单层）；
   非流式对话主端打穿后可降级到备胎 provider；流式/嵌入不降级（语义上不能换）。
 
@@ -288,6 +290,7 @@ POST /api/v1/admin/login  {username, password}
 | POST | /api/v1/ai/knowledge/ingest、/ingest-pairs、/fetch-url | `knowledge:manage` |
 | PATCH / DELETE | /api/v1/ai/knowledge/{id}、/batch-delete、/reindex | `knowledge:manage` |
 | POST | /api/v1/upload、/upload/batch、/upload/image | `knowledge:manage` |
+| GET | /api/v1/ai/knowledge/tasks、/api/v1/ai/knowledge/tasks/{id} | `knowledge:read` |
 | GET | /api/v1/system/config/*（各类 GET） | `system:read` |
 | PATCH / POST / DELETE | /api/v1/system/config/*（写） | `system:manage` |
 | GET | /api/v1/admin/data-sources | `datasource:read` |
@@ -373,9 +376,12 @@ python -m app.bootstrap seed --username admin --password 'xxx'
 | POST | /api/v1/ai/knowledge/ingest | RAG：录入文本（`format`: text/markdown/html，自动分块 + 向量化） |
 | POST | /api/v1/ai/knowledge/ingest-pairs | RAG：录入一批问答对（合为一篇 FAQ） |
 | POST | /api/v1/ai/knowledge/fetch-url | RAG：抓取网页正文后入库 |
-| POST | /api/v1/upload | RAG：单文件入库（pdf/docx/txt/md/csv/log） |
-| POST | /api/v1/upload/batch | RAG：批量文件入库（≤20 个，逐文件返回成败） |
+| POST | /api/v1/upload | RAG：单文件入库（pdf/docx/txt/md/csv/log/html）；生产环境落盘后进后台队列，返回 `queued` + `task_id` |
+| POST | /api/v1/upload/batch | RAG：批量文件入库（≤20 个、总字节 ≤60MB，逐文件返回 `queued` 或成败） |
+| POST | /api/v1/ingest-text | RAG：旧版纯文本录入入口，同样走后台队列（生产返回 `pending` + `task_id`） |
 | POST | /api/v1/upload/image | 编辑器插图：只落盘拿 `/media/uploads/...` 地址，不建文档 |
+| GET | /api/v1/ai/knowledge/tasks | RAG：后台任务列表（分页，按创建时间倒序） |
+| GET | /api/v1/ai/knowledge/tasks/{task_id} | RAG：单个任务状态（`pending`/`running`/`success`/`failed`），不存在返 404 |
 | GET | /api/v1/ai/knowledge | RAG：文档列表（关键字 / provider / 仅待重建 / 分页） |
 | GET | /api/v1/ai/knowledge/stats | RAG：文档·分片·字符统计与 provider 明细 |
 | GET | /api/v1/ai/knowledge/{id} | RAG：文档详情（原文 + 分片） |

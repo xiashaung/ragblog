@@ -153,7 +153,9 @@ class RagTaskRow(Base):
 
     行由入队时的请求会话落库（与队列无关，先 commit），Worker 只负责推进
     ``status``：pending → running → success / failed。进程重启会丢掉内存队列，
-    存量 pending 不会自动重新执行（避免半截任务重复跑），由启动日志告警提示。
+    存量 pending 会在启动时重新入队（``rag_queue._recover_orphans``），状态检查
+    保证同一行只执行一次；把 ``APP_RAG_QUEUE_REQUEUE_ORPHANS`` 设为 false 时
+    退回「只告警、由管理员手工重发」。
     """
 
     __tablename__ = "rag_tasks"

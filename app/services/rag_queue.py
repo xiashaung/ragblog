@@ -9,18 +9,21 @@
    ``success`` / ``failed``，结果与失败原因都写回同一行。
 
 内存队列丢了（进程重启）不会丢任务登记：存量 ``pending`` 会在启动日志里告警，
-但不自动重跑——半截任务（如已删旧分片未写新分片）重复执行比丢任务更糟，
-交由管理员在后台确认后重新发起。
+存量 ``pending`` 会自动重新入队（``APP_RAG_QUEUE_REQUEUE_ORPHANS=false`` 时只告警）。
+重投递是安全的：Worker 用条件更新 ``pending → running`` 抢行，同一行投两次只有
+第一次能执行；半截任务（如已删旧分片未写新分片）重建索引本身是幂等的。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -37,7 +40,7 @@ from ..schemas.ai import (
     KnowledgeIngestRequest,
     KnowledgePairsIngestRequest,
 )
-from . import rag
+from . import file_ingest, rag
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +57,7 @@ class TaskType(str, Enum):
     INGEST = "ingest"  # 文档入库
     INGEST_PAIRS = "ingest_pairs"  # 问答对入库
     INGEST_URL = "ingest_url"  # URL 抓取入库
+    UPLOAD = "upload"  # 上传文件：原件已落盘，解析与向量化在 Worker 里做
     UPDATE = "update"  # 更新文档（含重建）
     REINDEX = "reindex"  # 单文档重建索引
     REINDEX_ALL = "reindex_all"  # 换嵌入模型后全库强制重建
@@ -104,25 +108,36 @@ class RAGQueue:
             asyncio.create_task(self._worker_loop(i)) for i in range(n)
         ]
         logger.info("RAG 队列 Worker 已启动（并发 %d）", n)
-        await self._warn_orphans()
+        await self._recover_orphans()
 
-    async def _warn_orphans(self) -> None:
-        """登记仍在 pending 的遗留任务（进程重启丢队列），提示人工处理。"""
+    async def _recover_orphans(self) -> None:
+        """把重启遗留的 pending 任务重新投回内存队列（默认开启）。"""
         try:
             async with db.get_session_factory()() as session:
                 rows = (
                     await session.scalars(
-                        select(RagTaskRow).where(RagTaskRow.status == PENDING)
+                        select(RagTaskRow)
+                        .where(RagTaskRow.status == PENDING)
+                        .order_by(RagTaskRow.created_at)
                     )
                 ).all()
-            if rows:
+            if not rows:
+                return
+            if not get_settings().rag_queue_requeue_orphans:
                 logger.warning(
                     "发现 %d 个未执行的遗留 RAG 任务（进程重启丢队列），"
-                    "请在后台确认后重新发起对应操作",
+                    "按配置不自动重跑，请在后台确认后重新发起对应操作",
                     len(rows),
                 )
-        except Exception:  # noqa: BLE001 - 告警失败不影响启动
-            logger.exception("检查遗留 RAG 任务失败")
+                return
+            for row in rows:
+                await self._queue.put(row.id)
+            logger.info(
+                "重启遗留的 %d 个 pending RAG 任务已重新入队（进程重启丢内存队列）",
+                len(rows),
+            )
+        except Exception:  # noqa: BLE001 - 恢复失败不影响启动
+            logger.exception("恢复遗留 RAG 任务失败")
 
     async def stop(self) -> None:
         """停止队列：按 Worker 数投退出哨兵，等全部收尾。"""
@@ -216,6 +231,7 @@ class RAGQueue:
             TaskType.INGEST.value: self._do_ingest,
             TaskType.INGEST_PAIRS.value: self._do_ingest_pairs,
             TaskType.INGEST_URL.value: self._do_ingest_url,
+            TaskType.UPLOAD.value: self._do_upload,
             TaskType.UPDATE.value: self._do_update,
             TaskType.REINDEX.value: self._do_reindex,
             TaskType.REINDEX_ALL.value: self._do_reindex_all,
@@ -235,6 +251,46 @@ class RAGQueue:
             "status": result.status,
             "chunks": result.chunks,
             "chars": result.chars,
+        }
+
+    async def _do_upload(self, session: AsyncSession, payload: dict) -> dict:
+        """执行后台上传：读落盘的原件 → 解析/描述图片 → 分块向量化 → 入库。
+
+        HTTP 请求只把字节存进 ``media/uploads/`` 并登记任务，原件读完即删 —— 它
+        不属于任何文档，媒体回收器也查不到它，靠这里删才不会堆积。
+        """
+        settings = get_settings()
+        uploads_root = (Path(settings.media_root) / "uploads").resolve()
+        raw_path = str(payload.get("media_path") or "")
+        # payload 存的是相对于媒体根目录的路径（``uploads/<uuid>.<ext>``）
+        path = (Path(settings.media_root) / raw_path).resolve()
+        # 只允许 uploads 目录内的文件：payload 来自数据库，不能拼出路径穿越
+        if not path.is_relative_to(uploads_root):
+            raise ValueError(f"上传文件路径非法：{raw_path}")
+        if not path.is_file():
+            raise ValueError("上传文件已丢失，请重新上传")
+        try:
+            raw = path.read_bytes()
+        finally:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:  # 删不掉只记日志，不能让任务因此失败
+                logger.warning("删除上传原件失败 %s：%s", path, exc)
+
+        knowledge_id, chunks, chars = await file_ingest.parse_and_ingest(
+            session,
+            raw=raw,
+            filename=str(payload.get("filename") or path.name),
+            title=payload.get("title"),
+            provider=payload.get("provider"),
+            chunk_size=payload.get("chunk_size"),
+        )
+        return {
+            "knowledge_id": knowledge_id,
+            "status": "success",
+            "chunks": chunks,
+            "chars": chars,
+            "filename": str(payload.get("filename") or path.name),
         }
 
     async def _do_ingest_pairs(self, session: AsyncSession, payload: dict) -> dict:
@@ -315,6 +371,9 @@ class RAGQueue:
             await session.commit()
             await self._run_task(task.id)
         else:
+            # Worker 用的是**独立会话**：任务行必须先 commit，否则另一连接读不到，
+            # _mark_running 抢不到 → 任务永远停在 pending，录入与上传全部哑火
+            await session.commit()
             await self._queue.put(task.id)
             logger.info("RAG 任务已入队：%s (%s)", task.task_type.value, task.id)
         return task.id
@@ -335,6 +394,16 @@ class RAGQueue:
 async def get_task(session: AsyncSession, task_id: str) -> RagTaskRow | None:
     """按 id 查任务登记行（状态端点用）。"""
     return await session.get(RagTaskRow, task_id)
+
+
+def sync_mode() -> bool:
+    """录入类接口是否同步执行（测试模式）。
+
+    生产走后台队列（立即返回 task_id，处理异步做），但测试要拿到 chunks /
+    title 这些真实结果，所以 ``APP_TEST_MODE=true`` 时直接调用服务层，用请求
+    自己的会话把数据落库。
+    """
+    return os.environ.get("APP_TEST_MODE", "false").lower() == "true"
 
 
 def to_status(row: RagTaskRow) -> dict[str, Any]:

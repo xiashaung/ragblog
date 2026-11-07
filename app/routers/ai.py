@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 import uuid
 
@@ -102,12 +101,11 @@ def _enforce_admin_ai_limit(admin_id: str) -> None:
 def _sync_mode() -> bool:
     """录入类接口是否在测试里同步执行。
 
-    生产走后台队列（立即返回 task_id，实际处理异步做），但测试要拿到
-    chunks / title 这些真实结果，所以 ``APP_TEST_MODE=true`` 时直接调用服务层，
-    用请求自己的会话把数据落库。抛出的 ``ValueError`` 由全局处理器转成 400，
+    判断逻辑在 ``services.rag_queue.sync_mode`` —— 上传路由也要用同一个口径，
+    两处各自读环境变量会漂移。抛出的 ``ValueError`` 由全局处理器转成 400，
     中文原因原样透出。
     """
-    return os.environ.get("APP_TEST_MODE", "false").lower() == "true"
+    return services.rag_queue.sync_mode()
 
 
 @router.get("/providers", response_model=list[dict])

@@ -9,6 +9,8 @@
 - ``chat_tools``     — 给对话模型挂的联网工具与「生成→工具→再生成」循环
 - ``datasource``     — 外部数据源登记 / 掩码 / 连通性测试（问数可选目标库）
 - ``document_parser``— 录入前的文件解析：各种格式统一成「文本 + 内嵌图片」
+ - ``document_parser``— 录入前的文件解析：各种格式统一成「文本 + 内嵌图片」
+ - ``file_ingest``     — 文件录入的共用实现：解析 → 图片描述 → 分块向量化 → 入库
 - ``item_service``   — items 表的异步仓库（示例业务数据）
 - ``llm``            — LLM 网关：provider 注册表（OpenAI 兼容系与 mock）
 - ``markdown_text``  — 录入正文的格式归一化：HTML 富文本压成 Markdown 源码
@@ -36,6 +38,7 @@ from . import (
     chat_tools,
     datasource,
     document_parser,
+    file_ingest,
     item_service,
     llm,
     markdown_text,
@@ -57,6 +60,7 @@ __all__ = [
     "chat_tools",
     "datasource",
     "document_parser",
+    "file_ingest",
     "item_service",
     "llm",
     "markdown_text",

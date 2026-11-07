@@ -10,6 +10,8 @@ URL。此前全项目没有任何一处会删文件——删文档、删文章�
   （挡掉 ``..`` 路径穿越）；外链、其它前缀一概忽略。
 - 删前全库复查引用：知识文档 ``metadata``（含 images/embedded 落库的 URL）、
   博客正文 markdown 图片语法、封面列。任何一行还引用着就不动。
+ - 后台队列里 pending/running 的上传任务：原件已落盘、文档还没建成，这类文件
+   此刻同样不能删（见 :func:`_pending_upload_tasks`）。
 - 「先提交数据库改动，再调本模块」是调用方的义务：复查跑在同一个 session 上，
   flush 之后被删的行才不会再命中自己。
 """
@@ -76,6 +78,33 @@ async def _still_referenced(session: AsyncSession, url: str) -> bool:
     return post.first() is not None
 
 
+async def _pending_upload_tasks(session: AsyncSession, url: str) -> bool:
+    """有没有 pending/running 的上传任务还在等这个落盘文件？
+
+    异步上传的原件先写进 ``uploads/``，Worker 处理完才删。此刻它不属于任何
+    文档，回收器若把它删了，任务只能报「上传文件已丢失」。payload 存的是
+    相对路径（``uploads/<uuid>.ext``），所以按文件名匹配，两种写法都能命中。
+    """
+    from .models import RagTaskRow  # 延迟导入：rag_queue → file_ingest → media_gc
+    from .services.rag_queue import PENDING, RUNNING
+
+    name = url.rsplit("/", 1)[-1]
+    row = await session.execute(
+        select(RagTaskRow.id)
+        .where(
+            RagTaskRow.status.in_((PENDING, RUNNING)),
+            cast(RagTaskRow.payload, Text).like(f"%{name}%"),
+        )
+        .limit(1)
+    )
+    return row.first() is not None
+
+
+async def is_referenced(session: AsyncSession, url: str) -> bool:
+    """回收前的判定：文档/文章引用它，或后台上传任务还在等它。"""
+    return await _still_referenced(session, url) or await _pending_upload_tasks(session, url)
+
+
 async def release_urls(session: AsyncSession, urls: Iterable[str]) -> int:
     """删掉「本会话已提交改动后不再被任何行引用」的文件，返删除数。
 
@@ -87,7 +116,7 @@ async def release_urls(session: AsyncSession, urls: Iterable[str]) -> int:
         path = url_to_path(url)
         if path is None or not path.exists():
             continue
-        if await _still_referenced(session, url):
+        if await is_referenced(session, url):
             continue
         try:
             path.unlink()
@@ -123,7 +152,7 @@ async def sweep_orphans(session: AsyncSession, *, grace_seconds: float = 3600.0)
             if path.stat().st_mtime > deadline:
                 kept += 1  # 太新：可能在编辑流程里，不碰
                 continue
-            if await _still_referenced(session, f"{prefix}{path.name}"):
+            if await is_referenced(session, f"{prefix}{path.name}"):
                 kept += 1
                 continue
             try:
